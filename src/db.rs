@@ -38,6 +38,13 @@ mod tests {
     #[tokio::test]
     async fn migration_creates_core_tables_and_relationship_constraints() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
+        let migration_versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(migration_versions, vec![1, 2, 3, 4, 5, 6]);
+
         let tables: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'passkeys', 'groups', 'oidc_clients', 'authorization_codes', 'webauthn_ceremonies', 'signing_keys')",
         )
@@ -60,5 +67,34 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(hanko_style_columns, 4);
+
+        let mainline_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('client_users', 'invitation_links')",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(mainline_tables, 2);
+
+        let auth_method_column: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('oidc_clients') WHERE name = 'token_endpoint_auth_method'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(auth_method_column, 1);
+
+        for table in ["authorization_requests", "authorization_codes"] {
+            let challenge_required: i64 = sqlx::query_scalar(&format!(
+                "SELECT \"notnull\" FROM pragma_table_info('{table}') WHERE name = 'code_challenge'"
+            ))
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                challenge_required, 0,
+                "{table}.code_challenge must be optional"
+            );
+        }
     }
 }

@@ -15,6 +15,7 @@ type Client = {
   client_id: string;
   name: string;
   client_type: "public" | "confidential";
+  token_endpoint_auth_method: "none" | "client_secret_post";
   enabled: boolean;
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
@@ -36,6 +37,7 @@ type CreatedClient = {
   client_secret: string | null;
   name: string;
   client_type: "public" | "confidential";
+  token_endpoint_auth_method: "none" | "client_secret_post";
   scopes: Scope[];
 };
 type RegistrationStart = {
@@ -265,7 +267,10 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       const payload = {
         name: name.trim(),
         ...(clientFormMode === "create"
-          ? { client_type: clientType }
+          ? {
+              client_type: clientType,
+              token_endpoint_auth_method: clientType === "public" ? "none" : "client_secret_post",
+            }
           : { enabled: clientEnabled }),
         redirect_uris: redirects,
         post_logout_redirect_uris: splitLines(logoutUris),
@@ -551,7 +556,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         : clients.map((client) => <article className="registered-client" key={client.client_id}>
           <div className="registered-client-title"><h3>{client.name}</h3><span className={client.enabled ? "client-status" : "client-status disabled"}>{client.enabled ? "Enabled" : "Disabled"}</span><span className="client-user-count">{client.user_count ?? 0} {(client.user_count ?? 0) === 1 ? "user" : "users"}</span></div>
           <code className="registered-client-id">{client.client_id}</code>
-          <p>{client.client_type === "public" ? "Public client" : "Confidential client"} · {client.scopes.join(", ")} · users who have signed in</p>
+          <p>{client.client_type === "public" ? "Public client" : "Confidential client"} · {client.token_endpoint_auth_method} · {client.scopes.join(", ")} · users who have signed in</p>
           <details><summary>Redirect URLs and access</summary>
             <ul>{client.redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul>
             {client.post_logout_redirect_uris.length > 0 && <><strong>Post-logout URLs</strong><ul>{client.post_logout_redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul></>}
@@ -569,7 +574,9 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       <div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Client created</h2><p>Save these credentials in the application.</p></div></div>
       <Credential label="Client ID" value={created.client_id} copied={copied === "id"} onCopy={() => copyValue("id", created.client_id)} />
       {created.client_secret && <Credential label="Client secret · shown once" value={created.client_secret} copied={copied === "secret"} onCopy={() => copyValue("secret", created.client_secret!)} />}
-      <p className="created-footnote">The client secret cannot be viewed again after you leave this screen.</p>
+      <p className="created-footnote">{created.client_secret
+        ? "The client secret cannot be viewed again after you leave this screen."
+        : "This client has no client secret and must use PKCE S256."}</p>
     </section>}
 
     {clientFormMode !== null && <section ref={clientEditorRef} className="client-editor-panel" aria-labelledby="client-form-title">
@@ -582,7 +589,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
             <option value="public">Public · PKCE</option>
             <option value="confidential">Confidential · client secret</option>
           </select>
-          <small>{clientType === "public" ? "For browser and native apps. PKCE is required." : "For server-side apps that can keep a secret safely."}</small>
+          <small>{clientType === "public" ? "Uses no client secret. PKCE S256 is required." : "Uses client_secret_post at the token endpoint. PKCE is optional, and may be used with the secret."}</small>
         </label>}
         {clientFormMode === "edit" && <label className="admin-check client-enabled-check"><input type="checkbox" checked={clientEnabled} onChange={(event) => setClientEnabled(event.target.checked)} /><span><strong>Client enabled</strong><small>Disabled clients can no longer sign users in.</small></span></label>}
         <label className="admin-field"><span>Callback URLs</span><textarea value={redirectUris} onChange={(event) => setRedirectUris(event.target.value)} placeholder="https://app.example.com/oidc/callback" rows={2} required /><small>One exact URL per line. HTTPS is required except for localhost development.</small></label>

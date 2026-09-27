@@ -50,6 +50,8 @@ struct CreateGroup {
 struct CreateClient {
     name: String,
     client_type: String,
+    #[serde(default)]
+    token_endpoint_auth_method: Option<String>,
     redirect_uris: Vec<String>,
     #[serde(default)]
     post_logout_redirect_uris: Vec<String>,
@@ -215,7 +217,9 @@ async fn create_invitation(
         return Err(AdminError::bad_request("invalid invitation label"));
     }
     if !(1..=500).contains(&input.max_uses) {
-        return Err(AdminError::bad_request("user limit must be between 1 and 500"));
+        return Err(AdminError::bad_request(
+            "user limit must be between 1 and 500",
+        ));
     }
     let unit_seconds = match input.expires_unit.as_str() {
         "seconds" => 1,
@@ -254,11 +258,12 @@ async fn create_invitation(
         .await
         .map_err(|_| AdminError::internal())?;
     if let Some(email) = email {
-        let already_used: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE email = ?)")
-            .bind(email)
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(|_| AdminError::internal())?;
+        let already_used: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE email = ?)")
+                .bind(email)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| AdminError::internal())?;
         if already_used {
             return Err(AdminError::conflict("email already belongs to an account"));
         }
@@ -308,14 +313,18 @@ async fn revoke_invitation(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AdminError> {
     let _admin = require_admin(&state, &headers, true).await?;
-    let result = sqlx::query("UPDATE invitation_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
-        .bind(unix_now())
-        .bind(id)
-        .execute(&state.database.pool)
-        .await
-        .map_err(|_| AdminError::internal())?;
+    let result = sqlx::query(
+        "UPDATE invitation_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+    )
+    .bind(unix_now())
+    .bind(id)
+    .execute(&state.database.pool)
+    .await
+    .map_err(|_| AdminError::internal())?;
     if result.rows_affected() == 0 {
-        return Err(AdminError::conflict("invitation is already revoked or unavailable"));
+        return Err(AdminError::conflict(
+            "invitation is already revoked or unavailable",
+        ));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -380,7 +389,7 @@ async fn list_clients(
 ) -> Result<Json<Value>, AdminError> {
     let _admin = require_admin(&state, &headers, false).await?;
     let rows =
-        sqlx::query("SELECT client_id, name, client_type, enabled FROM oidc_clients ORDER BY name")
+        sqlx::query("SELECT client_id, name, client_type, token_endpoint_auth_method, enabled FROM oidc_clients ORDER BY name")
             .fetch_all(&state.database.pool)
             .await
             .map_err(|_| AdminError::internal())?;
@@ -437,6 +446,7 @@ async fn list_clients(
             "client_id": client_id,
             "name": row.try_get::<String, _>("name").map_err(|_| AdminError::internal())?,
             "client_type": row.try_get::<String, _>("client_type").map_err(|_| AdminError::internal())?,
+            "token_endpoint_auth_method": row.try_get::<String, _>("token_endpoint_auth_method").map_err(|_| AdminError::internal())?,
             "enabled": row.try_get::<bool, _>("enabled").map_err(|_| AdminError::internal())?,
             "redirect_uris": redirects,
             "post_logout_redirect_uris": post_logout_redirect_uris,
@@ -461,6 +471,20 @@ async fn create_client(
     }
     if !matches!(input.client_type.as_str(), "public" | "confidential") {
         return Err(AdminError::bad_request("invalid client type"));
+    }
+    let expected_auth_method = match input.client_type.as_str() {
+        "public" => "none",
+        "confidential" => "client_secret_post",
+        _ => unreachable!(),
+    };
+    let auth_method = input
+        .token_endpoint_auth_method
+        .as_deref()
+        .unwrap_or(expected_auth_method);
+    if auth_method != expected_auth_method {
+        return Err(AdminError::bad_request(
+            "client authentication method does not match client type",
+        ));
     }
     if input.redirect_uris.is_empty() || input.redirect_uris.len() > 50 {
         return Err(AdminError::bad_request(
@@ -506,10 +530,11 @@ async fn create_client(
     let secret_hash = secret
         .as_deref()
         .map(|value| URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes())));
-    sqlx::query("INSERT INTO oidc_clients (client_id, client_secret_hash, client_type, name, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)")
+    sqlx::query("INSERT INTO oidc_clients (client_id, client_secret_hash, client_type, token_endpoint_auth_method, name, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)")
         .bind(&client_id)
         .bind(secret_hash)
         .bind(&input.client_type)
+        .bind(auth_method)
         .bind(name)
         .bind(unix_now())
         .execute(&mut *transaction)
@@ -587,6 +612,7 @@ async fn create_client(
         "client_secret": secret,
         "name": name,
         "client_type": input.client_type,
+        "token_endpoint_auth_method": auth_method,
         "scopes": scopes,
     })))
 }
@@ -837,8 +863,8 @@ async fn consume_invitation(
         let group_json: String = invitation
             .try_get("group_names")
             .map_err(|_| AdminError::internal())?;
-        let groups: Vec<String> = serde_json::from_str(&group_json)
-            .map_err(|_| AdminError::internal())?;
+        let groups: Vec<String> =
+            serde_json::from_str(&group_json).map_err(|_| AdminError::internal())?;
 
         let user_id = Uuid::new_v4().to_string();
         let username = format!("user-{}", Uuid::new_v4().simple());
@@ -859,19 +885,22 @@ async fn consume_invitation(
             })?;
 
         for group in groups {
-            let group_id: Option<String> = sqlx::query_scalar("SELECT id FROM groups WHERE name = ?")
-                .bind(group)
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(|_| AdminError::internal())?;
-            if let Some(group_id) = group_id {
-                sqlx::query("INSERT INTO user_groups (user_id, group_id, created_at) VALUES (?, ?, ?)")
-                    .bind(&user_id)
-                    .bind(group_id)
-                    .bind(now)
-                    .execute(&mut *transaction)
+            let group_id: Option<String> =
+                sqlx::query_scalar("SELECT id FROM groups WHERE name = ?")
+                    .bind(group)
+                    .fetch_optional(&mut *transaction)
                     .await
                     .map_err(|_| AdminError::internal())?;
+            if let Some(group_id) = group_id {
+                sqlx::query(
+                    "INSERT INTO user_groups (user_id, group_id, created_at) VALUES (?, ?, ?)",
+                )
+                .bind(&user_id)
+                .bind(group_id)
+                .bind(now)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| AdminError::internal())?;
             }
         }
         transaction
