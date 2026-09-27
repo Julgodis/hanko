@@ -1251,13 +1251,21 @@ async fn validate_authorize_request(
             "required authorization parameters are invalid",
         ));
     }
-    let client =
-        sqlx::query("SELECT client_type FROM oidc_clients WHERE client_id = ? AND enabled = 1")
-            .bind(&input.client_id)
-            .fetch_optional(&state.database.pool)
-            .await
-            .map_err(|_| OAuthError::server_error())?
-            .ok_or_else(|| OAuthError::invalid_request("unknown client"))?;
+    let client = sqlx::query(
+        "SELECT client_type FROM oidc_clients WHERE client_id = ? AND enabled = 1",
+    )
+    .bind(&input.client_id)
+    .fetch_optional(&state.database.pool)
+    .await
+    .map_err(|_| OAuthError::server_error())?;
+    let Some(client) = client else {
+        tracing::warn!(
+            endpoint = "/authorize",
+            client_id = %input.client_id,
+            "OIDC request rejected: client is unknown or disabled"
+        );
+        return Err(OAuthError::invalid_request("unknown client"));
+    };
     let client_type: String = client
         .try_get("client_type")
         .map_err(|_| OAuthError::server_error())?;
