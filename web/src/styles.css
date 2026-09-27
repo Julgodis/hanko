@@ -577,15 +577,10 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .account-hanko-save .secondary-action { width: auto; min-width: 220px; min-height: 49px; margin: 0; color: var(--ink); font-size: 15px; }
 .account-hanko-save p { margin: 0; color: var(--success); font-size: 14px; }
 
-.passkey-add-form { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
-.passkey-add-button { width: fit-content; min-width: 143px; min-height: 43px; margin: 0; gap: 8px; color: var(--ink); font-size: 14px; }
-.passkey-add-button svg { width: 16px; height: 16px; color: var(--vermilion); stroke-width: 1.8; }
 .passkey-feedback { margin: 10px 0 0; font-size: 14px; line-height: 1.5; }
 .passkey-feedback-success { color: var(--success); }
 .passkey-feedback-error { color: var(--error); }
-.passkey-list { margin-top: 30px; }
-.passkey-list > h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 13px; color: var(--ink); font-family: "Iowan Old Style", Georgia, serif; font-size: 19px; font-weight: 400; }
-.passkey-list > h3 > span { display: grid; min-width: 23px; height: 23px; place-items: center; padding: 0 6px; border-radius: 99px; color: var(--ink-muted); background: var(--paper-raised); font: 12px ui-sans-serif, system-ui, sans-serif; }
+.passkey-list { margin-top: 0; }
 .passkey-table-input { width: min(100%, 235px); min-height: 40px; padding: 8px 9px; border: 1px solid var(--rule); border-radius: 6px; color: var(--ink); background: var(--paper-raised); font: inherit; }
 .passkey-table form { margin: 0; }
 .passkey-table .passkey-remove-button { min-height: 37px; padding-inline: 9px; white-space: nowrap; }
@@ -857,6 +852,7 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .client-list-action:hover:not(:disabled),
 .client-add-action:hover { border-color: color-mix(in srgb, var(--vermilion), transparent 50%); color: var(--vermilion-text); }
 .client-list-action:disabled { cursor: wait; opacity: .62; }
+.client-add-action:disabled { cursor: wait; opacity: .62; }
 .client-list-action svg,
 .client-add-action svg { width: 15px; height: 15px; stroke-width: 1.8; }
 .client-remove-action { color: var(--error); }
@@ -869,6 +865,10 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .client-enabled-check { width: fit-content; }
 .client-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .client-form-actions .primary-action { width: fit-content; min-height: 46px; margin: 0; }
+.client-danger-zone { display: grid; justify-items: start; gap: 10px; padding-top: 18px; border-top: 1px solid var(--rule); }
+.client-danger-zone h2 { margin: 0; color: var(--error); font-size: 16px; font-weight: 600; }
+.client-danger-zone p { max-width: 650px; margin: 0; color: var(--ink-muted); font-size: 14px; line-height: 1.5; }
+.client-danger-zone .client-remove-action { min-height: 40px; }
 
 .registered-client { padding: 15px 0; border-bottom: 1px solid var(--rule); }
 .registered-client-title { display: flex; align-items: center; gap: 10px; }
@@ -1030,7 +1030,6 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
   .seal-customizer-actions { width: 100%; }
   .seal-tool-button { flex: 1 1 max-content; }
   .seal-animation-gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .passkey-add-button { width: 100%; }
   .passkey-rename-form { grid-template-columns: minmax(0, 1fr) auto; }
   .passkey-rename-form .admin-field { grid-column: 1 / -1; }
   .passkey-rename-form .passkey-row-action,
