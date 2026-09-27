@@ -36,7 +36,7 @@ struct AuthorizeRequest {
     redirect_uri: String,
     scope: String,
     state: String,
-    nonce: String,
+    nonce: Option<String>,
     code_challenge: String,
     code_challenge_method: String,
 }
@@ -175,7 +175,8 @@ async fn authorize(
         .bind(&input.client_id)
         .bind(&input.redirect_uri)
         .bind(&input.state)
-        .bind(&input.nonce)
+        // The schema stores an empty string for an omitted optional nonce.
+        .bind(input.nonce.as_deref().unwrap_or(""))
         .bind(&input.code_challenge)
         .bind(serde_json::to_string(&scopes).map_err(|_| OAuthError::server_error())?)
         .bind(now)
@@ -573,7 +574,9 @@ async fn token(
         auth_time,
         "id",
     );
-    id_claims.insert("nonce".into(), Value::String(nonce));
+    if !nonce.is_empty() {
+        id_claims.insert("nonce".into(), Value::String(nonce));
+    }
     let at_hash = Sha256::digest(access_token.as_bytes());
     id_claims.insert(
         "at_hash".into(),
@@ -760,8 +763,10 @@ async fn validate_authorize_request(
     if input.response_type != "code"
         || input.state.is_empty()
         || input.state.len() > 512
-        || input.nonce.is_empty()
-        || input.nonce.len() > 512
+        || input
+            .nonce
+            .as_ref()
+            .is_some_and(|nonce| nonce.is_empty() || nonce.len() > 512)
         || input.code_challenge_method != "S256"
         || !valid_s256_challenge(&input.code_challenge)
     {

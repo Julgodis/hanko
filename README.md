@@ -47,7 +47,7 @@ Sign in with an administrator passkey and open `{PUBLIC_ORIGIN}/admin/clients` t
 - `/userinfo`
 - `/logout`
 
-Authorization requires `response_type=code`, `scope` containing `openid`, nonempty `state` and `nonce`, and a `S256` challenge. Users review an authorization request before Hanko redirects to the application.
+Authorization requires `response_type=code`, `scope` containing `openid`, nonempty `state`, and a `S256` challenge. The OIDC `nonce` parameter is optional. Users review an authorization request before Hanko redirects to the application.
 
 ## Checks
 
