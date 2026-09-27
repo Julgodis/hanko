@@ -11,7 +11,6 @@ on:
     branches:
       - main
       - master
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,42 +20,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust-checks:
-    name: Rust (${{ matrix.toolchain }})
-    needs: web-checks
+  quick-rust-checks:
+    name: Quick Rust checks
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        toolchain: ["1.88.0", stable]
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Download built web assets
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: web-dist
-          path: web/dist
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: stable
           components: rustfmt
 
-      - name: Check formatting
-        if: matrix.toolchain == 'stable'
+      - name: Check Rust formatting
         run: cargo fmt --all --check
 
-      - name: Run Rust tests
-        run: cargo test --locked
+      - name: Check Rust code
+        run: cargo check --locked
 
-      - name: Build Rust release binary
-        run: cargo build --release --locked
-
-  web-checks:
-    name: Web checks
+  quick-web-checks:
+    name: Quick web checks
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -81,23 +67,55 @@ jobs:
         run: npm run typecheck
         working-directory: web
 
-      - name: Build web assets
-        run: npm run build
+  release-rust-checks:
+    name: Release Rust tests
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.88.0
+
+      - name: Run Rust tests at the declared minimum version
+        run: cargo test --locked
+
+  release-web-checks:
+    name: Release web checks
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci
         working-directory: web
 
-      - name: Upload built web assets
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: web-dist
-          path: web/dist
-          if-no-files-found: error
+      - name: Run web tests
+        run: npm test
+        working-directory: web
+
+      - name: Check web types
+        run: npm run typecheck
+        working-directory: web
 
   publish:
-    name: Build and publish to GHCR
-    if: github.event_name != 'pull_request'
+    name: Build and publish versioned image to GHCR
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
-      - rust-checks
-      - web-checks
+      - release-rust-checks
+      - release-web-checks
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -116,21 +134,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image metadata
+      - name: Generate version metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push linux/amd64 image
+      - name: Build and publish linux/amd64 image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .

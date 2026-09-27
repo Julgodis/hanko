@@ -63,7 +63,7 @@ cargo build --release --locked
 
 Build a local container from the repository root with `docker build -t hanko:local .`. The image listens on port `38013` and stores SQLite data under `/data`; mount persistent storage there. The default UI path is `/`. For a path prefix, pass `--build-arg VITE_BASE_PATH=/hanko/` to `docker build`.
 
-The [CI and publish workflow](.github/workflows/docker-publish.yml) checks the declared Rust 1.88 minimum and current stable Rust, and runs the web checks, on pull requests. Pushes and version tags run the same checks; only after they pass does it publish to GHCR. Pushes to `main` or `master`, version tags such as `v0.1.0`, and manual runs publish images. The default branch also gets the `latest` tag. The workflow currently builds `linux/amd64` only and does not publish standalone binaries. To publish a version:
+The [CI and publish workflow](.github/workflows/docker-publish.yml) runs quick checks on pull requests and pushes to `main` or `master`: Rust formatting and compilation, plus web tests and type checks. Version tags such as `v0.1.0` run the full Rust tests at the declared Rust 1.88 minimum, repeat the web checks, and build and publish a `linux/amd64` image to GHCR tagged with the version. The Docker build compiles the release binary and builds the web UI once. The workflow does not publish standalone binaries. To publish a version:
 
 ```sh
 git tag -a v0.1.0 -m "Hanko v0.1.0"
