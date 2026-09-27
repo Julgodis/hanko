@@ -1,6 +1,6 @@
 import { Check, Copy, Fingerprint, KeyRound, Mail, Pencil, Plus, Shield, Users, UserRound, Stamp, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { startRegistration } from "@simplewebauthn/browser";
+import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
@@ -44,6 +44,11 @@ type RegistrationStart = {
   ceremony_id: string;
   publicKey: Parameters<typeof startRegistration>[0]["optionsJSON"];
 };
+type AuthenticationStart = {
+  ceremony_id: string;
+  publicKey: Parameters<typeof startAuthentication>[0]["optionsJSON"];
+};
+type CredentialChangeApproval = { approval_token: string };
 
 function splitLines(value: string) {
   return [...new Set(value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
@@ -415,9 +420,18 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     setPasskeyError("");
     setPasskeyMessage("");
     try {
+      const confirmation = await api<AuthenticationStart>("/api/passkeys/change/options", {
+        method: "POST",
+        body: json({ action: "add" }),
+      });
+      const assertion = await startAuthentication({ optionsJSON: confirmation.publicKey });
+      const { approval_token } = await api<CredentialChangeApproval>("/api/passkeys/change/verify", {
+        method: "POST",
+        body: json({ ceremony_id: confirmation.ceremony_id, credential: assertion }),
+      });
       const start = await api<RegistrationStart>("/api/passkeys/register/options", {
         method: "POST",
-        body: json({}),
+        body: json({ approval_token }),
       });
       const credentialPromise = startRegistration({ optionsJSON: start.publicKey });
       const credential = await credentialPromise;
@@ -462,9 +476,18 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     setPasskeyError("");
     setPasskeyMessage("");
     try {
+      const confirmation = await api<AuthenticationStart>("/api/passkeys/change/options", {
+        method: "POST",
+        body: json({ action: "remove", passkey_id: removeTarget.id }),
+      });
+      const assertion = await startAuthentication({ optionsJSON: confirmation.publicKey });
+      const { approval_token } = await api<CredentialChangeApproval>("/api/passkeys/change/verify", {
+        method: "POST",
+        body: json({ ceremony_id: confirmation.ceremony_id, credential: assertion }),
+      });
       await api(`/api/passkeys/${encodeURIComponent(removeTarget.id)}`, {
         method: "DELETE",
-        body: json({ confirmation: removalConfirmation }),
+        body: json({ confirmation: removalConfirmation, approval_token }),
       });
       await refreshPasskeys();
       setRemoveTarget(null);
@@ -706,7 +729,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           </section>}
 
           {activeTab === "passkeys" && <section className="account-passkeys">
-            <div className="passkey-section-heading"><span><Fingerprint aria-hidden="true" /></span><div><h2>Your passkeys</h2><p>Rename devices or remove ones you no longer use. Keep at least one passkey on your account.</p></div></div>
+            <div className="passkey-section-heading"><span><Fingerprint aria-hidden="true" /></span><div><h2>Your passkeys</h2><p>Confirm with an existing passkey to add or remove a device. Keep at least one passkey on your account.</p></div></div>
             <form className="passkey-add-form" onSubmit={addPasskey}><label className="admin-field"><span>Device label <em>Optional</em></span><input value={passkeyLabel} onChange={(event) => setPasskeyLabel(event.target.value)} maxLength={100} placeholder="e.g. MacBook" /></label><button className="secondary-action passkey-add-button" type="submit" disabled={addingPasskey}><Fingerprint aria-hidden="true" /> {addingPasskey ? "Follow your device prompt…" : "Add passkey"}</button></form>
             {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
             <section className="passkey-list" aria-labelledby="passkey-list-title">

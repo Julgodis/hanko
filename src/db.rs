@@ -43,7 +43,7 @@ mod tests {
                 .fetch_all(&database.pool)
                 .await
                 .unwrap();
-        assert_eq!(migration_versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(migration_versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
         let tables: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'passkeys', 'groups', 'oidc_clients', 'authorization_codes', 'refresh_tokens', 'webauthn_ceremonies', 'signing_keys')",
@@ -60,6 +60,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(security_tables, 2);
+
+        let credential_change_table: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'credential_change_approvals'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(credential_change_table, 1);
 
         let freshness_columns: i64 = sqlx::query_scalar(
             "SELECT (SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'authenticated_at_ms') + (SELECT COUNT(*) FROM pragma_table_info('authorization_requests') WHERE name = 'created_at_ms')",

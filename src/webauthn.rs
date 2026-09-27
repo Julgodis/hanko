@@ -4,8 +4,9 @@ use sqlx::Row;
 use url::Url;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
-    Credential, DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyRegistration,
-    PublicKeyCredential, RegisterPublicKeyCredential, Webauthn, WebauthnBuilder,
+    Credential, DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyAuthentication,
+    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential, Webauthn,
+    WebauthnBuilder,
 };
 
 use crate::{
@@ -14,7 +15,12 @@ use crate::{
 };
 
 const CEREMONY_SECONDS: i64 = 5 * 60;
-const MAX_ACTIVE_CEREMONIES: i64 = 5000;
+const APPROVAL_SECONDS: i64 = 5 * 60;
+const MAX_ACTIVE_REGISTRATION_CEREMONIES: i64 = 500;
+const MAX_ACTIVE_REGISTRATIONS_PER_USER: i64 = 5;
+const MAX_ACTIVE_REGISTRATIONS_PER_SESSION: i64 = 2;
+const MAX_ACTIVE_AUTHENTICATION_CEREMONIES: i64 = 5000;
+const MAX_ACTIVE_ACCOUNT_AUTH_CEREMONIES_PER_SESSION: i64 = 5;
 
 fn credential_options(value: Value) -> Result<Value, WebauthnError> {
     value
@@ -32,8 +38,17 @@ pub struct WebauthnService {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", content = "state")]
 enum CeremonyState {
-    Registration(PasskeyRegistration),
+    Registration {
+        state: PasskeyRegistration,
+        approval_hash: Option<Vec<u8>>,
+        bootstrap_session: bool,
+    },
     Authentication(DiscoverableAuthentication),
+    CredentialChange {
+        state: PasskeyAuthentication,
+        action: String,
+        target_passkey_id: Option<String>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,8 +87,45 @@ impl WebauthnService {
         username: &str,
         display_name: &str,
         session_hash: &[u8],
+        approval_token: Option<&str>,
     ) -> Result<(String, Value), WebauthnError> {
         let passkeys = self.load_passkeys(user_id).await?;
+        let now = unix_now();
+        let session_setup_only: Option<bool> = sqlx::query_scalar(
+            "SELECT setup_only FROM sessions WHERE session_hash = ? AND user_id = ? AND expires_at > ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL)",
+        )
+        .bind(session_hash)
+        .bind(user_id)
+        .bind(now)
+        .bind(user_id)
+        .fetch_optional(&self.database.pool)
+        .await?;
+        let session_setup_only = session_setup_only.ok_or(WebauthnError::User)?;
+        let (approval_hash, bootstrap_session) = if session_setup_only {
+            if !passkeys.is_empty() || approval_token.is_some() {
+                return Err(WebauthnError::Ceremony);
+            }
+            (None, true)
+        } else {
+            if passkeys.is_empty() {
+                return Err(WebauthnError::Ceremony);
+            }
+            let approval_token = approval_token.ok_or(WebauthnError::Authentication)?;
+            let approval_hash = digest(approval_token);
+            let valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM credential_change_approvals WHERE approval_hash = ? AND user_id = ? AND session_hash = ? AND action = 'add' AND target_passkey_id IS NULL AND consumed_at IS NULL AND expires_at > ?)",
+            )
+            .bind(&approval_hash)
+            .bind(user_id)
+            .bind(session_hash)
+            .bind(now)
+            .fetch_one(&self.database.pool)
+            .await?;
+            if !valid {
+                return Err(WebauthnError::Authentication);
+            }
+            (Some(approval_hash), false)
+        };
         let excluded = passkeys
             .iter()
             .map(|passkey| passkey.cred_id().clone())
@@ -83,7 +135,11 @@ impl WebauthnService {
             .webauthn
             .start_passkey_registration(user_uuid, username, display_name, Some(excluded))
             .map_err(|_| WebauthnError::Protocol)?;
-        let state = CeremonyState::Registration(state);
+        let state = CeremonyState::Registration {
+            state,
+            approval_hash,
+            bootstrap_session,
+        };
         let options = credential_options(serde_json::to_value(options)?)?;
         let ceremony_id = self
             .store_ceremony("registration", Some(user_id), Some(session_hash), &state)
@@ -102,7 +158,12 @@ impl WebauthnService {
         let state = self
             .consume_ceremony(ceremony_id, "registration", Some(user_id), session_hash)
             .await?;
-        let CeremonyState::Registration(state) = state else {
+        let CeremonyState::Registration {
+            state,
+            approval_hash,
+            bootstrap_session,
+        } = state
+        else {
             return Err(WebauthnError::Ceremony);
         };
         let passkey = self
@@ -112,6 +173,35 @@ impl WebauthnService {
         let credential_id = passkey.cred_id().as_ref().to_vec();
         let now = unix_now();
         let mut transaction = self.database.pool.begin().await?;
+        if let Some(approval_hash) = approval_hash {
+            let consumed = sqlx::query("UPDATE credential_change_approvals SET consumed_at = ? WHERE approval_hash = ? AND user_id = ? AND session_hash = ? AND action = 'add' AND target_passkey_id IS NULL AND consumed_at IS NULL AND expires_at > ? AND EXISTS (SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 0 AND expires_at > ?) AND EXISTS (SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL) RETURNING approval_hash")
+                .bind(now)
+                .bind(approval_hash)
+                .bind(user_id)
+                .bind(session_hash)
+                .bind(now)
+                .bind(session_hash)
+                .bind(user_id)
+                .bind(now)
+                .bind(user_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+            if consumed.is_none() {
+                return Err(WebauthnError::Authentication);
+            }
+        } else {
+            let bootstrap_still_valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 1 AND expires_at > ?) AND NOT EXISTS(SELECT 1 FROM passkeys WHERE user_id = ?) AND EXISTS(SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL)")
+                .bind(session_hash)
+                .bind(user_id)
+                .bind(now)
+                .bind(user_id)
+                .bind(user_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+            if !bootstrap_session || !bootstrap_still_valid {
+                return Err(WebauthnError::Ceremony);
+            }
+        }
         sqlx::query("INSERT INTO passkeys (id, user_id, credential_id, passkey_json, label, created_at) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(Uuid::new_v4().to_string())
             .bind(user_id)
@@ -121,13 +211,183 @@ impl WebauthnService {
             .bind(now)
             .execute(&mut *transaction)
             .await?;
-        sqlx::query("UPDATE sessions SET setup_only = 0 WHERE session_hash = ? AND user_id = ?")
+        if bootstrap_session {
+            let promoted = sqlx::query("UPDATE sessions SET setup_only = 0 WHERE session_hash = ? AND user_id = ? AND setup_only = 1 AND expires_at > ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL)")
+                .bind(session_hash)
+                .bind(user_id)
+                .bind(now)
+                .bind(user_id)
+                .execute(&mut *transaction)
+                .await?;
+            if promoted.rows_affected() != 1 {
+                return Err(WebauthnError::Ceremony);
+            }
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn start_credential_change(
+        &self,
+        user_id: &str,
+        session_hash: &[u8],
+        action: &str,
+        target_passkey_id: Option<&str>,
+    ) -> Result<(String, Value), WebauthnError> {
+        let now = unix_now();
+        let active_session: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 0 AND expires_at > ?) AND EXISTS(SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL)")
             .bind(session_hash)
             .bind(user_id)
+            .bind(now)
+            .bind(user_id)
+            .fetch_one(&self.database.pool)
+            .await?;
+        if !active_session {
+            return Err(WebauthnError::User);
+        }
+        match (action, target_passkey_id) {
+            ("add", None) => {}
+            ("remove", Some(passkey_id)) => {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM passkeys WHERE id = ? AND user_id = ?)",
+                )
+                .bind(passkey_id)
+                .bind(user_id)
+                .fetch_one(&self.database.pool)
+                .await?;
+                if !exists {
+                    return Err(WebauthnError::User);
+                }
+            }
+            _ => return Err(WebauthnError::Protocol),
+        }
+        let passkeys = self.load_passkeys(user_id).await?;
+        if passkeys.is_empty() {
+            return Err(WebauthnError::Authentication);
+        }
+        let (options, state) = self
+            .webauthn
+            .start_passkey_authentication(&passkeys)
+            .map_err(|_| WebauthnError::Protocol)?;
+        let options = credential_options(serde_json::to_value(options)?)?;
+        let ceremony_id = self
+            .store_ceremony(
+                "authentication",
+                Some(user_id),
+                Some(session_hash),
+                &CeremonyState::CredentialChange {
+                    state,
+                    action: action.to_owned(),
+                    target_passkey_id: target_passkey_id.map(str::to_owned),
+                },
+            )
+            .await?;
+        Ok((ceremony_id, options))
+    }
+
+    pub async fn finish_credential_change(
+        &self,
+        ceremony_id: &str,
+        user_id: &str,
+        session_hash: &[u8],
+        credential: PublicKeyCredential,
+    ) -> Result<String, WebauthnError> {
+        let state = self
+            .consume_ceremony(ceremony_id, "authentication", Some(user_id), session_hash)
+            .await?;
+        let CeremonyState::CredentialChange {
+            state,
+            action,
+            target_passkey_id,
+        } = state
+        else {
+            return Err(WebauthnError::Ceremony);
+        };
+        let rows = sqlx::query("SELECT id, passkey_json FROM passkeys WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_all(&self.database.pool)
+            .await?;
+        let mut passkeys = rows
+            .into_iter()
+            .map(|row| {
+                let id: String = row.try_get("id")?;
+                let value: String = row.try_get("passkey_json")?;
+                Ok::<_, WebauthnError>((id, serde_json::from_str::<Passkey>(&value)?))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if passkeys.is_empty()
+            || (action == "remove"
+                && !target_passkey_id
+                    .as_ref()
+                    .is_some_and(|target| passkeys.iter().any(|(id, _)| id == target)))
+        {
+            return Err(WebauthnError::Authentication);
+        }
+        let result = self
+            .webauthn
+            .finish_passkey_authentication(&credential, &state)
+            .map_err(|_| WebauthnError::Authentication)?;
+        if !result.user_verified() {
+            return Err(WebauthnError::Authentication);
+        }
+        let credential_id = result.cred_id().as_ref().to_vec();
+        let (passkey_id, passkey) = passkeys
+            .iter_mut()
+            .find(|(_, passkey)| passkey.cred_id().as_ref() == credential_id)
+            .ok_or(WebauthnError::Authentication)?;
+        let stored_credential: Credential = passkey.clone().into();
+        if result.counter() > 0 && result.counter() <= stored_credential.counter {
+            return Err(WebauthnError::Authentication);
+        }
+        passkey
+            .update_credential(&result)
+            .ok_or(WebauthnError::Authentication)?;
+
+        let approval_token = random_secret();
+        let now = unix_now();
+        let mut transaction = self.database.pool.begin().await?;
+        let active_session: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 0 AND expires_at > ?) AND EXISTS(SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL)")
+            .bind(session_hash)
+            .bind(user_id)
+            .bind(now)
+            .bind(user_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+        if !active_session {
+            return Err(WebauthnError::User);
+        }
+        let updated = sqlx::query(
+            "UPDATE passkeys SET passkey_json = ?, last_used_at = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(serde_json::to_string(passkey)?)
+        .bind(now)
+        .bind(passkey_id.as_str())
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(WebauthnError::Authentication);
+        }
+        sqlx::query("DELETE FROM credential_change_approvals WHERE expires_at <= ? OR consumed_at IS NOT NULL OR (user_id = ? AND session_hash = ? AND action = ? AND target_passkey_id IS ?)")
+            .bind(now)
+            .bind(user_id)
+            .bind(session_hash)
+            .bind(&action)
+            .bind(&target_passkey_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("INSERT INTO credential_change_approvals (approval_hash, user_id, session_hash, action, target_passkey_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(digest(&approval_token))
+            .bind(user_id)
+            .bind(session_hash)
+            .bind(action)
+            .bind(target_passkey_id)
+            .bind(now)
+            .bind(now + APPROVAL_SECONDS)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(approval_token)
     }
 
     pub async fn start_authentication(
@@ -247,18 +507,58 @@ impl WebauthnService {
             .bind(now)
             .execute(&self.database.pool)
             .await?;
-        let inserted = sqlx::query("INSERT INTO webauthn_ceremonies (ceremony_hash, kind, user_id, browser_hash, state_json, created_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM webauthn_ceremonies WHERE consumed_at IS NULL AND expires_at > ?) < ?")
-            .bind(digest(&raw_id))
-            .bind(kind)
-            .bind(user_id)
-            .bind(browser_hash)
-            .bind(serde_json::to_string(state)?)
-            .bind(now)
-            .bind(now + CEREMONY_SECONDS)
-            .bind(now)
-            .bind(MAX_ACTIVE_CEREMONIES)
-            .execute(&self.database.pool)
-            .await?;
+        let state_json = serde_json::to_string(state)?;
+        let inserted = if kind == "registration" {
+            sqlx::query("INSERT INTO webauthn_ceremonies (ceremony_hash, kind, user_id, browser_hash, state_json, created_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM webauthn_ceremonies WHERE kind = 'registration' AND consumed_at IS NULL AND expires_at > ?) < ? AND (SELECT COUNT(*) FROM webauthn_ceremonies WHERE kind = 'registration' AND user_id = ? AND consumed_at IS NULL AND expires_at > ?) < ? AND (SELECT COUNT(*) FROM webauthn_ceremonies WHERE kind = 'registration' AND user_id = ? AND browser_hash = ? AND consumed_at IS NULL AND expires_at > ?) < ?")
+                .bind(digest(&raw_id))
+                .bind(kind)
+                .bind(user_id)
+                .bind(browser_hash)
+                .bind(state_json)
+                .bind(now)
+                .bind(now + CEREMONY_SECONDS)
+                .bind(now)
+                .bind(MAX_ACTIVE_REGISTRATION_CEREMONIES)
+                .bind(user_id)
+                .bind(now)
+                .bind(MAX_ACTIVE_REGISTRATIONS_PER_USER)
+                .bind(user_id)
+                .bind(browser_hash)
+                .bind(now)
+                .bind(MAX_ACTIVE_REGISTRATIONS_PER_SESSION)
+                .execute(&self.database.pool)
+                .await?
+        } else if let Some(user_id) = user_id {
+            sqlx::query("INSERT INTO webauthn_ceremonies (ceremony_hash, kind, user_id, browser_hash, state_json, created_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM webauthn_ceremonies WHERE kind = 'authentication' AND consumed_at IS NULL AND expires_at > ?) < ? AND (SELECT COUNT(*) FROM webauthn_ceremonies WHERE kind = 'authentication' AND user_id = ? AND browser_hash = ? AND consumed_at IS NULL AND expires_at > ?) < ?")
+                .bind(digest(&raw_id))
+                .bind(kind)
+                .bind(Some(user_id))
+                .bind(browser_hash)
+                .bind(state_json)
+                .bind(now)
+                .bind(now + CEREMONY_SECONDS)
+                .bind(now)
+                .bind(MAX_ACTIVE_AUTHENTICATION_CEREMONIES)
+                .bind(user_id)
+                .bind(browser_hash)
+                .bind(now)
+                .bind(MAX_ACTIVE_ACCOUNT_AUTH_CEREMONIES_PER_SESSION)
+                .execute(&self.database.pool)
+                .await?
+        } else {
+            sqlx::query("INSERT INTO webauthn_ceremonies (ceremony_hash, kind, user_id, browser_hash, state_json, created_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM webauthn_ceremonies WHERE kind = 'authentication' AND consumed_at IS NULL AND expires_at > ?) < ?")
+                .bind(digest(&raw_id))
+                .bind(kind)
+                .bind(user_id)
+                .bind(browser_hash)
+                .bind(state_json)
+                .bind(now)
+                .bind(now + CEREMONY_SECONDS)
+                .bind(now)
+                .bind(MAX_ACTIVE_AUTHENTICATION_CEREMONIES)
+                .execute(&self.database.pool)
+                .await?
+        };
         if inserted.rows_affected() != 1 {
             return Err(WebauthnError::Capacity);
         }
@@ -300,7 +600,7 @@ fn normalize_label(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::digest;
+    use crate::security::{create_session, digest, unix_now};
 
     #[test]
     fn webauthn_public_key_options_are_flattened_for_browser_api() {
@@ -358,5 +658,89 @@ mod tests {
             .consume_ceremony(&ceremony_id, "authentication", None, &browser_hash)
             .await;
         assert!(matches!(replay, Err(WebauthnError::Ceremony)));
+    }
+
+    #[tokio::test]
+    async fn registration_quota_is_per_user_and_separate_from_authentication_capacity() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        let service = WebauthnService::new(
+            "localhost",
+            &Url::parse("http://localhost:3000").unwrap(),
+            database.clone(),
+        )
+        .unwrap();
+        let user_id = "00000000-0000-4000-8000-000000000003";
+        sqlx::query("INSERT INTO users (id, username, display_name, created_at, updated_at) VALUES (?, 'registration-user', 'Registration User', 1, 1)")
+            .bind(user_id)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let sessions = [
+            create_session(&database, user_id, true, unix_now())
+                .await
+                .unwrap(),
+            create_session(&database, user_id, true, unix_now())
+                .await
+                .unwrap(),
+            create_session(&database, user_id, true, unix_now())
+                .await
+                .unwrap(),
+            create_session(&database, user_id, true, unix_now())
+                .await
+                .unwrap(),
+        ];
+        for session in &sessions[..2] {
+            for _ in 0..2 {
+                service
+                    .start_registration(
+                        user_id,
+                        "registration-user",
+                        "Registration User",
+                        &session.session_hash,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        service
+            .start_registration(
+                user_id,
+                "registration-user",
+                "Registration User",
+                &sessions[2].session_hash,
+                None,
+            )
+            .await
+            .unwrap();
+        let over_user_quota = service
+            .start_registration(
+                user_id,
+                "registration-user",
+                "Registration User",
+                &sessions[3].session_hash,
+                None,
+            )
+            .await;
+        assert!(matches!(over_user_quota, Err(WebauthnError::Capacity)));
+
+        let registration_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webauthn_ceremonies WHERE kind = 'registration' AND user_id = ? AND consumed_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(registration_count, 5);
+
+        let now = unix_now();
+        sqlx::query("WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 495) INSERT INTO webauthn_ceremonies (ceremony_hash, kind, state_json, created_at, expires_at) SELECT randomblob(32), 'registration', '{}', ?, ? FROM seq")
+            .bind(now)
+            .bind(now + CEREMONY_SECONDS)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let login = service.start_authentication(&digest("login-browser")).await;
+        assert!(login.is_ok());
     }
 }
