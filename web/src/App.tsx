@@ -292,7 +292,7 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
   return <Scene phase="idle" className={`consent-scene consent-is-${decision}`}>
     <div className="application-mark" role="img" aria-label={`${name} application`} style={stampStyle}>
       <span className="application-initial" aria-hidden="true">{name.trim().charAt(0).toLocaleUpperCase() || "·"}</span>
-      <span className="approval-stamp private-value" aria-hidden="true">
+      <span className="approval-stamp" aria-hidden="true">
         <HankoSeal state={decision === "allowing" ? "stamping" : "idle"} size={152} color={hankoColor ?? undefined} seed={hankoSeed ?? undefined} title="" />
       </span>
     </div>
@@ -415,7 +415,7 @@ function Seal({ phase, size = "large", color, seed }: { phase: Phase; size?: "la
     {size === "large" && <span className="seal-shadow" aria-hidden="true">
       <HankoSeal size={112} title="" />
     </span>}
-    <HankoSeal className={`hanko-seal${seed ? " private-value" : ""}`} state={sealState(phase)} size={112} color={color ?? undefined} seed={seed ?? undefined} title={seed ? "Your personal Hanko seal" : "Hanko seal"} />
+    <HankoSeal className="hanko-seal" state={sealState(phase)} size={112} color={color ?? undefined} seed={seed ?? undefined} title="Hanko seal" />
     <span className="seal-impression" aria-hidden="true" />
     <span className="ink-particle particle-one" aria-hidden="true" />
     <span className="ink-particle particle-two" aria-hidden="true" />

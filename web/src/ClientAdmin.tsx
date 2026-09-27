@@ -74,7 +74,18 @@ function invitationStatus(invitation: Invitation) {
 }
 
 export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
-  const [activeTab, setActiveTab] = useState<Tab>(isAdmin ? "clients" : "hanko");
+  const previewScreen = import.meta.env.DEV && new URLSearchParams(window.location.search).get("ui-preview") === "1"
+    ? new URLSearchParams(window.location.search).get("screen")
+    : null;
+  const previewTab = (): Tab => {
+    if (previewScreen === "users" || previewScreen === "invite" || previewScreen === "invite-ready") return "users";
+    if (previewScreen === "groups") return "groups";
+    if (previewScreen === "keys") return "keys";
+    if (previewScreen === "passkeys") return "passkeys";
+    if (previewScreen === "hanko") return "hanko";
+    return isAdmin ? "clients" : "hanko";
+  };
+  const [activeTab, setActiveTab] = useState<Tab>(previewTab);
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [users, setUsers] = useState<AdminUser[]>([]);
@@ -91,8 +102,8 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [claims, setClaims] = useState<ClaimDraft[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [clientFormMode, setClientFormMode] = useState<"create" | "edit" | null>(null);
-  const [userFormOpen, setUserFormOpen] = useState(false);
+  const [clientFormMode, setClientFormMode] = useState<"create" | "edit" | null>(previewScreen === "client-form" ? "create" : null);
+  const [userFormOpen, setUserFormOpen] = useState(previewScreen === "invite" || previewScreen === "invite-ready");
   const [editingClientId, setEditingClientId] = useState("");
   const [deletingClientId, setDeletingClientId] = useState("");
   const [created, setCreated] = useState<CreatedClient | null>(null);
@@ -118,7 +129,13 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [invitationExpiry, setInvitationExpiry] = useState("7");
   const [invitationExpiryUnit, setInvitationExpiryUnit] = useState<ExpiryUnit>("days");
   const [userGroups, setUserGroups] = useState<string[]>([]);
-  const [createdInvitation, setCreatedInvitation] = useState<CreatedInvitation | null>(null);
+  const [createdInvitation, setCreatedInvitation] = useState<CreatedInvitation | null>(previewScreen === "invite-ready" ? {
+    id: "inv_preview_ready",
+    label: "Studio team",
+    email: "person@example.com",
+    enrollment_url: "https://id.example.com/enroll/sample-invite-token",
+    expires_at: 1_793_109_600,
+  } : null);
   const [groupName, setGroupName] = useState("");
   const [groupDisplayName, setGroupDisplayName] = useState("");
   const [adminActionBusy, setAdminActionBusy] = useState(false);
@@ -562,7 +579,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [tabTitle, tabDescription] = tabTitles[activeTab];
   const title = activeTab === "clients" && clientFormMode !== null
     ? clientFormMode === "edit" ? "Edit OIDC client" : "Add an OIDC client"
-    : activeTab === "users" && userFormOpen ? "Add a user" : tabTitle;
+    : activeTab === "users" && userFormOpen ? "Invite a user" : tabTitle;
   const description = activeTab === "clients" && clientFormMode !== null
     ? "Configure how this application connects to Hanko."
     : activeTab === "users" && userFormOpen ? "Create an invitation for someone to set up an account." : tabDescription;
@@ -686,10 +703,20 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
               </table></div>}
             </section>
             <section className="registered-clients admin-records"><h2>Invite links <span>{invitations.length}</span></h2>
-              {invitations.length === 0 ? <p className="admin-hint">No invite links yet.</p> : invitations.map((invitation) => {
-                const status = invitationStatus(invitation);
-                return <article className="registered-client" key={invitation.id}><div className="registered-client-title"><h3><PrivateValue>{invitation.label}</PrivateValue></h3><span className={`client-status${status === "Active" ? "" : " disabled"}`}>{status}</span></div><p><PrivateValue>{invitation.use_count} of {invitation.max_uses} users · Expires {new Date(invitation.expires_at * 1000).toLocaleString()}{invitation.email ? ` · ${invitation.email}` : ""}</PrivateValue></p>{status === "Active" && <button className="invitation-revoke" type="button" onClick={() => revokeInvitation(invitation.id)} disabled={adminActionBusy}>Revoke link</button>}</article>;
-              })}
+              {invitations.length === 0 ? <p className="admin-hint">No invite links yet.</p> : <div className="admin-table-scroll"><table className="admin-table invitation-table">
+                <thead><tr><th scope="col">Invite</th><th scope="col">Email</th><th scope="col">Uses</th><th scope="col">Expires</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+                <tbody>{invitations.map((invitation) => {
+                  const status = invitationStatus(invitation);
+                  return <tr key={invitation.id}>
+                    <td><strong><PrivateValue>{invitation.label}</PrivateValue></strong></td>
+                    <td>{invitation.email ? <PrivateValue>{invitation.email}</PrivateValue> : <span className="table-muted">Anyone with link</span>}</td>
+                    <td><PrivateValue>{invitation.use_count} of {invitation.max_uses}</PrivateValue></td>
+                    <td><PrivateValue>{new Date(invitation.expires_at * 1000).toLocaleDateString()}</PrivateValue></td>
+                    <td><span className={`client-status${status === "Active" ? "" : " disabled"}`}>{status}</span></td>
+                    <td>{status === "Active" ? <button className="invitation-revoke" type="button" onClick={() => revokeInvitation(invitation.id)} disabled={adminActionBusy}>Revoke</button> : <span className="table-muted">—</span>}</td>
+                  </tr>;
+                })}</tbody>
+              </table></div>}
             </section>
           </>}
 
@@ -714,17 +741,33 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
               {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
               <button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !groupName.trim() || !groupDisplayName.trim()}>{adminActionBusy ? "Creating…" : "Create group"}</button>
             </form>
-            <section className="registered-clients admin-records"><h2>Groups <span>{groups.length}</span></h2>{groups.length === 0 ? <p className="admin-hint">No groups have been created.</p> : groups.map((group) => <article className="registered-client" key={group.id}><div className="registered-client-title"><h3><PrivateValue>{group.display_name}</PrivateValue></h3><span className="client-status"><PrivateValue>{group.member_count} {group.member_count === 1 ? "member" : "members"}</PrivateValue></span></div><code className="registered-client-id"><PrivateValue>{group.name}</PrivateValue></code></article>)}</section>
+            <section className="registered-clients admin-records"><h2>Groups <span>{groups.length}</span></h2>{groups.length === 0 ? <p className="admin-hint">No groups have been created.</p> : <div className="admin-table-scroll"><table className="admin-table group-table">
+              <thead><tr><th scope="col">Group name</th><th scope="col">Display name</th><th scope="col">Members</th></tr></thead>
+              <tbody>{groups.map((group) => <tr key={group.id}>
+                <td><code className="table-id"><PrivateValue>{group.name}</PrivateValue></code></td>
+                <td><strong><PrivateValue>{group.display_name}</PrivateValue></strong></td>
+                <td><PrivateValue>{group.member_count}</PrivateValue></td>
+              </tr>)}</tbody>
+            </table></div>}</section>
           </>}
 
           {activeTab === "keys" && isAdmin && <>
             <div className="key-management"><p className="admin-hint">New tokens use the active key. Previous public keys remain available to verify tokens already issued.</p><button className="secondary-action" type="button" onClick={rotateSigningKey} disabled={adminActionBusy}><Shield aria-hidden="true" />{adminActionBusy ? "Rotating…" : "Rotate signing key"}</button></div>
             {adminActionMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{adminActionMessage}</p>}
-            <section className="registered-clients admin-records"><h2>Keys <span>{signingKeys.length}</span></h2>{signingKeys.length === 0 ? <p className="admin-hint">No signing keys found.</p> : signingKeys.map((key) => <article className="registered-client" key={key.kid}><div className="registered-client-title"><h3>{key.algorithm}</h3><span className={`client-status${key.status === "active" ? "" : " disabled"}`}>{key.status}</span></div><code className="registered-client-id"><PrivateValue>{key.kid}</PrivateValue></code><p><PrivateValue>Created {new Date(key.created_at * 1000).toLocaleString()}{key.retire_after ? ` · Retires ${new Date(key.retire_after * 1000).toLocaleString()}` : ""}</PrivateValue></p></article>)}</section>
+            <section className="registered-clients admin-records"><h2>Keys <span>{signingKeys.length}</span></h2>{signingKeys.length === 0 ? <p className="admin-hint">No signing keys found.</p> : <div className="admin-table-scroll"><table className="admin-table signing-key-table">
+              <thead><tr><th scope="col">Key ID</th><th scope="col">Algorithm</th><th scope="col">Status</th><th scope="col">Created</th><th scope="col">Retires</th></tr></thead>
+              <tbody>{signingKeys.map((key) => <tr key={key.kid}>
+                <td><code className="table-id"><PrivateValue>{key.kid}</PrivateValue></code></td>
+                <td>{key.algorithm}</td>
+                <td><span className={`client-status${key.status === "active" ? "" : " disabled"}`}>{key.status}</span></td>
+                <td><PrivateValue>{new Date(key.created_at * 1000).toLocaleDateString()}</PrivateValue></td>
+                <td>{key.retire_after ? <PrivateValue>{new Date(key.retire_after * 1000).toLocaleDateString()}</PrivateValue> : <span className="table-muted">—</span>}</td>
+              </tr>)}</tbody>
+            </table></div>}</section>
           </>}
 
           {activeTab === "hanko" && <section className="account-hanko">
-            <div className="account-hanko-preview private-value"><HankoSeal size={192} color={hankoColor} seed={hankoSeed} title="Your personal Hanko preview" /></div>
+            <div className="account-hanko-preview"><HankoSeal size={192} color={hankoColor} seed={hankoSeed} title="Your personal Hanko preview" /></div>
             <SealCustomizer color={hankoColor} seed={hankoSeed} onColorChange={setHankoColor} onSeedChange={setHankoSeed} />
             <div className="account-hanko-save"><button className="secondary-action" type="button" onClick={saveHanko} disabled={savingHanko}>{savingHanko ? "Saving…" : "Save your Hanko"}</button>{hankoMessage && <p role="status">{hankoMessage}</p>}</div>
           </section>}
@@ -735,15 +778,18 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
             {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
             <section className="passkey-list" aria-labelledby="passkey-list-title">
               <h3 id="passkey-list-title">Registered devices <span>{passkeys.length}</span></h3>
-              {passkeysLoading ? <p className="admin-hint">Loading passkeys…</p> : passkeys.length === 0 ? <p className="admin-hint">No passkeys are registered.</p> : passkeys.map((passkey) => <article className="passkey-record" key={passkey.id}>
-                <div className="passkey-record-heading"><h4><PrivateValue>{passkey.label}</PrivateValue></h4><p><PrivateValue>Added {new Date(passkey.created_at * 1000).toLocaleDateString()}{passkey.last_used_at ? ` · Last used ${new Date(passkey.last_used_at * 1000).toLocaleDateString()}` : " · Not used yet"}</PrivateValue></p></div>
-                <form className="passkey-rename-form" onSubmit={(event) => renamePasskey(event, passkey)}>
-                  <label className="admin-field"><span>Device name</span><input value={passkeyDrafts[passkey.id] ?? passkey.label} onChange={(event) => setPasskeyDrafts((current) => ({ ...current, [passkey.id]: event.target.value }))} maxLength={100} required /></label>
-                  <button className="secondary-action passkey-row-action" type="submit" disabled={Boolean(passkeyActionId) || (passkeyDrafts[passkey.id] ?? passkey.label).trim() === passkey.label}>{passkeyActionId === passkey.id ? "Saving…" : "Rename"}</button>
-                  <button className="passkey-remove-button" type="button" onClick={() => beginPasskeyRemoval(passkey)} disabled={passkeys.length <= 1 || Boolean(passkeyActionId)}><Trash2 aria-hidden="true" /> Remove</button>
-                </form>
-                {passkeys.length <= 1 && <p className="passkey-last-note">Your account must keep at least one passkey.</p>}
-              </article>)}
+              {passkeysLoading ? <p className="admin-hint">Loading passkeys…</p> : passkeys.length === 0 ? <p className="admin-hint">No passkeys are registered.</p> : <div className="admin-table-scroll"><table className="admin-table passkey-table">
+                <thead><tr><th scope="col">Device</th><th scope="col">Added</th><th scope="col">Last used</th><th scope="col">Actions</th></tr></thead>
+                <tbody>{passkeys.map((passkey) => <tr key={passkey.id}>
+                  <td><form id={`rename-passkey-${passkey.id}`} onSubmit={(event) => renamePasskey(event, passkey)}><input aria-label={`Device name for ${passkey.label}`} className="passkey-table-input" value={passkeyDrafts[passkey.id] ?? passkey.label} onChange={(event) => setPasskeyDrafts((current) => ({ ...current, [passkey.id]: event.target.value }))} maxLength={100} required /></form></td>
+                  <td><PrivateValue>{new Date(passkey.created_at * 1000).toLocaleDateString()}</PrivateValue></td>
+                  <td>{passkey.last_used_at ? <PrivateValue>{new Date(passkey.last_used_at * 1000).toLocaleDateString()}</PrivateValue> : <span className="table-muted">Not used yet</span>}</td>
+                  <td><div className="table-actions">
+                    <button className="client-list-action" type="submit" form={`rename-passkey-${passkey.id}`} disabled={Boolean(passkeyActionId) || (passkeyDrafts[passkey.id] ?? passkey.label).trim() === passkey.label}>{passkeyActionId === passkey.id ? "Saving…" : "Rename"}</button>
+                    <button className="passkey-remove-button" type="button" onClick={() => beginPasskeyRemoval(passkey)} disabled={passkeys.length <= 1 || Boolean(passkeyActionId)}><Trash2 aria-hidden="true" />Remove</button>
+                  </div></td>
+                </tr>)}</tbody>
+              </table></div>}
             </section>
             {removeTarget && <form className="passkey-remove-confirmation" onSubmit={removePasskey}>
               <div><h3>Remove “<PrivateValue>{removeTarget.label}</PrivateValue>”?</h3><p>This permanently removes the passkey from your account. Type <strong>REMOVE</strong> to confirm.</p></div>
