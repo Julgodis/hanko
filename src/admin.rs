@@ -1,9 +1,9 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,21 @@ struct CreateClient {
 }
 
 #[derive(Deserialize)]
+struct UpdateClient {
+    name: String,
+    enabled: bool,
+    redirect_uris: Vec<String>,
+    #[serde(default)]
+    post_logout_redirect_uris: Vec<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default)]
+    allowed_groups: Vec<String>,
+    #[serde(default)]
+    claims: Vec<ClaimMappingInput>,
+}
+
+#[derive(Deserialize)]
 struct ClaimMappingInput {
     claim_name: String,
     user_attribute_path: String,
@@ -86,6 +101,9 @@ impl AdminError {
     fn conflict(message: &'static str) -> Self {
         Self(StatusCode::CONFLICT, message)
     }
+    fn not_found() -> Self {
+        Self(StatusCode::NOT_FOUND, "client not found")
+    }
     fn internal() -> Self {
         Self(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
     }
@@ -102,6 +120,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/users", get(list_users).post(create_user))
         .route("/api/admin/groups", get(list_groups).post(create_group))
         .route("/api/admin/clients", get(list_clients).post(create_client))
+        .route(
+            "/api/admin/clients/{client_id}",
+            put(update_client).delete(delete_client),
+        )
         .route(
             "/api/admin/signing-keys",
             get(list_signing_keys).post(rotate_signing_key),
@@ -309,14 +331,45 @@ async fn list_clients(
         .map_err(|_| AdminError::internal())?;
         let groups: Vec<String> = sqlx::query_scalar("SELECT g.name FROM groups g JOIN client_allowed_groups cg ON cg.group_id = g.id WHERE cg.client_id = ? ORDER BY g.name")
             .bind(&client_id).fetch_all(&state.database.pool).await.map_err(|_| AdminError::internal())?;
+        let post_logout_redirect_uris: Vec<String> = sqlx::query_scalar(
+            "SELECT uri FROM client_post_logout_uris WHERE client_id = ? ORDER BY uri",
+        )
+        .bind(&client_id)
+        .fetch_all(&state.database.pool)
+        .await
+        .map_err(|_| AdminError::internal())?;
+        let claim_rows = sqlx::query("SELECT claim_name, user_attribute_path, required_scope FROM client_claim_mappings WHERE client_id = ? ORDER BY claim_name")
+            .bind(&client_id)
+            .fetch_all(&state.database.pool)
+            .await
+            .map_err(|_| AdminError::internal())?;
+        let claims = claim_rows
+            .into_iter()
+            .map(|claim| {
+                Ok(serde_json::json!({
+                    "claim_name": claim.try_get::<String, _>("claim_name").map_err(|_| AdminError::internal())?,
+                    "user_attribute_path": claim.try_get::<String, _>("user_attribute_path").map_err(|_| AdminError::internal())?,
+                    "required_scope": claim.try_get::<Option<String>, _>("required_scope").map_err(|_| AdminError::internal())?,
+                }))
+            })
+            .collect::<Result<Vec<_>, AdminError>>()?;
+        let user_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM client_users WHERE client_id = ?")
+                .bind(&client_id)
+                .fetch_one(&state.database.pool)
+                .await
+                .map_err(|_| AdminError::internal())?;
         clients.push(serde_json::json!({
             "client_id": client_id,
             "name": row.try_get::<String, _>("name").map_err(|_| AdminError::internal())?,
             "client_type": row.try_get::<String, _>("client_type").map_err(|_| AdminError::internal())?,
             "enabled": row.try_get::<bool, _>("enabled").map_err(|_| AdminError::internal())?,
             "redirect_uris": redirects,
+            "post_logout_redirect_uris": post_logout_redirect_uris,
             "scopes": scopes,
             "allowed_groups": groups,
+            "claims": claims,
+            "user_count": user_count,
         }));
     }
     Ok(Json(Value::Array(clients)))
@@ -462,6 +515,179 @@ async fn create_client(
         "client_type": input.client_type,
         "scopes": scopes,
     })))
+}
+
+async fn update_client(
+    State(state): State<AppState>,
+    Path(client_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateClient>,
+) -> Result<StatusCode, AdminError> {
+    let _admin = require_admin(&state, &headers, true).await?;
+    let name = input.name.trim();
+    if name.is_empty() || name.len() > 120 {
+        return Err(AdminError::bad_request("invalid client name"));
+    }
+    if input.redirect_uris.is_empty() || input.redirect_uris.len() > 50 {
+        return Err(AdminError::bad_request(
+            "at least one redirect URI is required",
+        ));
+    }
+    if input
+        .redirect_uris
+        .iter()
+        .chain(input.post_logout_redirect_uris.iter())
+        .any(|uri| !valid_registered_uri(uri))
+    {
+        return Err(AdminError::bad_request(
+            "redirect URIs must be absolute, fragment-free and use HTTPS (HTTP is allowed for loopback development)",
+        ));
+    }
+    let mut scopes = input.scopes;
+    if scopes.is_empty() {
+        scopes.push("openid".to_owned());
+    }
+    if !scopes.iter().any(|scope| scope == "openid")
+        || scopes
+            .iter()
+            .any(|scope| !matches!(scope.as_str(), "openid" | "profile" | "email" | "groups"))
+    {
+        return Err(AdminError::bad_request(
+            "client scopes must include openid and use supported scopes",
+        ));
+    }
+    scopes.sort();
+    scopes.dedup();
+    let mut seen_claims = std::collections::HashSet::new();
+    for claim in &input.claims {
+        if !valid_claim_name(&claim.claim_name)
+            || !seen_claims.insert(claim.claim_name.clone())
+            || !valid_json_pointer(&claim.user_attribute_path)
+        {
+            return Err(AdminError::bad_request(
+                "invalid or duplicate custom claim mapping",
+            ));
+        }
+        if claim
+            .required_scope
+            .as_ref()
+            .is_some_and(|scope| !scopes.contains(scope))
+        {
+            return Err(AdminError::bad_request(
+                "claim scope is not enabled for this client",
+            ));
+        }
+    }
+
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    let existing_client: Option<String> =
+        sqlx::query_scalar("SELECT client_id FROM oidc_clients WHERE client_id = ?")
+            .bind(&client_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    if existing_client.is_none() {
+        return Err(AdminError::not_found());
+    }
+    sqlx::query("UPDATE oidc_clients SET name = ?, enabled = ? WHERE client_id = ?")
+        .bind(name)
+        .bind(input.enabled)
+        .bind(&client_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+
+    for table in [
+        "client_redirect_uris",
+        "client_post_logout_uris",
+        "client_scopes",
+        "client_allowed_groups",
+        "client_claim_mappings",
+    ] {
+        let query = format!("DELETE FROM {table} WHERE client_id = ?");
+        sqlx::query(&query)
+            .bind(&client_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    }
+    for uri in input.redirect_uris {
+        sqlx::query("INSERT INTO client_redirect_uris (client_id, uri) VALUES (?, ?)")
+            .bind(&client_id)
+            .bind(uri)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::bad_request("duplicate redirect URI"))?;
+    }
+    for uri in input.post_logout_redirect_uris {
+        sqlx::query("INSERT INTO client_post_logout_uris (client_id, uri) VALUES (?, ?)")
+            .bind(&client_id)
+            .bind(uri)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::bad_request("duplicate post-logout redirect URI"))?;
+    }
+    for scope in &scopes {
+        sqlx::query("INSERT INTO client_scopes (client_id, scope) VALUES (?, ?)")
+            .bind(&client_id)
+            .bind(scope)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    }
+    for group_name in &input.allowed_groups {
+        let group_id: Option<String> = sqlx::query_scalar("SELECT id FROM groups WHERE name = ?")
+            .bind(group_name)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+        let Some(group_id) = group_id else {
+            return Err(AdminError::bad_request("unknown allowed group"));
+        };
+        sqlx::query("INSERT INTO client_allowed_groups (client_id, group_id) VALUES (?, ?)")
+            .bind(&client_id)
+            .bind(group_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    }
+    for claim in input.claims {
+        sqlx::query("INSERT INTO client_claim_mappings (client_id, claim_name, user_attribute_path, required_scope) VALUES (?, ?, ?, ?)")
+            .bind(&client_id)
+            .bind(claim.claim_name)
+            .bind(claim.user_attribute_path)
+            .bind(claim.required_scope)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_client(
+    State(state): State<AppState>,
+    Path(client_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AdminError> {
+    let _admin = require_admin(&state, &headers, true).await?;
+    let result = sqlx::query("DELETE FROM oidc_clients WHERE client_id = ?")
+        .bind(client_id)
+        .execute(&state.database.pool)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    if result.rows_affected() == 0 {
+        return Err(AdminError::not_found());
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_signing_keys(

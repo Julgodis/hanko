@@ -1,5 +1,5 @@
-import { Check, Copy, Fingerprint, KeyRound, Plus, Shield, Users, UserRound, Stamp, Trash2 } from "lucide-react";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Check, Copy, Fingerprint, KeyRound, Pencil, Plus, Shield, Users, UserRound, Stamp, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
 import { SealCustomizer } from "./components/SealCustomizer";
@@ -15,8 +15,11 @@ type Client = {
   client_type: "public" | "confidential";
   enabled: boolean;
   redirect_uris: string[];
+  post_logout_redirect_uris: string[];
   scopes: Scope[];
   allowed_groups: string[];
+  claims: { claim_name: string; user_attribute_path: string; required_scope: string | null }[];
+  user_count: number;
 };
 type Group = { id: string; name: string; display_name: string; member_count: number };
 type AdminUser = { id: string; username: string; display_name: string; email: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
@@ -44,6 +47,7 @@ function errorMessage(error: unknown) {
 }
 
 export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
+  const clientEditorRef = useRef<HTMLElement>(null);
   const [activeTab, setActiveTab] = useState<Tab>(isAdmin ? "clients" : "hanko");
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -53,6 +57,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [loadError, setLoadError] = useState("");
   const [name, setName] = useState("");
   const [clientType, setClientType] = useState<"public" | "confidential">("public");
+  const [clientEnabled, setClientEnabled] = useState(true);
   const [redirectUris, setRedirectUris] = useState("");
   const [logoutUris, setLogoutUris] = useState("");
   const [scopes, setScopes] = useState<Scope[]>(["openid", "profile", "email"]);
@@ -60,6 +65,9 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [claims, setClaims] = useState<ClaimDraft[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [clientFormMode, setClientFormMode] = useState<"create" | "edit" | null>(null);
+  const [editingClientId, setEditingClientId] = useState("");
+  const [deletingClientId, setDeletingClientId] = useState("");
   const [created, setCreated] = useState<CreatedClient | null>(null);
   const [copied, setCopied] = useState("");
   const [passkeyLabel, setPasskeyLabel] = useState("");
@@ -122,6 +130,12 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     return () => { active = false; };
   }, [activeTab, isAdmin]);
 
+  useEffect(() => {
+    if (clientFormMode !== null) {
+      clientEditorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [clientFormMode]);
+
   function toggleScope(scope: (typeof AVAILABLE_SCOPES)[number]) {
     setScopes((current) => current.includes(scope)
       ? current.filter((item) => item !== scope)
@@ -139,10 +153,49 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       claimIndex === index ? { ...claim, [key]: value } : claim));
   }
 
-  async function createClient(event: FormEvent<HTMLFormElement>) {
+  function openCreateClient() {
+    setName("");
+    setClientType("public");
+    setClientEnabled(true);
+    setRedirectUris("");
+    setLogoutUris("");
+    setScopes(["openid", "profile", "email"]);
+    setAllowedGroups([]);
+    setClaims([]);
+    setEditingClientId("");
+    setCreated(null);
+    setError("");
+    setClientFormMode("create");
+  }
+
+  function openEditClient(client: Client) {
+    setName(client.name);
+    setClientType(client.client_type);
+    setClientEnabled(client.enabled);
+    setRedirectUris(client.redirect_uris.join("\n"));
+    setLogoutUris(client.post_logout_redirect_uris.join("\n"));
+    setScopes(client.scopes);
+    setAllowedGroups(client.allowed_groups);
+    setClaims(client.claims.map((claim) => ({
+      claim_name: claim.claim_name,
+      user_attribute_path: claim.user_attribute_path,
+      required_scope: claim.required_scope ?? "",
+    })));
+    setEditingClientId(client.client_id);
+    setCreated(null);
+    setError("");
+    setClientFormMode("edit");
+  }
+
+  function closeClientForm() {
+    setClientFormMode(null);
+    setEditingClientId("");
+    setError("");
+  }
+
+  async function saveClient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
-    setCreated(null);
     const redirects = splitLines(redirectUris);
     if (redirects.length === 0) {
       setError("Add at least one exact callback URL.");
@@ -158,29 +211,48 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
 
     setBusy(true);
     try {
-      const client = await api<CreatedClient>("/api/admin/clients", {
-        method: "POST",
+      const payload = {
+        name: name.trim(),
+        ...(clientFormMode === "create"
+          ? { client_type: clientType }
+          : { enabled: clientEnabled }),
+        redirect_uris: redirects,
+        post_logout_redirect_uris: splitLines(logoutUris),
+        scopes: ["openid", ...scopes.filter((scope) => scope !== "openid")],
+        allowed_groups: allowedGroups,
+        claims: claimMappings,
+      };
+      const client = await api<CreatedClient>(clientFormMode === "edit"
+        ? `/api/admin/clients/${encodeURIComponent(editingClientId)}`
+        : "/api/admin/clients", {
+        method: clientFormMode === "edit" ? "PUT" : "POST",
         body: json({
-          name: name.trim(),
-          client_type: clientType,
-          redirect_uris: redirects,
-          post_logout_redirect_uris: splitLines(logoutUris),
-          scopes: ["openid", ...scopes.filter((scope) => scope !== "openid")],
-          allowed_groups: allowedGroups,
-          claims: claimMappings,
+          ...payload,
         }),
       });
-      setCreated(client);
-      setName("");
-      setRedirectUris("");
-      setLogoutUris("");
-      setAllowedGroups([]);
-      setClaims([]);
+      if (clientFormMode === "create") setCreated(client);
+      setClientFormMode(null);
+      setEditingClientId("");
       await refreshClients();
-    } catch (createError) {
-      setError(errorMessage(createError));
+    } catch (saveError) {
+      setError(errorMessage(saveError));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function removeClient(client: Client) {
+    if (!window.confirm(`Remove “${client.name}”? Its settings and sign-in count will be deleted.`)) return;
+    setDeletingClientId(client.client_id);
+    setError("");
+    try {
+      await api(`/api/admin/clients/${encodeURIComponent(client.client_id)}`, { method: "DELETE" });
+      if (editingClientId === client.client_id) closeClientForm();
+      await refreshClients();
+    } catch (removeError) {
+      setError(errorMessage(removeError));
+    } finally {
+      setDeletingClientId("");
     }
   }
 
@@ -348,75 +420,30 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         {loadError && <p className="admin-message admin-message-error" role="alert">{loadError}</p>}
         {loading ? <div className="admin-loading"><HankoSeal size={42} /><p>Loading…</p></div> : <>
           {activeTab === "clients" && isAdmin && <>
-    <form className="client-form" onSubmit={createClient}>
-      <label className="admin-field">
-        <span>Application name</span>
-        <input autoComplete="off" maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="Jellyfin" required />
-      </label>
-
-      <label className="admin-field">
-        <span>Client type</span>
-        <select value={clientType} onChange={(event) => setClientType(event.target.value as "public" | "confidential")}>
-          <option value="public">Public · PKCE</option>
-          <option value="confidential">Confidential · client secret</option>
-        </select>
-        <small>{clientType === "public" ? "For browser and native apps. PKCE is required." : "For server-side apps that can keep a secret safely."}</small>
-      </label>
-
-      <label className="admin-field">
-        <span>Callback URLs</span>
-        <textarea value={redirectUris} onChange={(event) => setRedirectUris(event.target.value)} placeholder="https://app.example.com/oidc/callback" rows={2} required />
-        <small>One exact URL per line. HTTPS is required except for localhost development.</small>
-      </label>
-
-      <label className="admin-field">
-        <span>Post-logout URLs <em>Optional</em></span>
-        <textarea value={logoutUris} onChange={(event) => setLogoutUris(event.target.value)} placeholder="https://app.example.com/" rows={2} />
-        <small>One exact URL per line.</small>
-      </label>
-
-      <fieldset className="admin-options">
-        <legend>Scopes</legend>
-        <label className="admin-check"><input type="checkbox" checked disabled /><span><strong>openid</strong><small>Required for sign-in</small></span></label>
-        {AVAILABLE_SCOPES.map((scope) => <label className="admin-check" key={scope}>
-          <input type="checkbox" checked={scopes.includes(scope)} onChange={() => toggleScope(scope)} />
-          <span><strong>{scope}</strong><small>{scopeDescription(scope)}</small></span>
-        </label>)}
-      </fieldset>
-
-      <fieldset className="admin-options">
-        <legend>Allowed groups <em>Optional</em></legend>
-        {groups.length === 0
-          ? <p className="admin-hint">No groups exist yet. This client can be used by any user.</p>
-          : <>
-            <p className="admin-hint">Leave all unchecked to allow any user.</p>
-            <div className="admin-choice-grid">{groups.map((group) => <label className="admin-check admin-check-compact" key={group.id}>
-              <input type="checkbox" checked={allowedGroups.includes(group.name)} onChange={() => toggleGroup(group.name)} />
-              <span><strong>{group.display_name}</strong><small>{group.name} · {group.member_count} {group.member_count === 1 ? "member" : "members"}</small></span>
-            </label>)}</div>
-          </>}
-      </fieldset>
-
-      <fieldset className="admin-options admin-claims">
-        <legend>Custom claims <em>Optional</em></legend>
-        <p className="admin-hint">Map a user attribute to an additional token claim.</p>
-        {claims.map((claim, index) => <div className="claim-editor" key={index}>
-          <label className="admin-field"><span>Claim name</span><input value={claim.claim_name} onChange={(event) => updateClaim(index, "claim_name", event.target.value)} placeholder="department" /></label>
-          <label className="admin-field"><span>User attribute path</span><input value={claim.user_attribute_path} onChange={(event) => updateClaim(index, "user_attribute_path", event.target.value)} placeholder="/organization/department" /></label>
-          <label className="admin-field"><span>Required scope</span><select value={claim.required_scope} onChange={(event) => updateClaim(index, "required_scope", event.target.value)}>
-            <option value="">Always include</option>
-            {["openid", ...scopes.filter((scope) => scope !== "openid")].map((scope) => <option value={scope} key={scope}>{scope}</option>)}
-          </select></label>
-          <button className="claim-remove" type="button" aria-label="Remove custom claim" onClick={() => setClaims((current) => current.filter((_, claimIndex) => claimIndex !== index))}><Trash2 aria-hidden="true" /></button>
-        </div>)}
-        <button className="add-claim" type="button" onClick={() => setClaims((current) => [...current, { claim_name: "", user_attribute_path: "", required_scope: "" }])}><Plus aria-hidden="true" /> Add claim</button>
-      </fieldset>
-
-      {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
-      <button className="primary-action client-submit" type="submit" disabled={busy || !name.trim()}>
-        {busy ? "Creating client…" : "Create OIDC client"}
-      </button>
-    </form>
+    <section className="registered-clients">
+      <div className="client-list-heading">
+        <h2>Registered clients <span>{clients.length}</span></h2>
+        {clientFormMode === null && <button className="client-add-action" type="button" onClick={openCreateClient}><Plus aria-hidden="true" /> Add a client</button>}
+      </div>
+      {error && clientFormMode === null && <p className="admin-message admin-message-error" role="alert">{error}</p>}
+      {clients.length === 0
+        ? <p className="admin-hint">No clients have been added yet.</p>
+        : clients.map((client) => <article className="registered-client" key={client.client_id}>
+          <div className="registered-client-title"><h3>{client.name}</h3><span className={client.enabled ? "client-status" : "client-status disabled"}>{client.enabled ? "Enabled" : "Disabled"}</span><span className="client-user-count">{client.user_count ?? 0} {(client.user_count ?? 0) === 1 ? "user" : "users"}</span></div>
+          <code className="registered-client-id">{client.client_id}</code>
+          <p>{client.client_type === "public" ? "Public client" : "Confidential client"} · {client.scopes.join(", ")} · users who have signed in</p>
+          <details><summary>Redirect URLs and access</summary>
+            <ul>{client.redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul>
+            {client.post_logout_redirect_uris.length > 0 && <><strong>Post-logout URLs</strong><ul>{client.post_logout_redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul></>}
+            <p>{client.allowed_groups.length ? `Allowed groups: ${client.allowed_groups.join(", ")}` : "Available to all users"}</p>
+            {client.claims.length > 0 && <><strong>Custom claims</strong><ul>{client.claims.map((claim) => <li key={claim.claim_name}><code>{claim.claim_name}</code> from <code>{claim.user_attribute_path}</code>{claim.required_scope ? ` · ${claim.required_scope}` : ""}</li>)}</ul></>}
+          </details>
+          <div className="registered-client-actions">
+            <button className="client-list-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => openEditClient(client)}><Pencil aria-hidden="true" /> Edit</button>
+            <button className="client-list-action client-remove-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => void removeClient(client)}><Trash2 aria-hidden="true" /> {deletingClientId === client.client_id ? "Removing…" : "Remove"}</button>
+          </div>
+        </article>)}
+    </section>
 
     {created && <section className="created-client" role="status">
       <div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Client created</h2><p>Save these credentials in the application.</p></div></div>
@@ -425,20 +452,44 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       <p className="created-footnote">The client secret cannot be viewed again after you leave this screen.</p>
     </section>}
 
-    <section className="registered-clients">
-      <h2>Registered clients <span>{clients.length}</span></h2>
-      {clients.length === 0
-        ? <p className="admin-hint">No clients have been added yet.</p>
-        : clients.map((client) => <article className="registered-client" key={client.client_id}>
-          <div className="registered-client-title"><h3>{client.name}</h3><span className={client.enabled ? "client-status" : "client-status disabled"}>{client.enabled ? "Enabled" : "Disabled"}</span></div>
-          <code className="registered-client-id">{client.client_id}</code>
-          <p>{client.client_type === "public" ? "Public client" : "Confidential client"} · {client.scopes.join(", ")}</p>
-          <details><summary>Redirect URLs and access</summary>
-            <ul>{client.redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul>
-            <p>{client.allowed_groups.length ? `Allowed groups: ${client.allowed_groups.join(", ")}` : "Available to all users"}</p>
-          </details>
-        </article>)}
-    </section>
+    {clientFormMode !== null && <section ref={clientEditorRef} className="client-editor-panel" aria-labelledby="client-form-title">
+      <div className="client-editor-heading"><h2 id="client-form-title">{clientFormMode === "edit" ? "Edit client" : "Add a client"}</h2><button className="client-list-action" type="button" disabled={busy} onClick={closeClientForm}>Cancel</button></div>
+      <form className="client-form" onSubmit={saveClient}>
+        <label className="admin-field"><span>Application name</span><input autoComplete="off" maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="Jellyfin" required /></label>
+        {clientFormMode === "create" && <label className="admin-field">
+          <span>Client type</span>
+          <select value={clientType} onChange={(event) => setClientType(event.target.value as "public" | "confidential")}>
+            <option value="public">Public · PKCE</option>
+            <option value="confidential">Confidential · client secret</option>
+          </select>
+          <small>{clientType === "public" ? "For browser and native apps. PKCE is required." : "For server-side apps that can keep a secret safely."}</small>
+        </label>}
+        {clientFormMode === "edit" && <label className="admin-check client-enabled-check"><input type="checkbox" checked={clientEnabled} onChange={(event) => setClientEnabled(event.target.checked)} /><span><strong>Client enabled</strong><small>Disabled clients can no longer sign users in.</small></span></label>}
+        <label className="admin-field"><span>Callback URLs</span><textarea value={redirectUris} onChange={(event) => setRedirectUris(event.target.value)} placeholder="https://app.example.com/oidc/callback" rows={2} required /><small>One exact URL per line. HTTPS is required except for localhost development.</small></label>
+        <label className="admin-field"><span>Post-logout URLs <em>Optional</em></span><textarea value={logoutUris} onChange={(event) => setLogoutUris(event.target.value)} placeholder="https://app.example.com/" rows={2} /><small>One exact URL per line.</small></label>
+        <fieldset className="admin-options">
+          <legend>Scopes</legend>
+          <label className="admin-check"><input type="checkbox" checked disabled /><span><strong>openid</strong><small>Required for sign-in</small></span></label>
+          {AVAILABLE_SCOPES.map((scope) => <label className="admin-check" key={scope}><input type="checkbox" checked={scopes.includes(scope)} onChange={() => toggleScope(scope)} /><span><strong>{scope}</strong><small>{scopeDescription(scope)}</small></span></label>)}
+        </fieldset>
+        <fieldset className="admin-options">
+          <legend>Allowed groups <em>Optional</em></legend>
+          {groups.length === 0 ? <p className="admin-hint">No groups exist yet. This client can be used by any user.</p> : <><p className="admin-hint">Leave all unchecked to allow any user.</p><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check admin-check-compact" key={group.id}><input type="checkbox" checked={allowedGroups.includes(group.name)} onChange={() => toggleGroup(group.name)} /><span><strong>{group.display_name}</strong><small>{group.name} · {group.member_count} {group.member_count === 1 ? "member" : "members"}</small></span></label>)}</div></>}
+        </fieldset>
+        <fieldset className="admin-options admin-claims">
+          <legend>Custom claims <em>Optional</em></legend><p className="admin-hint">Map a user attribute to an additional token claim.</p>
+          {claims.map((claim, index) => <div className="claim-editor" key={index}>
+            <label className="admin-field"><span>Claim name</span><input value={claim.claim_name} onChange={(event) => updateClaim(index, "claim_name", event.target.value)} placeholder="department" /></label>
+            <label className="admin-field"><span>User attribute path</span><input value={claim.user_attribute_path} onChange={(event) => updateClaim(index, "user_attribute_path", event.target.value)} placeholder="/organization/department" /></label>
+            <label className="admin-field"><span>Required scope</span><select value={claim.required_scope} onChange={(event) => updateClaim(index, "required_scope", event.target.value)}><option value="">Always include</option>{["openid", ...scopes.filter((scope) => scope !== "openid")].map((scope) => <option value={scope} key={scope}>{scope}</option>)}</select></label>
+            <button className="claim-remove" type="button" aria-label="Remove custom claim" onClick={() => setClaims((current) => current.filter((_, claimIndex) => claimIndex !== index))}><Trash2 aria-hidden="true" /></button>
+          </div>)}
+          <button className="add-claim" type="button" onClick={() => setClaims((current) => [...current, { claim_name: "", user_attribute_path: "", required_scope: "" }])}><Plus aria-hidden="true" /> Add claim</button>
+        </fieldset>
+        {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
+        <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={busy || !name.trim()}>{busy ? "Saving client…" : clientFormMode === "edit" ? "Save changes" : "Create OIDC client"}</button><button className="client-list-action" type="button" disabled={busy} onClick={closeClientForm}>Cancel</button></div>
+      </form>
+    </section>}
           </>}
 
           {activeTab === "users" && isAdmin && <>
