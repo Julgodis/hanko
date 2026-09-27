@@ -1,5 +1,5 @@
 import { Check, Copy, Fingerprint, KeyRound, Mail, Pencil, Plus, Shield, Users, UserRound, Stamp, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
 import { SealCustomizer } from "./components/SealCustomizer";
@@ -68,7 +68,6 @@ function invitationStatus(invitation: Invitation) {
 }
 
 export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
-  const clientEditorRef = useRef<HTMLElement>(null);
   const [activeTab, setActiveTab] = useState<Tab>(isAdmin ? "clients" : "hanko");
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -87,6 +86,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [clientFormMode, setClientFormMode] = useState<"create" | "edit" | null>(null);
+  const [userFormOpen, setUserFormOpen] = useState(false);
   const [editingClientId, setEditingClientId] = useState("");
   const [deletingClientId, setDeletingClientId] = useState("");
   const [created, setCreated] = useState<CreatedClient | null>(null);
@@ -184,10 +184,10 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   }, [activeTab, isAdmin]);
 
   useEffect(() => {
-    if (clientFormMode !== null) {
-      clientEditorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (clientFormMode !== null || userFormOpen) {
+      window.scrollTo({ top: 0, behavior: "smooth" });
     }
-  }, [clientFormMode]);
+  }, [clientFormMode, userFormOpen]);
 
   function toggleScope(scope: (typeof AVAILABLE_SCOPES)[number]) {
     setScopes((current) => current.includes(scope)
@@ -244,6 +244,23 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     setClientFormMode(null);
     setEditingClientId("");
     setError("");
+  }
+
+  function openCreateUser() {
+    setInvitationLabel("");
+    setInvitationEmail("");
+    setInvitationMaxUses("10");
+    setInvitationExpiry("7");
+    setInvitationExpiryUnit("days");
+    setUserGroups([]);
+    setCreatedInvitation(null);
+    setAdminActionMessage("");
+    setUserFormOpen(true);
+  }
+
+  function closeUserForm() {
+    setUserFormOpen(false);
+    setAdminActionMessage("");
   }
 
   async function saveClient(event: FormEvent<HTMLFormElement>) {
@@ -518,7 +535,13 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     hanko: ["Your Hanko", "Your personal seal."],
     passkeys: ["Passkeys", "Manage the devices that can sign in to your account."],
   };
-  const [title, description] = tabTitles[activeTab];
+  const [tabTitle, tabDescription] = tabTitles[activeTab];
+  const title = activeTab === "clients" && clientFormMode !== null
+    ? clientFormMode === "edit" ? "Edit OIDC client" : "Add an OIDC client"
+    : activeTab === "users" && userFormOpen ? "Add a user" : tabTitle;
+  const description = activeTab === "clients" && clientFormMode !== null
+    ? "Configure how this application connects to Hanko."
+    : activeTab === "users" && userFormOpen ? "Create an invitation for someone to set up an account." : tabDescription;
 
   return <AdminScene>
     <div className="admin-layout">
@@ -539,35 +562,42 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
 
       <section className="admin-content" aria-labelledby="admin-page-title">
         <header className="admin-heading">
+          {(activeTab === "clients" && clientFormMode !== null) && <button className="admin-back-action" type="button" onClick={closeClientForm}>← Back to clients</button>}
+          {(activeTab === "users" && userFormOpen) && <button className="admin-back-action" type="button" onClick={closeUserForm}>← Back to users</button>}
           <h1 id="admin-page-title">{title}</h1>
           <p>{description}</p>
         </header>
         {loadError && <p className="admin-message admin-message-error" role="alert">{loadError}</p>}
         {loading ? <div className="admin-loading"><HankoSeal size={42} /><p>Loading…</p></div> : <>
-          {activeTab === "clients" && isAdmin && <>
+          {activeTab === "clients" && isAdmin && clientFormMode === null && <>
     <section className="registered-clients">
       <div className="client-list-heading">
         <h2>Registered clients <span>{clients.length}</span></h2>
-        {clientFormMode === null && <button className="client-add-action" type="button" onClick={openCreateClient}><Plus aria-hidden="true" /> Add a client</button>}
+        <button className="client-add-action" type="button" onClick={openCreateClient}><Plus aria-hidden="true" /> Add a client</button>
       </div>
-      {error && clientFormMode === null && <p className="admin-message admin-message-error" role="alert">{error}</p>}
+      {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
       {clients.length === 0
         ? <p className="admin-hint">No clients have been added yet.</p>
-        : clients.map((client) => <article className="registered-client" key={client.client_id}>
-          <div className="registered-client-title"><h3>{client.name}</h3><span className={client.enabled ? "client-status" : "client-status disabled"}>{client.enabled ? "Enabled" : "Disabled"}</span><span className="client-user-count">{client.user_count ?? 0} {(client.user_count ?? 0) === 1 ? "user" : "users"}</span></div>
-          <code className="registered-client-id">{client.client_id}</code>
-          <p>{client.client_type === "public" ? "Public client" : "Confidential client"} · {client.token_endpoint_auth_method} · {client.scopes.join(", ")} · users who have signed in</p>
-          <details><summary>Redirect URLs and access</summary>
-            <ul>{client.redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul>
-            {client.post_logout_redirect_uris.length > 0 && <><strong>Post-logout URLs</strong><ul>{client.post_logout_redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul></>}
-            <p>{client.allowed_groups.length ? `Allowed groups: ${client.allowed_groups.join(", ")}` : "Available to all users"}</p>
-            {client.claims.length > 0 && <><strong>Custom claims</strong><ul>{client.claims.map((claim) => <li key={claim.claim_name}><code>{claim.claim_name}</code> from <code>{claim.user_attribute_path}</code>{claim.required_scope ? ` · ${claim.required_scope}` : ""}</li>)}</ul></>}
-          </details>
-          <div className="registered-client-actions">
-            <button className="client-list-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => openEditClient(client)}><Pencil aria-hidden="true" /> Edit</button>
-            <button className="client-list-action client-remove-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => void removeClient(client)}><Trash2 aria-hidden="true" /> {deletingClientId === client.client_id ? "Removing…" : "Remove"}</button>
-          </div>
-        </article>)}
+        : <div className="admin-table-scroll"><table className="admin-table client-table">
+          <thead><tr><th scope="col">Application</th><th scope="col">Client ID</th><th scope="col">Type</th><th scope="col">Users</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+          <tbody>{clients.map((client) => <tr key={client.client_id}>
+            <td><strong>{client.name}</strong><details className="table-details"><summary>Settings</summary>
+              <p>Scopes: {client.scopes.join(", ")}</p>
+              <p>{client.allowed_groups.length ? `Allowed groups: ${client.allowed_groups.join(", ")}` : "Available to all users"}</p>
+              <strong>Callback URLs</strong><ul>{client.redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul>
+              {client.post_logout_redirect_uris.length > 0 && <><strong>Post-logout URLs</strong><ul>{client.post_logout_redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul></>}
+              {client.claims.length > 0 && <><strong>Custom claims</strong><ul>{client.claims.map((claim) => <li key={claim.claim_name}><code>{claim.claim_name}</code> from <code>{claim.user_attribute_path}</code>{claim.required_scope ? ` · ${claim.required_scope}` : ""}</li>)}</ul></>}
+            </details></td>
+            <td><code className="table-id">{client.client_id}</code></td>
+            <td>{client.client_type === "public" ? "Public" : "Confidential"}<small>{client.token_endpoint_auth_method}</small></td>
+            <td>{client.user_count ?? 0}</td>
+            <td><span className={client.enabled ? "client-status" : "client-status disabled"}>{client.enabled ? "Enabled" : "Disabled"}</span></td>
+            <td><div className="table-actions">
+              <button className="client-list-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => openEditClient(client)}><Pencil aria-hidden="true" /><span>Edit</span></button>
+              <button className="client-list-action client-remove-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => void removeClient(client)}><Trash2 aria-hidden="true" /><span>{deletingClientId === client.client_id ? "Removing…" : "Remove"}</span></button>
+            </div></td>
+          </tr>)}</tbody>
+        </table></div>}
     </section>
 
     {created && <section className="created-client" role="status">
@@ -579,8 +609,9 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         : "This client has no client secret and must use PKCE S256."}</p>
     </section>}
 
-    {clientFormMode !== null && <section ref={clientEditorRef} className="client-editor-panel" aria-labelledby="client-form-title">
-      <div className="client-editor-heading"><h2 id="client-form-title">{clientFormMode === "edit" ? "Edit client" : "Add a client"}</h2><button className="client-list-action" type="button" disabled={busy} onClick={closeClientForm}>Cancel</button></div>
+          </>}
+
+          {activeTab === "clients" && isAdmin && clientFormMode !== null && <section className="client-editor-panel client-form-page" aria-labelledby="admin-page-title">
       <form className="client-form" onSubmit={saveClient}>
         <label className="admin-field"><span>Application name</span><input autoComplete="off" maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="Jellyfin" required /></label>
         {clientFormMode === "create" && <label className="admin-field">
@@ -617,10 +648,29 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={busy || !name.trim()}>{busy ? "Saving client…" : clientFormMode === "edit" ? "Save changes" : "Create OIDC client"}</button><button className="client-list-action" type="button" disabled={busy} onClick={closeClientForm}>Cancel</button></div>
       </form>
     </section>}
+
+          {activeTab === "users" && isAdmin && !userFormOpen && <>
+            <div className="client-list-heading user-list-heading"><h2>Accounts <span>{users.length}</span></h2><button className="client-add-action" type="button" onClick={openCreateUser}><Plus aria-hidden="true" /> Add a user</button></div>
+            {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
+            <section className="registered-clients admin-records user-records">
+              {users.length === 0 ? <p className="admin-hint">No accounts found.</p> : <div className="admin-table-scroll"><table className="admin-table user-table">
+                <thead><tr><th scope="col">User</th><th scope="col">Username</th><th scope="col">Email</th><th scope="col">Groups</th><th scope="col">Invite label</th><th scope="col">Status</th></tr></thead>
+                <tbody>{users.map((user) => <tr key={user.id}>
+                  <td><strong>{user.display_name || user.username}</strong></td><td><code className="table-id">{user.username}</code></td><td>{user.email || <span className="table-muted">No email</span>}</td><td>{user.groups.length ? user.groups.join(", ") : <span className="table-muted">—</span>}</td><td>{user.invitation_label || <span className="table-muted">—</span>}</td>
+                  <td><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></td>
+                </tr>)}</tbody>
+              </table></div>}
+            </section>
+            <section className="registered-clients admin-records"><h2>Invite links <span>{invitations.length}</span></h2>
+              {invitations.length === 0 ? <p className="admin-hint">No invite links yet.</p> : invitations.map((invitation) => {
+                const status = invitationStatus(invitation);
+                return <article className="registered-client" key={invitation.id}><div className="registered-client-title"><h3>{invitation.label}</h3><span className={`client-status${status === "Active" ? "" : " disabled"}`}>{status}</span></div><p>{invitation.use_count} of {invitation.max_uses} users · Expires {new Date(invitation.expires_at * 1000).toLocaleString()}{invitation.email ? ` · ${invitation.email}` : ""}</p>{status === "Active" && <button className="invitation-revoke" type="button" onClick={() => revokeInvitation(invitation.id)} disabled={adminActionBusy}>Revoke link</button>}</article>;
+              })}
+            </section>
           </>}
 
-          {activeTab === "users" && isAdmin && <>
-            <form className="client-form admin-create-form" onSubmit={createInvitation}>
+          {activeTab === "users" && isAdmin && userFormOpen && <>
+            {createdInvitation ? <section className="created-client" role="status"><div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Invite link ready</h2><p>Anyone with this link can join until it expires or reaches its user limit.</p></div></div><Credential label={`Invite link · ${createdInvitation.label}`} value={createdInvitation.enrollment_url} copied={copied === "invitation"} onCopy={() => copyValue("invitation", createdInvitation.enrollment_url)} />{createdInvitation.email && <a className="secondary-action invitation-email-action" href={invitationEmailHref(createdInvitation)}><Mail aria-hidden="true" />Email this invite</a>}<p className="created-footnote">Expires {new Date(createdInvitation.expires_at * 1000).toLocaleString()}. The link is shown only now, so copy it before leaving this page.</p><button className="client-list-action create-another-invite" type="button" onClick={openCreateUser}><Plus aria-hidden="true" /> Create another invite</button></section> : <form className="client-form admin-create-form user-create-page" onSubmit={createInvitation}>
               <label className="admin-field"><span>Admin-only user label</span><input autoComplete="off" maxLength={80} value={invitationLabel} onChange={(event) => setInvitationLabel(event.target.value)} placeholder="Community event" required /><small>This label appears only in the administrator’s user list.</small></label>
               <label className="admin-field"><span>Email recipient <em>Optional</em></span><input type="email" autoComplete="email" maxLength={320} value={invitationEmail} onChange={(event) => { setInvitationEmail(event.target.value); if (event.target.value.trim()) setInvitationMaxUses("1"); else setInvitationMaxUses("10"); }} placeholder="person@example.com" /><small>Add an address to make this a one-use email invitation. You can open a prefilled email after creating it.</small></label>
               <div className="invitation-settings">
@@ -629,18 +679,8 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
               </div>
               {groups.length > 0 && <fieldset className="admin-options"><legend>Groups <em>Optional</em></legend><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check" key={group.id}><input type="checkbox" checked={userGroups.includes(group.name)} onChange={() => setUserGroups((current) => current.includes(group.name) ? current.filter((name) => name !== group.name) : [...current, group.name])} /><span><strong>{group.display_name}</strong></span></label>)}</div></fieldset>}
               {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
-              <button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !invitationLabel.trim() || (!invitationEmail.trim() && (!Number(invitationMaxUses) || Number(invitationMaxUses) > 500))}>{adminActionBusy ? "Creating link…" : "Create invite link"}</button>
-            </form>
-            {createdInvitation && <section className="created-client" role="status"><div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Invite link ready</h2><p>Anyone with this link can join until it expires or reaches its user limit.</p></div></div><Credential label={`Invite link · ${createdInvitation.label}`} value={createdInvitation.enrollment_url} copied={copied === "invitation"} onCopy={() => copyValue("invitation", createdInvitation.enrollment_url)} />{createdInvitation.email && <a className="secondary-action invitation-email-action" href={invitationEmailHref(createdInvitation)}><Mail aria-hidden="true" />Email this invite</a>}<p className="created-footnote">Expires {new Date(createdInvitation.expires_at * 1000).toLocaleString()}. The link is shown only now, so copy it before leaving this page.</p></section>}
-            <section className="registered-clients admin-records"><h2>Invite links <span>{invitations.length}</span></h2>
-              {invitations.length === 0 ? <p className="admin-hint">No invite links yet.</p> : invitations.map((invitation) => {
-                const status = invitationStatus(invitation);
-                return <article className="registered-client" key={invitation.id}><div className="registered-client-title"><h3>{invitation.label}</h3><span className={`client-status${status === "Active" ? "" : " disabled"}`}>{status}</span></div><p>{invitation.use_count} of {invitation.max_uses} users · Expires {new Date(invitation.expires_at * 1000).toLocaleString()}{invitation.email ? ` · ${invitation.email}` : ""}</p>{status === "Active" && <button className="invitation-revoke" type="button" onClick={() => revokeInvitation(invitation.id)} disabled={adminActionBusy}>Revoke link</button>}</article>;
-              })}
-            </section>
-            <section className="registered-clients admin-records"><h2>Accounts <span>{users.length}</span></h2>
-              {users.length === 0 ? <p className="admin-hint">No accounts found.</p> : users.map((user) => <article className="registered-client" key={user.id}><div className="registered-client-title"><h3>{user.display_name || user.username}</h3><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></div><code className="registered-client-id">{user.username}</code><p>{user.email || "No email address"}{user.groups.length ? ` · ${user.groups.join(", ")}` : ""}</p>{user.invitation_label && <span className="invitation-user-label">Invite label · {user.invitation_label}</span>}</article>)}
-            </section>
+              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !invitationLabel.trim() || (!invitationEmail.trim() && (!Number(invitationMaxUses) || Number(invitationMaxUses) > 500))}>{adminActionBusy ? "Creating link…" : "Create invite link"}</button><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={closeUserForm}>Cancel</button></div>
+            </form>}
           </>}
 
           {activeTab === "groups" && isAdmin && <>

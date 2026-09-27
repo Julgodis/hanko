@@ -36,6 +36,8 @@ Open the configured origin and follow the short setup sequence. The administrato
 
 For local development, the defaults are `PUBLIC_ORIGIN=http://localhost:3000` and `BIND_ADDRESS=127.0.0.1:3000`. For the Vite dev server, change `PUBLIC_ORIGIN` to `http://localhost:5173`, keep the backend bound to port 3000, start Hanko, then run `npm run dev` from `web`. Vite proxies API requests to `http://127.0.0.1:3000` (override with `HANKO_API` if needed). The packaged deployment serves the compiled UI from the Rust process.
 
+To inspect the admin UI without signing in or running the backend, start the Vite dev server and open `http://localhost:5173/?ui-preview=1`. This development-only preview uses in-memory sample clients, users, groups, invitations, and signing keys; writes affect only the current page session.
+
 ## OIDC clients
 
 Sign in with an administrator passkey and open `{PUBLIC_ORIGIN}/admin/clients` to manage clients, users, groups, and signing keys. Account settings are grouped below the administration tabs; regular users can open `{PUBLIC_ORIGIN}/account` for the same Hanko and passkey settings layout. Public OIDC clients use PKCE without a secret. Confidential clients authenticate with their one-time client secret and may use PKCE as an additional protection. Configure the exact callback URL registered by the application and add only the scopes it needs. The server provides:
