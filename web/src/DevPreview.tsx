@@ -1,19 +1,30 @@
 import App from "./App";
+import { Sun } from "lucide-react";
+import { useEffect, useState } from "react";
 import "./styles.css";
 
-type PreviewScreen = "signin" | "consent" | "welcome" | "setup" | "clients" | "account";
+type PreviewScreen = "signin" | "consent" | "welcome" | "setup" | "join-invite" | "clients" | "users" | "invite" | "invite-ready" | "groups" | "keys" | "passkeys" | "hanko" | "client-form";
 
 const previewScreens: { id: PreviewScreen; label: string }[] = [
   { id: "signin", label: "Sign in" },
   { id: "consent", label: "Consent" },
   { id: "welcome", label: "Welcome" },
   { id: "setup", label: "First run" },
-  { id: "clients", label: "Admin" },
-  { id: "account", label: "Account" },
+  { id: "join-invite", label: "Accept invite" },
+  { id: "clients", label: "Clients" },
+  { id: "client-form", label: "Add client" },
+  { id: "users", label: "Users" },
+  { id: "invite", label: "Invite user" },
+  { id: "invite-ready", label: "Invite ready" },
+  { id: "groups", label: "Groups" },
+  { id: "keys", label: "Signing keys" },
+  { id: "passkeys", label: "Passkeys" },
+  { id: "hanko", label: "Hanko" },
 ];
 
 const screenParam = new URLSearchParams(window.location.search).get("screen") as PreviewScreen | null;
-const screen: PreviewScreen = previewScreens.some((item) => item.id === screenParam) ? screenParam! : "clients";
+const screen: PreviewScreen = previewScreens.some((item) => item.id === screenParam) ? screenParam! : "signin";
+const adminScreens = ["clients", "client-form", "users", "invite", "invite-ready", "groups", "keys"];
 
 const clients = [
   {
@@ -100,9 +111,9 @@ function installPreviewApi() {
 
     const method = init?.method?.toUpperCase() ?? (input instanceof Request ? input.method : "GET");
     if (url.pathname === "/api/session") return jsonResponse({
-      authenticated: ["consent", "welcome", "clients", "account"].includes(screen),
+      authenticated: !["signin", "setup"].includes(screen),
       setup_only: false,
-      is_admin: screen === "clients",
+      is_admin: adminScreens.includes(screen),
       hanko_color: "#d64135",
       hanko_seed: "hanko",
       oidc_username: "sana.lee",
@@ -172,13 +183,26 @@ document.title = "Hanko · UI preview";
 installPreviewApi();
 
 function previewHref(target: PreviewScreen) {
-  const path = target === "clients" ? "/admin/clients" : target === "account" ? "/account" : "/";
+  const path = adminScreens.includes(target) ? "/admin/clients" : ["hanko", "passkeys"].includes(target) ? "/account" : "/";
   const query = new URLSearchParams({ "ui-preview": "1", screen: target });
   if (target === "consent") query.set("request_id", "preview-consent");
+  if (target === "join-invite") query.set("enroll", "preview-invite-token");
   return `${path}?${query.toString()}`;
 }
 
 export default function DevPreview() {
+  const [lightMode, setLightMode] = useState(() => window.localStorage.getItem("hanko-ui-preview-theme") === "light");
+
+  useEffect(() => {
+    if (lightMode) {
+      document.documentElement.dataset.previewTheme = "light";
+      window.localStorage.setItem("hanko-ui-preview-theme", "light");
+    } else {
+      delete document.documentElement.dataset.previewTheme;
+      window.localStorage.removeItem("hanko-ui-preview-theme");
+    }
+  }, [lightMode]);
+
   return <>
     <nav className="preview-toolbar" aria-label="UI preview screens">
       <span className="preview-label">Preview</span>
@@ -187,7 +211,13 @@ export default function DevPreview() {
         href={previewHref(item.id)}
         aria-current={screen === item.id ? "page" : undefined}
       >{item.label}</a>)}
-      <span className="preview-hint">Admin includes users, groups, keys &amp; seal settings</span>
+      <button
+        className="preview-theme-button"
+        type="button"
+        aria-label="Light mode preview"
+        aria-pressed={lightMode}
+        onClick={() => setLightMode((value) => !value)}
+      ><Sun aria-hidden="true" />Light mode</button>
     </nav>
     <App key={screen} />
   </>;
