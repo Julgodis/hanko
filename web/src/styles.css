@@ -548,6 +548,15 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
 .admin-content > .admin-message { margin-bottom: 18px; }
 .admin-create-form { max-width: 530px; }
 .admin-records { margin-top: 36px; }
+.invitation-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.invitation-settings .admin-field small { font-size: 13px; }
+.invitation-expiry-fields { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1fr); gap: 10px; }
+.invitation-expiry-fields .admin-field { min-width: 0; }
+.invitation-email-action { width: fit-content; min-height: 42px; margin: 0; color: var(--ink); font-size: 14px; text-decoration: none; }
+.invitation-email-action svg { width: 16px; height: 16px; color: var(--vermilion); }
+.invitation-user-label { display: inline-flex; width: fit-content; margin-top: 8px; padding: 4px 8px; border: 1px solid color-mix(in srgb, var(--vermilion), transparent 72%); border-radius: 99px; color: var(--vermilion-dark); background: color-mix(in srgb, var(--vermilion), transparent 95%); font-size: 12px; }
+.invitation-revoke { margin-top: 9px; padding: 0; border: 0; color: var(--error); background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
+.invitation-revoke:disabled { cursor: wait; opacity: .6; }
 .key-management { display: grid; justify-items: start; gap: 16px; }
 .key-management .secondary-action { width: auto; min-height: 44px; margin: 0; gap: 9px; color: var(--ink); font-size: 13px; }
 .key-management .secondary-action svg { width: 16px; height: 16px; color: var(--vermilion); }
@@ -839,6 +848,7 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
   .admin-scene { padding-inline: 20px; }
   .admin-heading { margin-bottom: 28px; }
   .admin-choice-grid { grid-template-columns: 1fr; }
+  .invitation-settings { grid-template-columns: 1fr; }
   .setup-scene { padding-inline: 25px; }
   .setup-panel { max-width: 370px; }
   .seal-customizer-actions { width: 100%; }

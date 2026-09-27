@@ -1,4 +1,4 @@
-import { Check, Copy, Fingerprint, KeyRound, Pencil, Plus, Shield, Users, UserRound, Stamp, Trash2 } from "lucide-react";
+import { Check, Copy, Fingerprint, KeyRound, Mail, Pencil, Plus, Shield, Users, UserRound, Stamp, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
@@ -7,6 +7,8 @@ import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
 import { api, json } from "./lib/utils";
 
 const AVAILABLE_SCOPES = ["profile", "email", "groups"] as const;
+const EXPIRY_UNIT_SECONDS = { seconds: 1, minutes: 60, hours: 60 * 60, days: 24 * 60 * 60, years: 365 * 24 * 60 * 60 } as const;
+type ExpiryUnit = keyof typeof EXPIRY_UNIT_SECONDS;
 
 type Scope = "openid" | (typeof AVAILABLE_SCOPES)[number];
 type Client = {
@@ -22,7 +24,9 @@ type Client = {
   user_count: number;
 };
 type Group = { id: string; name: string; display_name: string; member_count: number };
-type AdminUser = { id: string; username: string; display_name: string; email: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
+type AdminUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
+type Invitation = { id: string; label: string; email: string | null; max_uses: number; use_count: number; created_at: number; expires_at: number; revoked: boolean };
+type CreatedInvitation = { id: string; label: string; email: string | null; enrollment_url: string; expires_at: number };
 type SigningKey = { kid: string; algorithm: string; status: string; created_at: number; retire_after: number | null };
 type AccountPasskey = { id: string; label: string; created_at: number; last_used_at: number | null };
 type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys";
@@ -45,6 +49,20 @@ function splitLines(value: string) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "The request could not be completed.";
+}
+
+function invitationEmailHref(invitation: CreatedInvitation) {
+  const subject = `Your Hanko invite: ${invitation.label}`;
+  const expiry = new Date(invitation.expires_at * 1000).toLocaleString();
+  const body = `You have been invited to set up a Hanko account.\n\nUse this link before ${expiry}:\n${invitation.enrollment_url}`;
+  return `mailto:${encodeURIComponent(invitation.email ?? "")}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+function invitationStatus(invitation: Invitation) {
+  if (invitation.revoked) return "Revoked";
+  if (invitation.expires_at <= Date.now() / 1000) return "Expired";
+  if (invitation.use_count >= invitation.max_uses) return "Limit reached";
+  return "Active";
 }
 
 export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
@@ -85,11 +103,14 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [hankoSeed, setHankoSeed] = useState("hanko");
   const [savingHanko, setSavingHanko] = useState(false);
   const [hankoMessage, setHankoMessage] = useState("");
-  const [userName, setUserName] = useState("");
-  const [userDisplayName, setUserDisplayName] = useState("");
-  const [userEmail, setUserEmail] = useState("");
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
+  const [invitationLabel, setInvitationLabel] = useState("");
+  const [invitationEmail, setInvitationEmail] = useState("");
+  const [invitationMaxUses, setInvitationMaxUses] = useState("10");
+  const [invitationExpiry, setInvitationExpiry] = useState("7");
+  const [invitationExpiryUnit, setInvitationExpiryUnit] = useState<ExpiryUnit>("days");
   const [userGroups, setUserGroups] = useState<string[]>([]);
-  const [createdInvitation, setCreatedInvitation] = useState("");
+  const [createdInvitation, setCreatedInvitation] = useState<CreatedInvitation | null>(null);
   const [groupName, setGroupName] = useState("");
   const [groupDisplayName, setGroupDisplayName] = useState("");
   const [adminActionBusy, setAdminActionBusy] = useState(false);
@@ -133,7 +154,14 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     let active = true;
     async function loadTabData() {
       try {
-        if (activeTab === "users" && isAdmin) setUsers(await api<AdminUser[]>("/api/admin/users"));
+        if (activeTab === "users" && isAdmin) {
+          const [userList, invitationList] = await Promise.all([
+            api<AdminUser[]>("/api/admin/users"),
+            api<Invitation[]>("/api/admin/invitations"),
+          ]);
+          setUsers(userList);
+          setInvitations(invitationList);
+        }
         if (activeTab === "keys" && isAdmin) setSigningKeys(await api<SigningKey[]>("/api/admin/signing-keys"));
         if (activeTab === "passkeys") {
           setPasskeysLoading(true);
@@ -279,30 +307,48 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     }
   }
 
-  async function createUser(event: FormEvent<HTMLFormElement>) {
+  async function createInvitation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAdminActionBusy(true);
     setAdminActionMessage("");
-    setCreatedInvitation("");
+    setCreatedInvitation(null);
+    const label = invitationLabel.trim();
+    const email = invitationEmail.trim() || null;
     try {
-      const invitation = await api<{ enrollment_url: string }>("/api/admin/users", {
+      const invitation = await api<Omit<CreatedInvitation, "label" | "email">>("/api/admin/invitations", {
         method: "POST",
         body: json({
-          username: userName.trim(),
-          display_name: userDisplayName.trim(),
-          email: userEmail.trim() || null,
-          attributes: {},
+          label,
+          email,
+          max_uses: email ? 1 : Number(invitationMaxUses),
+          expires_in: Number(invitationExpiry),
+          expires_unit: invitationExpiryUnit,
           groups: userGroups,
         }),
       });
-      setCreatedInvitation(invitation.enrollment_url);
-      setUserName("");
-      setUserDisplayName("");
-      setUserEmail("");
+      setCreatedInvitation({ ...invitation, label, email });
+      setInvitationLabel("");
+      setInvitationEmail("");
+      setInvitationMaxUses("10");
+      setInvitationExpiry("7");
+      setInvitationExpiryUnit("days");
       setUserGroups([]);
-      setUsers(await api<AdminUser[]>("/api/admin/users"));
+      setInvitations(await api<Invitation[]>("/api/admin/invitations"));
     } catch (createError) {
       setAdminActionMessage(errorMessage(createError));
+    } finally {
+      setAdminActionBusy(false);
+    }
+  }
+
+  async function revokeInvitation(invitationId: string) {
+    setAdminActionBusy(true);
+    setAdminActionMessage("");
+    try {
+      await api(`/api/admin/invitations/${encodeURIComponent(invitationId)}/revoke`, { method: "POST" });
+      setInvitations(await api<Invitation[]>("/api/admin/invitations"));
+    } catch (revokeError) {
+      setAdminActionMessage(errorMessage(revokeError));
     } finally {
       setAdminActionBusy(false);
     }
@@ -461,7 +507,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   ];
   const tabTitles: Record<Tab, [string, string]> = {
     clients: ["OIDC clients", "Connect applications to Hanko."],
-    users: ["Users", "Invite people and review their accounts."],
+    users: ["Users", "Create labeled invite links and review their accounts."],
     groups: ["Groups", "Organize access to OIDC clients."],
     keys: ["Signing keys", "Manage the keys used to sign tokens."],
     hanko: ["Your Hanko", "Your personal seal."],
@@ -567,17 +613,26 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           </>}
 
           {activeTab === "users" && isAdmin && <>
-            <form className="client-form admin-create-form" onSubmit={createUser}>
-              <label className="admin-field"><span>Username</span><input autoComplete="off" maxLength={80} value={userName} onChange={(event) => setUserName(event.target.value)} required /></label>
-              <label className="admin-field"><span>Display name</span><input autoComplete="name" maxLength={120} value={userDisplayName} onChange={(event) => setUserDisplayName(event.target.value)} required /></label>
-              <label className="admin-field"><span>Email <em>Optional</em></span><input type="email" autoComplete="email" maxLength={320} value={userEmail} onChange={(event) => setUserEmail(event.target.value)} /></label>
+            <form className="client-form admin-create-form" onSubmit={createInvitation}>
+              <label className="admin-field"><span>Admin-only user label</span><input autoComplete="off" maxLength={80} value={invitationLabel} onChange={(event) => setInvitationLabel(event.target.value)} placeholder="Community event" required /><small>This label appears only in the administrator’s user list.</small></label>
+              <label className="admin-field"><span>Email recipient <em>Optional</em></span><input type="email" autoComplete="email" maxLength={320} value={invitationEmail} onChange={(event) => { setInvitationEmail(event.target.value); if (event.target.value.trim()) setInvitationMaxUses("1"); else setInvitationMaxUses("10"); }} placeholder="person@example.com" /><small>Add an address to make this a one-use email invitation. You can open a prefilled email after creating it.</small></label>
+              <div className="invitation-settings">
+                <label className="admin-field"><span>User limit</span><input type="number" min={1} max={500} value={invitationMaxUses} onChange={(event) => setInvitationMaxUses(event.target.value)} disabled={Boolean(invitationEmail.trim())} required /><small>{invitationEmail.trim() ? "Email invitations are limited to one user." : "How many accounts can use this link?"}</small></label>
+                <div className="invitation-expiry-fields"><label className="admin-field"><span>Link expires in</span><input type="number" min={1} max={Math.floor((10 * 365 * 24 * 60 * 60) / EXPIRY_UNIT_SECONDS[invitationExpiryUnit])} value={invitationExpiry} onChange={(event) => setInvitationExpiry(event.target.value)} required /></label><label className="admin-field"><span>Unit</span><select value={invitationExpiryUnit} onChange={(event) => setInvitationExpiryUnit(event.target.value as ExpiryUnit)}><option value="seconds">Seconds</option><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select><small>Up to 10 years.</small></label></div>
+              </div>
               {groups.length > 0 && <fieldset className="admin-options"><legend>Groups <em>Optional</em></legend><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check" key={group.id}><input type="checkbox" checked={userGroups.includes(group.name)} onChange={() => setUserGroups((current) => current.includes(group.name) ? current.filter((name) => name !== group.name) : [...current, group.name])} /><span><strong>{group.display_name}</strong></span></label>)}</div></fieldset>}
               {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
-              <button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !userName.trim() || !userDisplayName.trim()}>{adminActionBusy ? "Creating invitation…" : "Invite user"}</button>
+              <button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !invitationLabel.trim() || (!invitationEmail.trim() && (!Number(invitationMaxUses) || Number(invitationMaxUses) > 500))}>{adminActionBusy ? "Creating link…" : "Create invite link"}</button>
             </form>
-            {createdInvitation && <section className="created-client" role="status"><div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Invitation ready</h2><p>Share this one-time link with the user.</p></div></div><Credential label="Enrollment link · expires in 24 hours" value={createdInvitation} copied={copied === "invitation"} onCopy={() => copyValue("invitation", createdInvitation)} /></section>}
+            {createdInvitation && <section className="created-client" role="status"><div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Invite link ready</h2><p>Anyone with this link can join until it expires or reaches its user limit.</p></div></div><Credential label={`Invite link · ${createdInvitation.label}`} value={createdInvitation.enrollment_url} copied={copied === "invitation"} onCopy={() => copyValue("invitation", createdInvitation.enrollment_url)} />{createdInvitation.email && <a className="secondary-action invitation-email-action" href={invitationEmailHref(createdInvitation)}><Mail aria-hidden="true" />Email this invite</a>}<p className="created-footnote">Expires {new Date(createdInvitation.expires_at * 1000).toLocaleString()}. The link is shown only now, so copy it before leaving this page.</p></section>}
+            <section className="registered-clients admin-records"><h2>Invite links <span>{invitations.length}</span></h2>
+              {invitations.length === 0 ? <p className="admin-hint">No invite links yet.</p> : invitations.map((invitation) => {
+                const status = invitationStatus(invitation);
+                return <article className="registered-client" key={invitation.id}><div className="registered-client-title"><h3>{invitation.label}</h3><span className={`client-status${status === "Active" ? "" : " disabled"}`}>{status}</span></div><p>{invitation.use_count} of {invitation.max_uses} users · Expires {new Date(invitation.expires_at * 1000).toLocaleString()}{invitation.email ? ` · ${invitation.email}` : ""}</p>{status === "Active" && <button className="invitation-revoke" type="button" onClick={() => revokeInvitation(invitation.id)} disabled={adminActionBusy}>Revoke link</button>}</article>;
+              })}
+            </section>
             <section className="registered-clients admin-records"><h2>Accounts <span>{users.length}</span></h2>
-              {users.length === 0 ? <p className="admin-hint">No accounts found.</p> : users.map((user) => <article className="registered-client" key={user.id}><div className="registered-client-title"><h3>{user.display_name || user.username}</h3><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></div><code className="registered-client-id">{user.username}</code><p>{user.email || "No email address"}{user.groups.length ? ` · ${user.groups.join(", ")}` : ""}</p></article>)}
+              {users.length === 0 ? <p className="admin-hint">No accounts found.</p> : users.map((user) => <article className="registered-client" key={user.id}><div className="registered-client-title"><h3>{user.display_name || user.username}</h3><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></div><code className="registered-client-id">{user.username}</code><p>{user.email || "No email address"}{user.groups.length ? ` · ${user.groups.join(", ")}` : ""}</p>{user.invitation_label && <span className="invitation-user-label">Invite label · {user.invitation_label}</span>}</article>)}
             </section>
           </>}
 
