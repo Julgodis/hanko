@@ -491,6 +491,29 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
 .passkey-feedback { margin: 10px 0 0; font-size: 14px; line-height: 1.5; }
 .passkey-feedback-success { color: var(--success); }
 .passkey-feedback-error { color: var(--error); }
+.passkey-list { margin-top: 30px; }
+.passkey-list > h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 13px; color: var(--ink); font-family: "Iowan Old Style", Georgia, serif; font-size: 19px; font-weight: 400; }
+.passkey-list > h3 > span { display: grid; min-width: 23px; height: 23px; place-items: center; padding: 0 6px; border-radius: 99px; color: var(--ink-muted); background: var(--paper-raised); font: 12px ui-sans-serif, system-ui, sans-serif; }
+.passkey-record { padding: 15px 0; border-top: 1px solid var(--rule); }
+.passkey-record-heading h4 { margin: 0; color: var(--ink); font-size: 15px; font-weight: 600; }
+.passkey-record-heading p { margin: 4px 0 12px; color: var(--ink-muted); font-size: 13px; }
+.passkey-rename-form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: end; gap: 9px; }
+.passkey-row-action { width: auto; min-height: 42px; margin: 0; padding: 0 14px; border-color: var(--rule); color: var(--ink); background: var(--paper-raised); font-size: 13px; }
+.passkey-row-action:hover:not(:disabled) { border-color: color-mix(in srgb, var(--ink), transparent 65%); background: color-mix(in srgb, var(--paper-raised), transparent 8%); }
+.passkey-remove-button { display: inline-flex; min-height: 42px; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; border: 1px solid color-mix(in srgb, var(--error), transparent 52%); border-radius: 8px; color: var(--error); background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
+.passkey-remove-button svg { width: 15px; height: 15px; }
+.passkey-remove-button:hover:not(:disabled) { background: color-mix(in srgb, var(--error), transparent 93%); }
+.passkey-remove-button:disabled { cursor: not-allowed; opacity: .55; }
+.passkey-last-note { margin: 8px 0 0; color: var(--ink-faint); font-size: 12px; }
+.passkey-remove-confirmation { display: grid; gap: 13px; margin-top: 20px; padding: 16px; border: 1px solid color-mix(in srgb, var(--error), transparent 55%); border-radius: 9px; background: color-mix(in srgb, var(--error), transparent 97%); }
+.passkey-remove-confirmation h3, .passkey-remove-confirmation p { margin: 0; }
+.passkey-remove-confirmation h3 { color: var(--ink); font-size: 15px; font-weight: 600; }
+.passkey-remove-confirmation p { margin-top: 5px; color: var(--ink-muted); font-size: 13px; line-height: 1.5; }
+.passkey-remove-confirmation strong { color: var(--error); letter-spacing: .05em; }
+.passkey-remove-confirmation .admin-field { max-width: 300px; }
+.passkey-remove-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.passkey-remove-actions .passkey-remove-button,
+.passkey-remove-actions .passkey-row-action { min-width: 128px; }
 
 .admin-panel {
   position: relative;
@@ -823,6 +846,10 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
   .seal-animation-gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .passkey-add-form { grid-template-columns: 1fr; }
   .passkey-add-button { width: 100%; }
+  .passkey-rename-form { grid-template-columns: minmax(0, 1fr) auto; }
+  .passkey-rename-form .admin-field { grid-column: 1 / -1; }
+  .passkey-rename-form .passkey-row-action,
+  .passkey-rename-form .passkey-remove-button { width: 100%; }
   .claim-editor { grid-template-columns: minmax(0, 1fr) 34px; }
   .claim-editor .admin-field { grid-column: 1; }
   .claim-editor .admin-field:not(:first-child) { grid-column: 1 / -1; }
