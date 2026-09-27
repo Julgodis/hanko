@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{OriginalUri, State},
+    extract::{OriginalUri, Path, State},
     http::{HeaderMap, HeaderValue, Request, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
     routing::{get, get_service, post},
@@ -98,6 +98,24 @@ struct SessionResponse {
 }
 
 #[derive(Serialize)]
+struct AccountPasskey {
+    id: String,
+    label: String,
+    created_at: i64,
+    last_used_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct RenamePasskeyInput {
+    label: String,
+}
+
+#[derive(Deserialize)]
+struct RemovePasskeyInput {
+    confirmation: String,
+}
+
+#[derive(Serialize)]
 struct ErrorBody {
     error: &'static str,
 }
@@ -133,6 +151,13 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             message,
+        }
+    }
+
+    fn not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: "passkey not found",
         }
     }
 
@@ -173,6 +198,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/passkeys/login/verify", post(login_verify))
         .route("/api/passkeys/register/options", post(register_options))
         .route("/api/passkeys/register/verify", post(register_verify))
+        .route("/api/passkeys", get(list_passkeys))
+        .route(
+            "/api/passkeys/{passkey_id}",
+            axum::routing::put(rename_passkey).delete(remove_passkey),
+        )
         .route("/logout", post(logout))
         .route_service("/", get_service(ServeFile::new("web/dist/index.html")))
         .route_service(
@@ -640,6 +670,114 @@ async fn register_verify(
         })?;
     // Bootstrap and invitation sessions are deliberately limited to enrolling a passkey.
     // Promote the session only after the credential has been committed successfully.
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn list_passkeys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AccountPasskey>>, ApiError> {
+    let session = require_session(&headers, &state.database).await?;
+    let rows = sqlx::query(
+        "SELECT id, label, created_at, last_used_at FROM passkeys WHERE user_id = ? ORDER BY created_at, id",
+    )
+    .bind(&session.user_id)
+    .fetch_all(&state.database.pool)
+    .await
+    .map_err(|_| ApiError::internal())?;
+    let passkeys = rows
+        .into_iter()
+        .map(|row| {
+            Ok(AccountPasskey {
+                id: row.try_get("id").map_err(|_| ApiError::internal())?,
+                label: row.try_get("label").map_err(|_| ApiError::internal())?,
+                created_at: row
+                    .try_get("created_at")
+                    .map_err(|_| ApiError::internal())?,
+                last_used_at: row
+                    .try_get("last_used_at")
+                    .map_err(|_| ApiError::internal())?,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(Json(passkeys))
+}
+
+async fn rename_passkey(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(passkey_id): Path<String>,
+    Json(input): Json<RenamePasskeyInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_origin(&headers, &state.config)?;
+    let session = require_session(&headers, &state.database).await?;
+    require_csrf(&headers, &session)?;
+    if session.setup_only {
+        return Err(ApiError::forbidden());
+    }
+
+    let label = input.label.trim();
+    if label.is_empty() || label.chars().count() > 100 {
+        return Err(ApiError::bad_request(
+            "passkey name must be 1 to 100 characters",
+        ));
+    }
+    let updated = sqlx::query("UPDATE passkeys SET label = ? WHERE id = ? AND user_id = ?")
+        .bind(label)
+        .bind(passkey_id)
+        .bind(&session.user_id)
+        .execute(&state.database.pool)
+        .await
+        .map_err(|_| ApiError::internal())?;
+    if updated.rows_affected() == 0 {
+        return Err(ApiError::not_found());
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn remove_passkey(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(passkey_id): Path<String>,
+    Json(input): Json<RemovePasskeyInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_origin(&headers, &state.config)?;
+    let session = require_session(&headers, &state.database).await?;
+    require_csrf(&headers, &session)?;
+    if session.setup_only {
+        return Err(ApiError::forbidden());
+    }
+    if input.confirmation != "REMOVE" {
+        return Err(ApiError::bad_request(
+            "type REMOVE to confirm passkey removal",
+        ));
+    }
+
+    // Keep this count check in the DELETE itself so concurrent removals cannot
+    // leave an account without a credential.
+    let deleted = sqlx::query(
+        "DELETE FROM passkeys WHERE id = ? AND user_id = ? AND (SELECT COUNT(*) FROM passkeys WHERE user_id = ?) > 1",
+    )
+    .bind(&passkey_id)
+    .bind(&session.user_id)
+    .bind(&session.user_id)
+    .execute(&state.database.pool)
+    .await
+    .map_err(|_| ApiError::internal())?;
+    if deleted.rows_affected() == 0 {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM passkeys WHERE id = ? AND user_id = ?)",
+        )
+        .bind(passkey_id)
+        .bind(&session.user_id)
+        .fetch_one(&state.database.pool)
+        .await
+        .map_err(|_| ApiError::internal())?;
+        if !exists {
+            return Err(ApiError::not_found());
+        }
+        return Err(ApiError::conflict("at least one passkey must remain"));
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

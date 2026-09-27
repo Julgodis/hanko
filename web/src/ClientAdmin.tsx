@@ -21,6 +21,7 @@ type Client = {
 type Group = { id: string; name: string; display_name: string; member_count: number };
 type AdminUser = { id: string; username: string; display_name: string; email: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
 type SigningKey = { kid: string; algorithm: string; status: string; created_at: number; retire_after: number | null };
+type AccountPasskey = { id: string; label: string; created_at: number; last_used_at: number | null };
 type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys";
 type ClaimDraft = { claim_name: string; user_attribute_path: string; required_scope: string };
 type CreatedClient = {
@@ -66,6 +67,12 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [addingPasskey, setAddingPasskey] = useState(false);
   const [passkeyError, setPasskeyError] = useState("");
   const [passkeyMessage, setPasskeyMessage] = useState("");
+  const [passkeys, setPasskeys] = useState<AccountPasskey[]>([]);
+  const [passkeyDrafts, setPasskeyDrafts] = useState<Record<string, string>>({});
+  const [passkeysLoading, setPasskeysLoading] = useState(false);
+  const [passkeyActionId, setPasskeyActionId] = useState("");
+  const [removeTarget, setRemoveTarget] = useState<AccountPasskey | null>(null);
+  const [removalConfirmation, setRemovalConfirmation] = useState("");
   const [hankoColor, setHankoColor] = useState(ORIGINAL_HANKO_GRADIENT);
   const [hankoSeed, setHankoSeed] = useState("hanko");
   const [savingHanko, setSavingHanko] = useState(false);
@@ -82,6 +89,12 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
 
   async function refreshClients() {
     setClients(await api<Client[]>("/api/admin/clients"));
+  }
+
+  async function refreshPasskeys() {
+    const records = await api<AccountPasskey[]>("/api/passkeys");
+    setPasskeys(records);
+    setPasskeyDrafts(Object.fromEntries(records.map((passkey) => [passkey.id, passkey.label])));
   }
 
   useEffect(() => {
@@ -114,8 +127,18 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       try {
         if (activeTab === "users" && isAdmin) setUsers(await api<AdminUser[]>("/api/admin/users"));
         if (activeTab === "keys" && isAdmin) setSigningKeys(await api<SigningKey[]>("/api/admin/signing-keys"));
+        if (activeTab === "passkeys") {
+          setPasskeysLoading(true);
+          const records = await api<AccountPasskey[]>("/api/passkeys");
+          if (active) {
+            setPasskeys(records);
+            setPasskeyDrafts(Object.fromEntries(records.map((passkey) => [passkey.id, passkey.label])));
+          }
+        }
       } catch (tabError) {
         if (active) setLoadError(errorMessage(tabError));
+      } finally {
+        if (active && activeTab === "passkeys") setPasskeysLoading(false);
       }
     }
     void loadTabData();
@@ -262,6 +285,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         method: "POST",
         body: json({ ceremony_id: start.ceremony_id, credential, label: passkeyLabel.trim() }),
       });
+      await refreshPasskeys();
       setPasskeyMessage(`Passkey added${passkeyLabel.trim() ? ` as “${passkeyLabel.trim()}”` : " to this account"}.`);
       setPasskeyLabel("");
     } catch {
@@ -269,6 +293,56 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     } finally {
       setAddingPasskey(false);
     }
+  }
+
+  async function renamePasskey(event: FormEvent<HTMLFormElement>, passkey: AccountPasskey) {
+    event.preventDefault();
+    setPasskeyActionId(passkey.id);
+    setPasskeyError("");
+    setPasskeyMessage("");
+    try {
+      const label = passkeyDrafts[passkey.id]?.trim() ?? "";
+      await api(`/api/passkeys/${encodeURIComponent(passkey.id)}`, {
+        method: "PUT",
+        body: json({ label }),
+      });
+      await refreshPasskeys();
+      setPasskeyMessage(`Passkey renamed to “${label}”.`);
+    } catch (renameError) {
+      setPasskeyError(errorMessage(renameError));
+    } finally {
+      setPasskeyActionId("");
+    }
+  }
+
+  async function removePasskey(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!removeTarget || passkeys.length <= 1 || removalConfirmation !== "REMOVE") return;
+    setPasskeyActionId(removeTarget.id);
+    setPasskeyError("");
+    setPasskeyMessage("");
+    try {
+      await api(`/api/passkeys/${encodeURIComponent(removeTarget.id)}`, {
+        method: "DELETE",
+        body: json({ confirmation: removalConfirmation }),
+      });
+      await refreshPasskeys();
+      setRemoveTarget(null);
+      setRemovalConfirmation("");
+      setPasskeyMessage(`Passkey “${removeTarget.label}” removed.`);
+    } catch (removeError) {
+      setPasskeyError(errorMessage(removeError));
+      try { await refreshPasskeys(); } catch { /* Keep the original action error visible. */ }
+    } finally {
+      setPasskeyActionId("");
+    }
+  }
+
+  function beginPasskeyRemoval(passkey: AccountPasskey) {
+    setPasskeyError("");
+    setPasskeyMessage("");
+    setRemovalConfirmation("");
+    setRemoveTarget(passkey);
   }
 
   async function saveHanko() {
@@ -319,7 +393,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     groups: ["Groups", "Organize access to OIDC clients."],
     keys: ["Signing keys", "Manage the keys used to sign tokens."],
     hanko: ["Your Hanko", "Your personal seal."],
-    passkeys: ["Passkeys", "Add another device to your account."],
+    passkeys: ["Passkeys", "Manage the devices that can sign in to your account."],
   };
   const [title, description] = tabTitles[activeTab];
 
@@ -479,9 +553,26 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           </section>}
 
           {activeTab === "passkeys" && <section className="account-passkeys">
-            <div className="passkey-section-heading"><span><Fingerprint aria-hidden="true" /></span><div><h2>Your passkeys</h2><p>Add another device to this account.</p></div></div>
+            <div className="passkey-section-heading"><span><Fingerprint aria-hidden="true" /></span><div><h2>Your passkeys</h2><p>Rename devices or remove ones you no longer use. Keep at least one passkey on your account.</p></div></div>
             <form className="passkey-add-form" onSubmit={addPasskey}><label className="admin-field"><span>Device label <em>Optional</em></span><input value={passkeyLabel} onChange={(event) => setPasskeyLabel(event.target.value)} maxLength={100} placeholder="e.g. MacBook" /></label><button className="secondary-action passkey-add-button" type="submit" disabled={addingPasskey}><Fingerprint aria-hidden="true" /> {addingPasskey ? "Follow your device prompt…" : "Add passkey"}</button></form>
             {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
+            <section className="passkey-list" aria-labelledby="passkey-list-title">
+              <h3 id="passkey-list-title">Registered devices <span>{passkeys.length}</span></h3>
+              {passkeysLoading ? <p className="admin-hint">Loading passkeys…</p> : passkeys.length === 0 ? <p className="admin-hint">No passkeys are registered.</p> : passkeys.map((passkey) => <article className="passkey-record" key={passkey.id}>
+                <div className="passkey-record-heading"><h4>{passkey.label}</h4><p>Added {new Date(passkey.created_at * 1000).toLocaleDateString()}{passkey.last_used_at ? ` · Last used ${new Date(passkey.last_used_at * 1000).toLocaleDateString()}` : " · Not used yet"}</p></div>
+                <form className="passkey-rename-form" onSubmit={(event) => renamePasskey(event, passkey)}>
+                  <label className="admin-field"><span>Device name</span><input value={passkeyDrafts[passkey.id] ?? passkey.label} onChange={(event) => setPasskeyDrafts((current) => ({ ...current, [passkey.id]: event.target.value }))} maxLength={100} required /></label>
+                  <button className="secondary-action passkey-row-action" type="submit" disabled={Boolean(passkeyActionId) || (passkeyDrafts[passkey.id] ?? passkey.label).trim() === passkey.label}>{passkeyActionId === passkey.id ? "Saving…" : "Rename"}</button>
+                  <button className="passkey-remove-button" type="button" onClick={() => beginPasskeyRemoval(passkey)} disabled={passkeys.length <= 1 || Boolean(passkeyActionId)}><Trash2 aria-hidden="true" /> Remove</button>
+                </form>
+                {passkeys.length <= 1 && <p className="passkey-last-note">Your account must keep at least one passkey.</p>}
+              </article>)}
+            </section>
+            {removeTarget && <form className="passkey-remove-confirmation" onSubmit={removePasskey}>
+              <div><h3>Remove “{removeTarget.label}”?</h3><p>This permanently removes the passkey from your account. Type <strong>REMOVE</strong> to confirm.</p></div>
+              <label className="admin-field"><span>Confirmation</span><input autoComplete="off" autoFocus value={removalConfirmation} onChange={(event) => setRemovalConfirmation(event.target.value)} placeholder="Type REMOVE" /></label>
+              <div className="passkey-remove-actions"><button className="passkey-remove-button" type="submit" disabled={passkeys.length <= 1 || removalConfirmation !== "REMOVE" || Boolean(passkeyActionId)}>{passkeyActionId === removeTarget.id ? "Removing…" : "Remove passkey"}</button><button className="secondary-action passkey-row-action" type="button" disabled={Boolean(passkeyActionId)} onClick={() => { setRemoveTarget(null); setRemovalConfirmation(""); }}>Cancel</button></div>
+            </form>}
           </section>}
         </>}
       </section>
