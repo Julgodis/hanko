@@ -1,0 +1,12 @@
+.git
+.github
+.env
+.env.*
+target
+web/node_modules
+web/dist
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log

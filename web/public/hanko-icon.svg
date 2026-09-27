@@ -1,0 +1,78 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title desc"
+>
+  <title id="title">Hanko seal</title>
+  <desc id="desc">
+    A geometric vermilion seal mark inspired by Japanese hanko.
+  </desc>
+
+  <defs>
+    <!-- Lower seal-script form -->
+    <path id="seal-form" d="
+      M 278 744
+      H 405
+      V 620
+      C 405 590, 435 574, 476 574
+      H 548
+      C 589 574, 619 590, 619 620
+      V 744
+      H 746
+    "/>
+
+    <!-- One side pillar -->
+    <path id="pillar" d="M 286 408 V 638"/>
+
+    <!-- Lower center block -->
+    <rect
+      id="center-block"
+      x="470"
+      y="650"
+      width="84"
+      height="110"
+      rx="24"
+    />
+  </defs>
+
+  <g
+    fill="none"
+    stroke="#D64135"
+    stroke-width="76"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <!-- Outer frame -->
+    <rect x="122" y="122" width="780" height="780" rx="132"/>
+
+    <!-- Upper form: vertical mirror -->
+    <use
+      href="#seal-form"
+      transform="translate(0 1024) scale(1 -1)"
+    />
+
+    <!-- Lower form -->
+    <use href="#seal-form"/>
+
+    <!-- Left pillar -->
+    <use href="#pillar"/>
+
+    <!-- Right pillar: horizontal mirror -->
+    <use
+      href="#pillar"
+      transform="translate(1024 0) scale(-1 1)"
+    />
+  </g>
+
+  <g fill="#D64135">
+    <!-- Lower block -->
+    <use href="#center-block"/>
+
+    <!-- Upper block: vertical mirror -->
+    <use
+      href="#center-block"
+      transform="translate(0 1024) scale(1 -1)"
+    />
+  </g>
+</svg>

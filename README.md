@@ -1,0 +1,62 @@
+# Hanko
+
+Hanko is a small, self-hosted identity provider built in Rust. It uses passkeys for browser authentication and implements OpenID Connect Authorization Code flow with mandatory PKCE. The server uses Axum and SQLite; its static React + Tailwind admin and sign-in site is built into `web/dist` and served by Axum.
+
+The initial release includes local users, passkeys, groups, OIDC clients, exact redirect URI allow-lists, allowed-group policies, scoped custom claims, ES256 signing-key rotation, and a focused OIDC client management screen. The architecture and data/security design are in [docs/architecture.md](docs/architecture.md).
+
+## Requirements
+
+- Rust 1.88 or newer
+- Node.js and npm
+- A canonical HTTPS origin for deployment (HTTP localhost is allowed for development)
+
+## Configure and run
+
+```sh
+cp .env.example .env
+```
+
+Set `PUBLIC_ORIGIN` to the URL users and OIDC clients reach. It may include a clean path prefix, for example `https://id.example/hanko`. Generate a stable master key and a first-run bootstrap token:
+
+```sh
+openssl rand -base64 32
+openssl rand -hex 32
+```
+
+Put the first value in `IDENTITY_MASTER_KEY` and the second in `BOOTSTRAP_TOKEN` in `.env`. Keep the master key with backups of the SQLite database; Hanko encrypts private signing keys with it. Do not rotate or lose the master key without first re-encrypting signing keys.
+
+Build the static UI and start Hanko. Set `VITE_BASE_PATH` in `web/.env.production` to the same path prefix as `PUBLIC_ORIGIN` (including a trailing slash); this deployment uses `/hanko/`. The Vite dev server defaults to `/`.
+
+```sh
+cd web && npm ci && npm run build && cd ..
+cargo run
+```
+
+Open the configured origin and follow the short setup sequence. The administrator enters the one-time bootstrap code, then chooses optional OIDC username/name claims, creates a personal Hanko, and registers a passkey. Invited users start at the OIDC information step and then create their Hanko and register a passkey. The username and name fields control the optional `preferred_username` and `name` claims; passkey sign-in does not use either. Each account has one generated seal design and can add multiple passkeys for devices. The bootstrap token is only accepted while the user table is empty. Set `DATABASE_URL` and `BIND_ADDRESS` to override the defaults.
+
+For local development, the defaults are `PUBLIC_ORIGIN=http://localhost:3000` and `BIND_ADDRESS=127.0.0.1:3000`. For the Vite dev server, change `PUBLIC_ORIGIN` to `http://localhost:5173`, keep the backend bound to port 3000, start Hanko, then run `npm run dev` from `web`. Vite proxies API requests to `http://127.0.0.1:3000` (override with `HANKO_API` if needed). The packaged deployment serves the compiled UI from the Rust process.
+
+## OIDC clients
+
+Sign in with an administrator passkey and open `{PUBLIC_ORIGIN}/admin/clients` to add or review clients. The **Your passkeys** section on that screen can register another device for the current account. Public OIDC clients use PKCE; confidential clients also receive a one-time client secret. Configure the exact callback URL registered by the application and add only the scopes it needs. The server provides:
+
+- `/.well-known/openid-configuration`
+- `/jwks`
+- `/authorize`
+- `/token`
+- `/userinfo`
+- `/logout`
+
+Authorization requires `response_type=code`, `scope` containing `openid`, nonempty `state` and `nonce`, and a `S256` challenge. Users review an authorization request before Hanko redirects to the application.
+
+## Checks
+
+```sh
+cargo fmt --all --check
+cargo test
+cd web && npm run typecheck && npm run build
+```
+
+## Scope
+
+Hanko is deliberately limited to OIDC and passkey-first local identity. It does not implement SAML, LDAP, reverse proxying, password sign-in, or a workflow engine. SCIM, recovery methods, and additional claim/policy providers can be added behind the existing identity and authorization boundaries.

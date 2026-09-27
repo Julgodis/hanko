@@ -1,0 +1,80 @@
+.hanko-wrap {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  color: #d64135;
+}
+
+.hanko-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.hanko-ink {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.hanko-splatter { pointer-events: none; }
+
+.hanko-impact {
+  position: absolute;
+  z-index: -1;
+  right: 8%;
+  bottom: 1%;
+  left: 8%;
+  height: 12%;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0;
+  transform: scaleX(.8);
+  filter: blur(3px);
+  pointer-events: none;
+}
+
+.hanko-preparing .hanko-ink { opacity: .75; }
+.hanko-preparing .hanko-outline {
+  stroke-dasharray: 3150;
+  stroke-dashoffset: 3150;
+  animation: hanko-draw 1.45s cubic-bezier(.4, 0, .28, 1) forwards;
+}
+.hanko-preparing .hanko-glyph { opacity: .35; }
+
+.hanko-wrap.hanko-authenticating { animation: hanko-auth-pulse 2.4s ease-in-out infinite; }
+.hanko-wrap.hanko-stamping { animation: hanko-impact .82s cubic-bezier(.25, .72, .3, 1) both; }
+.hanko-wrap.hanko-stamping .hanko-impact { animation: hanko-ink-flash .72s ease-out both; }
+.hanko-wrap.hanko-stamping .hanko-splatter { animation: hanko-splatter .58s ease-out both; }
+.hanko-wrap.hanko-stamping .hanko-ink { animation: hanko-ink-settle .82s cubic-bezier(.25, .72, .3, 1) both; }
+
+.hanko-wrap.hanko-error { opacity: .62; transform: translateY(-3px) rotate(-2deg); }
+
+@keyframes hanko-draw { to { stroke-dashoffset: 0; } }
+@keyframes hanko-impact {
+  0% { transform: translateY(0) rotate(0) scale(1); }
+  23% { transform: translateY(-12px) rotate(-7deg) scale(1.015); }
+  51% { transform: translateY(4px) rotate(1.5deg) scale(1.01, .965); }
+  66% { transform: translateY(-2px) rotate(-.8deg) scale(.998, 1.006); }
+  100% { transform: translateY(0) rotate(0) scale(1); }
+}
+@keyframes hanko-ink-flash {
+  0%, 33% { opacity: 0; transform: scaleX(.8); }
+  48% { opacity: .14; transform: scaleX(1.04); }
+  100% { opacity: 0; transform: scaleX(1.18); }
+}
+@keyframes hanko-auth-pulse {
+  0%, 100% { opacity: .78; transform: translateY(0) scale(1); }
+  50% { opacity: 1; transform: translateY(-4px) scale(1.025); }
+}
+@keyframes hanko-splatter {
+  0%, 38% { opacity: 0; transform: scale(.55); }
+  52% { opacity: .72; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.08); }
+}
+@keyframes hanko-ink-settle {
+  0% { transform: scale(1); }
+  48% { transform: scale(1.01, .985); }
+  68% { transform: scale(.995, 1.005); }
+  100% { transform: scale(1); }
+}
