@@ -187,7 +187,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
       {interactive && step === "profile" && <form className="setup-form" onSubmit={continueProfile}>
         <label className="admin-field">
           <span>Username <em>Optional</em></span>
-          <input autoComplete="username" autoCapitalize="none" maxLength={64} pattern="[A-Za-z0-9._-]+" value={username} onChange={(event) => setUsername(event.target.value.toLowerCase())} placeholder="Used as preferred_username" />
+          <input autoComplete="username" autoCapitalize="none" maxLength={64} pattern={"[A-Za-z0-9._\\-]+"} value={username} onChange={(event) => setUsername(event.target.value.toLowerCase())} placeholder="Used as preferred_username" />
           <small>Passkey sign-in never asks for it. Leave blank to keep it private.</small>
         </label>
         <label className="admin-field">
