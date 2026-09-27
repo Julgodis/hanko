@@ -284,7 +284,6 @@ function Scene({
     <section className="auth-panel" aria-live="polite">
       {children}
     </section>
-    <span className="signature-seal"><HankoSeal size={27} variant="clean" title="Hanko" /></span>
   </main>;
 }
 

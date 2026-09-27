@@ -754,7 +754,6 @@ function AdminScene({ children }: { children: ReactNode }) {
     <div className="paper-grain" aria-hidden="true" />
     <InkWash />
     <section className="admin-panel">{children}</section>
-    <span className="signature-seal"><HankoSeal size={27} variant="clean" title="Hanko" /></span>
   </main>;
 }
 
