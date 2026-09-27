@@ -556,14 +556,22 @@ async fn update_hanko(
     let session = require_session(&headers, &state.database).await?;
     require_csrf(&headers, &session)?;
     validate_hanko_style(&input.color, &input.seed)?;
-    sqlx::query("UPDATE users SET hanko_color = ?, hanko_seed = ?, updated_at = ? WHERE id = ? AND disabled_at IS NULL")
+    let updated = sqlx::query("UPDATE users SET hanko_color = ?, hanko_seed = ?, updated_at = ? WHERE id = ? AND disabled_at IS NULL")
         .bind(&input.color)
         .bind(&input.seed)
         .bind(unix_now())
         .bind(&session.user_id)
         .execute(&state.database.pool)
-        .await
-        .map_err(|_| ApiError::internal())?;
+        .await;
+    if let Err(error) = updated {
+        tracing::error!(
+            user_id = %session.user_id,
+            error = %error,
+            error_details = ?error,
+            "failed to update Hanko style"
+        );
+        return Err(ApiError::internal());
+    }
     Ok(Json(
         serde_json::json!({ "color": input.color, "seed": input.seed }),
     ))

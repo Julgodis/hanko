@@ -43,7 +43,7 @@ mod tests {
                 .fetch_all(&database.pool)
                 .await
                 .unwrap();
-        assert_eq!(migration_versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(migration_versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
         let tables: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'passkeys', 'groups', 'oidc_clients', 'authorization_codes', 'refresh_tokens', 'webauthn_ceremonies', 'signing_keys')",
