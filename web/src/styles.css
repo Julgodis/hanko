@@ -273,22 +273,6 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
 
 .device-note svg { width: 13px; height: 13px; stroke-width: 1.7; }
 
-.signature-seal {
-  position: fixed;
-  z-index: 1;
-  right: max(24px, env(safe-area-inset-right));
-  bottom: max(23px, env(safe-area-inset-bottom));
-  display: grid;
-  width: 24px;
-  height: 29px;
-  place-items: center;
-  color: var(--vermilion);
-  opacity: .4;
-}
-
-.signature-seal .hanko-wrap { width: 27px !important; height: 27px !important; }
-.signature-seal .hanko-splatter { display: none; }
-
 .consent-scene .auth-panel { width: min(100%, 410px); }
 
 .connection-row {
