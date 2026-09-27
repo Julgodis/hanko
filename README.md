@@ -38,7 +38,7 @@ For local development, the defaults are `PUBLIC_ORIGIN=http://localhost:3000` an
 
 ## OIDC clients
 
-Sign in with an administrator passkey and open `{PUBLIC_ORIGIN}/admin/clients` to add or review clients. The **Your passkeys** section on that screen can register another device for the current account. Public OIDC clients use PKCE; confidential clients also receive a one-time client secret. Configure the exact callback URL registered by the application and add only the scopes it needs. The server provides:
+Sign in with an administrator passkey and open `{PUBLIC_ORIGIN}/admin/clients` to manage clients, users, groups, and signing keys. Account settings are grouped below the administration tabs; regular users can open `{PUBLIC_ORIGIN}/account` for the same Hanko and passkey settings layout. Public OIDC clients use PKCE; confidential clients also receive a one-time client secret. Configure the exact callback URL registered by the application and add only the scopes it needs. The server provides:
 
 - `/.well-known/openid-configuration`
 - `/jwks`

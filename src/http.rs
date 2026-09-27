@@ -179,6 +179,10 @@ pub fn router(state: AppState) -> Router {
             "/admin/clients",
             get_service(ServeFile::new("web/dist/index.html")),
         )
+        .route_service(
+            "/account",
+            get_service(ServeFile::new("web/dist/index.html")),
+        )
         .fallback_service(ServeDir::new("web/dist").append_index_html_on_directories(true).not_found_service(ServeFile::new("web/dist/index.html")))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
@@ -812,6 +816,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(upstream_client_admin_page.status(), StatusCode::OK);
+
+        let account_page = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/hanko/account")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(account_page.status(), StatusCode::OK);
 
         let discovery = app
             .clone()

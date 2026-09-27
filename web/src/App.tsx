@@ -30,6 +30,10 @@ function App() {
     const routePath = appPath("admin/clients").replace(/\/+$/, "");
     return window.location.pathname.replace(/\/+$/, "") === routePath;
   }, []);
+  const accountRoute = useMemo(() => {
+    const routePath = appPath("account").replace(/\/+$/, "");
+    return window.location.pathname.replace(/\/+$/, "") === routePath;
+  }, []);
   const [session, setSession] = useState<Session | null>(null);
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [request, setRequest] = useState<AuthorizationRequest | null>(null);
@@ -105,14 +109,14 @@ function App() {
     />;
   }
 
-  if (clientsRoute) {
+  if (clientsRoute || accountRoute) {
     if (!session?.authenticated || session.setup_only) {
       return <SignIn clientName="Hanko" requestId={null} onAuthenticated={refreshSession} />;
     }
-    if (!session.is_admin) {
+    if (clientsRoute && !session.is_admin) {
       return <Scene phase="error"><Seal phase="error" /><Copy title="Administrator access required" text="Sign in with an administrator account to manage OIDC clients." /></Scene>;
     }
-    return <ClientAdmin />;
+    return <ClientAdmin isAdmin={session.is_admin} />;
   }
 
   if (session?.authenticated && !session.setup_only && requestId && request) {

@@ -37,12 +37,9 @@ export function SealCustomizer({ color, seed, onColorChange, onSeedChange }: Pro
     ? generatedPalette
     : [...generatedPalette, { name: "Current", color, kind: color.startsWith("linear(") ? "gradient" : "solid" }];
 
-  function randomizeMark() {
+  function randomizePattern() {
     const nextSeed = makeHankoSeed();
-    const nextPalette = generateHankoPalette(nextSeed);
-    setPaletteSeed(nextSeed);
     onSeedChange(nextSeed);
-    onColorChange(chooseRandom(nextPalette.slice(1)).color);
     setShowPreview(false);
   }
 
@@ -69,7 +66,7 @@ export function SealCustomizer({ color, seed, onColorChange, onSeedChange }: Pro
       </div>
       <div className="seal-customizer-actions">
         <button className="seal-tool-button" type="button" onClick={randomizeColor}><Shuffle aria-hidden="true" /> Random color</button>
-        <button className="seal-tool-button" type="button" onClick={randomizeMark}><Dices aria-hidden="true" /> Random mark</button>
+        <button className="seal-tool-button" type="button" onClick={randomizePattern}><Dices aria-hidden="true" /> Random pattern</button>
         <button className="seal-tool-button" type="button" aria-expanded={showPreview} onClick={() => setShowPreview((visible) => !visible)}>
           {showPreview ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
           {showPreview ? "Hide previews" : "Preview states"}

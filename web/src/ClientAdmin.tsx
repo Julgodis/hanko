@@ -1,4 +1,4 @@
-import { Check, Copy, Fingerprint, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, Fingerprint, KeyRound, Plus, Shield, Users, UserRound, Stamp, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
@@ -19,6 +19,9 @@ type Client = {
   allowed_groups: string[];
 };
 type Group = { id: string; name: string; display_name: string; member_count: number };
+type AdminUser = { id: string; username: string; display_name: string; email: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
+type SigningKey = { kid: string; algorithm: string; status: string; created_at: number; retire_after: number | null };
+type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys";
 type ClaimDraft = { claim_name: string; user_attribute_path: string; required_scope: string };
 type CreatedClient = {
   client_id: string;
@@ -40,9 +43,12 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "The request could not be completed.";
 }
 
-export default function ClientAdmin() {
+export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
+  const [activeTab, setActiveTab] = useState<Tab>(isAdmin ? "clients" : "hanko");
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [signingKeys, setSigningKeys] = useState<SigningKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [name, setName] = useState("");
@@ -64,6 +70,15 @@ export default function ClientAdmin() {
   const [hankoSeed, setHankoSeed] = useState("hanko");
   const [savingHanko, setSavingHanko] = useState(false);
   const [hankoMessage, setHankoMessage] = useState("");
+  const [userName, setUserName] = useState("");
+  const [userDisplayName, setUserDisplayName] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [userGroups, setUserGroups] = useState<string[]>([]);
+  const [createdInvitation, setCreatedInvitation] = useState("");
+  const [groupName, setGroupName] = useState("");
+  const [groupDisplayName, setGroupDisplayName] = useState("");
+  const [adminActionBusy, setAdminActionBusy] = useState(false);
+  const [adminActionMessage, setAdminActionMessage] = useState("");
 
   async function refreshClients() {
     setClients(await api<Client[]>("/api/admin/clients"));
@@ -73,11 +88,10 @@ export default function ClientAdmin() {
     let active = true;
     async function load() {
       try {
-        const [clientList, groupList, session] = await Promise.all([
-          api<Client[]>("/api/admin/clients"),
-          api<Group[]>("/api/admin/groups"),
-          api<{ hanko_color?: string; hanko_seed?: string }>("/api/session"),
-        ]);
+        const sessionPromise = api<{ hanko_color?: string; hanko_seed?: string }>("/api/session");
+        const [session, clientList, groupList] = isAdmin
+          ? await Promise.all([sessionPromise, api<Client[]>("/api/admin/clients"), api<Group[]>("/api/admin/groups")])
+          : [await sessionPromise, [], []];
         if (active) {
           setClients(clientList);
           setGroups(groupList);
@@ -92,7 +106,21 @@ export default function ClientAdmin() {
     }
     void load();
     return () => { active = false; };
-  }, []);
+  }, [isAdmin]);
+
+  useEffect(() => {
+    let active = true;
+    async function loadTabData() {
+      try {
+        if (activeTab === "users" && isAdmin) setUsers(await api<AdminUser[]>("/api/admin/users"));
+        if (activeTab === "keys" && isAdmin) setSigningKeys(await api<SigningKey[]>("/api/admin/signing-keys"));
+      } catch (tabError) {
+        if (active) setLoadError(errorMessage(tabError));
+      }
+    }
+    void loadTabData();
+    return () => { active = false; };
+  }, [activeTab, isAdmin]);
 
   function toggleScope(scope: (typeof AVAILABLE_SCOPES)[number]) {
     setScopes((current) => current.includes(scope)
@@ -156,6 +184,68 @@ export default function ClientAdmin() {
     }
   }
 
+  async function createUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAdminActionBusy(true);
+    setAdminActionMessage("");
+    setCreatedInvitation("");
+    try {
+      const invitation = await api<{ enrollment_url: string }>("/api/admin/users", {
+        method: "POST",
+        body: json({
+          username: userName.trim(),
+          display_name: userDisplayName.trim(),
+          email: userEmail.trim() || null,
+          attributes: {},
+          groups: userGroups,
+        }),
+      });
+      setCreatedInvitation(invitation.enrollment_url);
+      setUserName("");
+      setUserDisplayName("");
+      setUserEmail("");
+      setUserGroups([]);
+      setUsers(await api<AdminUser[]>("/api/admin/users"));
+    } catch (createError) {
+      setAdminActionMessage(errorMessage(createError));
+    } finally {
+      setAdminActionBusy(false);
+    }
+  }
+
+  async function createGroup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAdminActionBusy(true);
+    setAdminActionMessage("");
+    try {
+      await api("/api/admin/groups", {
+        method: "POST",
+        body: json({ name: groupName.trim(), display_name: groupDisplayName.trim() }),
+      });
+      setGroupName("");
+      setGroupDisplayName("");
+      setGroups(await api<Group[]>("/api/admin/groups"));
+    } catch (createError) {
+      setAdminActionMessage(errorMessage(createError));
+    } finally {
+      setAdminActionBusy(false);
+    }
+  }
+
+  async function rotateSigningKey() {
+    setAdminActionBusy(true);
+    setAdminActionMessage("");
+    try {
+      await api("/api/admin/signing-keys", { method: "POST" });
+      setSigningKeys(await api<SigningKey[]>("/api/admin/signing-keys"));
+      setAdminActionMessage("A new signing key is active.");
+    } catch (rotateError) {
+      setAdminActionMessage(errorMessage(rotateError));
+    } finally {
+      setAdminActionBusy(false);
+    }
+  }
+
   async function addPasskey(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAddingPasskey(true);
@@ -207,46 +297,57 @@ export default function ClientAdmin() {
     }
   }
 
-  if (loading) {
-    return <AdminScene><div className="admin-loading"><HankoSeal size={54} /><p>Loading clients…</p></div></AdminScene>;
+  function selectTab(tab: Tab) {
+    setAdminActionMessage("");
+    setLoadError("");
+    setActiveTab(tab);
   }
 
+  const tabs: { id: Tab; label: string; icon: ReactNode }[] = [
+    ...(isAdmin ? [
+      { id: "clients" as const, label: "Clients", icon: <KeyRound aria-hidden="true" /> },
+      { id: "users" as const, label: "Users", icon: <Users aria-hidden="true" /> },
+      { id: "groups" as const, label: "Groups", icon: <UserRound aria-hidden="true" /> },
+      { id: "keys" as const, label: "Signing keys", icon: <Shield aria-hidden="true" /> },
+    ] : []),
+    { id: "hanko", label: "Your Hanko", icon: <Stamp aria-hidden="true" /> },
+    { id: "passkeys", label: "Passkeys", icon: <Fingerprint aria-hidden="true" /> },
+  ];
+  const tabTitles: Record<Tab, [string, string]> = {
+    clients: ["OIDC clients", "Connect applications to Hanko."],
+    users: ["Users", "Invite people and review their accounts."],
+    groups: ["Groups", "Organize access to OIDC clients."],
+    keys: ["Signing keys", "Manage the keys used to sign tokens."],
+    hanko: ["Your Hanko", "Your personal seal."],
+    passkeys: ["Passkeys", "Add another device to your account."],
+  };
+  const [title, description] = tabTitles[activeTab];
+
   return <AdminScene>
-    <header className="admin-heading">
-      <HankoSeal size={34} variant="clean" title="Hanko" />
-      <h1>OIDC clients</h1>
-      <p>Connect an application to Hanko.</p>
-    </header>
+    <div className="admin-layout">
+      <nav className="admin-nav" aria-label="Account and administration">
+        <label className="admin-mobile-select"><span>Section</span><select value={activeTab} onChange={(event) => selectTab(event.target.value as Tab)}>
+          {isAdmin && <optgroup label="Administration">{tabs.filter((tab) => ["clients", "users", "groups", "keys"].includes(tab.id)).map((tab) => <option key={tab.id} value={tab.id}>{tab.label}</option>)}</optgroup>}
+          <optgroup label="Account">{tabs.filter((tab) => tab.id === "hanko" || tab.id === "passkeys").map((tab) => <option key={tab.id} value={tab.id}>{tab.label}</option>)}</optgroup>
+        </select></label>
+        {isAdmin && <div className="admin-nav-group">
+          <p>Administration</p>
+          {tabs.filter((tab) => ["clients", "users", "groups", "keys"].includes(tab.id)).map((tab) => <button key={tab.id} type="button" className="admin-nav-tab" aria-current={activeTab === tab.id ? "page" : undefined} onClick={() => selectTab(tab.id)}>{tab.icon}<span>{tab.label}</span></button>)}
+        </div>}
+        <div className="admin-nav-group admin-nav-account">
+          <p>Account</p>
+          {tabs.filter((tab) => tab.id === "hanko" || tab.id === "passkeys").map((tab) => <button key={tab.id} type="button" className="admin-nav-tab" aria-current={activeTab === tab.id ? "page" : undefined} onClick={() => selectTab(tab.id)}>{tab.icon}<span>{tab.label}</span></button>)}
+        </div>
+      </nav>
 
-    <section className="account-hanko">
-      <div className="account-hanko-heading">
-        <HankoSeal size={42} color={hankoColor} seed={hankoSeed} title="Your personal Hanko" />
-        <div><h2>Your Hanko</h2><p>One personal seal for your identity. Your passkeys remain separate.</p></div>
-      </div>
-      <SealCustomizer color={hankoColor} seed={hankoSeed} onColorChange={setHankoColor} onSeedChange={setHankoSeed} />
-      <div className="account-hanko-save">
-        <button className="secondary-action" type="button" onClick={saveHanko} disabled={savingHanko}>{savingHanko ? "Saving…" : "Save your Hanko"}</button>
-        {hankoMessage && <p role="status">{hankoMessage}</p>}
-      </div>
-    </section>
-
-    <section className="account-passkeys">
-      <div className="passkey-section-heading">
-        <span><Fingerprint aria-hidden="true" /></span>
-        <div><h2>Your passkeys</h2><p>Add another device to this account.</p></div>
-      </div>
-      <form className="passkey-add-form" onSubmit={addPasskey}>
-        <label className="admin-field"><span>Device label <em>Optional</em></span><input value={passkeyLabel} onChange={(event) => setPasskeyLabel(event.target.value)} maxLength={100} placeholder="e.g. MacBook" /></label>
-        <button className="secondary-action passkey-add-button" type="submit" disabled={addingPasskey}>
-          <Fingerprint aria-hidden="true" /> {addingPasskey ? "Follow your device prompt…" : "Add passkey"}
-        </button>
-      </form>
-      {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}
-      {passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
-    </section>
-
-    {loadError && <p className="admin-message admin-message-error" role="alert">{loadError}</p>}
-
+      <section className="admin-content" aria-labelledby="admin-page-title">
+        <header className="admin-heading">
+          <h1 id="admin-page-title">{title}</h1>
+          <p>{description}</p>
+        </header>
+        {loadError && <p className="admin-message admin-message-error" role="alert">{loadError}</p>}
+        {loading ? <div className="admin-loading"><HankoSeal size={42} /><p>Loading…</p></div> : <>
+          {activeTab === "clients" && isAdmin && <>
     <form className="client-form" onSubmit={createClient}>
       <label className="admin-field">
         <span>Application name</span>
@@ -338,6 +439,53 @@ export default function ClientAdmin() {
           </details>
         </article>)}
     </section>
+          </>}
+
+          {activeTab === "users" && isAdmin && <>
+            <form className="client-form admin-create-form" onSubmit={createUser}>
+              <label className="admin-field"><span>Username</span><input autoComplete="off" maxLength={80} value={userName} onChange={(event) => setUserName(event.target.value)} required /></label>
+              <label className="admin-field"><span>Display name</span><input autoComplete="name" maxLength={120} value={userDisplayName} onChange={(event) => setUserDisplayName(event.target.value)} required /></label>
+              <label className="admin-field"><span>Email <em>Optional</em></span><input type="email" autoComplete="email" maxLength={320} value={userEmail} onChange={(event) => setUserEmail(event.target.value)} /></label>
+              {groups.length > 0 && <fieldset className="admin-options"><legend>Groups <em>Optional</em></legend><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check" key={group.id}><input type="checkbox" checked={userGroups.includes(group.name)} onChange={() => setUserGroups((current) => current.includes(group.name) ? current.filter((name) => name !== group.name) : [...current, group.name])} /><span><strong>{group.display_name}</strong></span></label>)}</div></fieldset>}
+              {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
+              <button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !userName.trim() || !userDisplayName.trim()}>{adminActionBusy ? "Creating invitation…" : "Invite user"}</button>
+            </form>
+            {createdInvitation && <section className="created-client" role="status"><div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Invitation ready</h2><p>Share this one-time link with the user.</p></div></div><Credential label="Enrollment link · expires in 24 hours" value={createdInvitation} copied={copied === "invitation"} onCopy={() => copyValue("invitation", createdInvitation)} /></section>}
+            <section className="registered-clients admin-records"><h2>Accounts <span>{users.length}</span></h2>
+              {users.length === 0 ? <p className="admin-hint">No accounts found.</p> : users.map((user) => <article className="registered-client" key={user.id}><div className="registered-client-title"><h3>{user.display_name || user.username}</h3><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></div><code className="registered-client-id">{user.username}</code><p>{user.email || "No email address"}{user.groups.length ? ` · ${user.groups.join(", ")}` : ""}</p></article>)}
+            </section>
+          </>}
+
+          {activeTab === "groups" && isAdmin && <>
+            <form className="client-form admin-create-form" onSubmit={createGroup}>
+              <label className="admin-field"><span>Group name</span><input autoComplete="off" maxLength={80} value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="media-users" required /></label>
+              <label className="admin-field"><span>Display name</span><input maxLength={120} value={groupDisplayName} onChange={(event) => setGroupDisplayName(event.target.value)} placeholder="Media users" required /></label>
+              {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
+              <button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !groupName.trim() || !groupDisplayName.trim()}>{adminActionBusy ? "Creating…" : "Create group"}</button>
+            </form>
+            <section className="registered-clients admin-records"><h2>Groups <span>{groups.length}</span></h2>{groups.length === 0 ? <p className="admin-hint">No groups have been created.</p> : groups.map((group) => <article className="registered-client" key={group.id}><div className="registered-client-title"><h3>{group.display_name}</h3><span className="client-status">{group.member_count} {group.member_count === 1 ? "member" : "members"}</span></div><code className="registered-client-id">{group.name}</code></article>)}</section>
+          </>}
+
+          {activeTab === "keys" && isAdmin && <>
+            <div className="key-management"><p className="admin-hint">New tokens use the active key. Previous public keys remain available to verify tokens already issued.</p><button className="secondary-action" type="button" onClick={rotateSigningKey} disabled={adminActionBusy}><Shield aria-hidden="true" />{adminActionBusy ? "Rotating…" : "Rotate signing key"}</button></div>
+            {adminActionMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{adminActionMessage}</p>}
+            <section className="registered-clients admin-records"><h2>Keys <span>{signingKeys.length}</span></h2>{signingKeys.length === 0 ? <p className="admin-hint">No signing keys found.</p> : signingKeys.map((key) => <article className="registered-client" key={key.kid}><div className="registered-client-title"><h3>{key.algorithm}</h3><span className={`client-status${key.status === "active" ? "" : " disabled"}`}>{key.status}</span></div><code className="registered-client-id">{key.kid}</code><p>Created {new Date(key.created_at * 1000).toLocaleString()}{key.retire_after ? ` · Retires ${new Date(key.retire_after * 1000).toLocaleString()}` : ""}</p></article>)}</section>
+          </>}
+
+          {activeTab === "hanko" && <section className="account-hanko">
+            <div className="account-hanko-preview"><HankoSeal size={192} color={hankoColor} seed={hankoSeed} title="Your personal Hanko preview" /></div>
+            <SealCustomizer color={hankoColor} seed={hankoSeed} onColorChange={setHankoColor} onSeedChange={setHankoSeed} />
+            <div className="account-hanko-save"><button className="secondary-action" type="button" onClick={saveHanko} disabled={savingHanko}>{savingHanko ? "Saving…" : "Save your Hanko"}</button>{hankoMessage && <p role="status">{hankoMessage}</p>}</div>
+          </section>}
+
+          {activeTab === "passkeys" && <section className="account-passkeys">
+            <div className="passkey-section-heading"><span><Fingerprint aria-hidden="true" /></span><div><h2>Your passkeys</h2><p>Add another device to this account.</p></div></div>
+            <form className="passkey-add-form" onSubmit={addPasskey}><label className="admin-field"><span>Device label <em>Optional</em></span><input value={passkeyLabel} onChange={(event) => setPasskeyLabel(event.target.value)} maxLength={100} placeholder="e.g. MacBook" /></label><button className="secondary-action passkey-add-button" type="submit" disabled={addingPasskey}><Fingerprint aria-hidden="true" /> {addingPasskey ? "Follow your device prompt…" : "Add passkey"}</button></form>
+            {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
+          </section>}
+        </>}
+      </section>
+    </div>
   </AdminScene>;
 }
 
