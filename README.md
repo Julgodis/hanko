@@ -1,6 +1,6 @@
 # Hanko
 
-Hanko is a small, self-hosted identity provider built in Rust. It uses passkeys for browser authentication and implements OpenID Connect Authorization Code flow with mandatory PKCE. The server uses Axum and SQLite; its static React + Tailwind admin and sign-in site is built into `web/dist` and served by Axum.
+Hanko is a small, self-hosted identity provider built in Rust. It uses passkeys for browser authentication and implements OpenID Connect Authorization Code flow with PKCE for public clients. The server uses Axum and SQLite; its static React + Tailwind admin and sign-in site is built into `web/dist` and served by Axum.
 
 The initial release includes local users, passkeys, groups, OIDC clients, exact redirect URI allow-lists, allowed-group policies, scoped custom claims, ES256 signing-key rotation, and a focused OIDC client management screen. The architecture and data/security design are in [docs/architecture.md](docs/architecture.md).
 
@@ -38,7 +38,7 @@ For local development, the defaults are `PUBLIC_ORIGIN=http://localhost:3000` an
 
 ## OIDC clients
 
-Sign in with an administrator passkey and open `{PUBLIC_ORIGIN}/admin/clients` to manage clients, users, groups, and signing keys. Account settings are grouped below the administration tabs; regular users can open `{PUBLIC_ORIGIN}/account` for the same Hanko and passkey settings layout. Public OIDC clients use PKCE; confidential clients also receive a one-time client secret. Configure the exact callback URL registered by the application and add only the scopes it needs. The server provides:
+Sign in with an administrator passkey and open `{PUBLIC_ORIGIN}/admin/clients` to manage clients, users, groups, and signing keys. Account settings are grouped below the administration tabs; regular users can open `{PUBLIC_ORIGIN}/account` for the same Hanko and passkey settings layout. Public OIDC clients use PKCE without a secret. Confidential clients authenticate with their one-time client secret and may use PKCE as an additional protection. Configure the exact callback URL registered by the application and add only the scopes it needs. The server provides:
 
 - `/.well-known/openid-configuration`
 - `/jwks`

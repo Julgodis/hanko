@@ -37,8 +37,8 @@ struct AuthorizeRequest {
     scope: String,
     state: String,
     nonce: Option<String>,
-    code_challenge: String,
-    code_challenge_method: String,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -57,7 +57,7 @@ struct TokenRequest {
     code: String,
     redirect_uri: String,
     client_id: String,
-    code_verifier: String,
+    code_verifier: Option<String>,
     client_secret: Option<String>,
 }
 
@@ -177,7 +177,7 @@ async fn authorize(
         .bind(&input.state)
         // The schema stores an empty string for an omitted optional nonce.
         .bind(input.nonce.as_deref().unwrap_or(""))
-        .bind(&input.code_challenge)
+        .bind(input.code_challenge.as_deref())
         .bind(serde_json::to_string(&scopes).map_err(|_| OAuthError::server_error())?)
         .bind(now)
         .bind(now + AUTH_REQUEST_SECONDS)
@@ -272,7 +272,7 @@ async fn continue_authorize(
     let nonce: String = row
         .try_get("nonce")
         .map_err(|_| OAuthError::server_error())?;
-    let code_challenge: String = row
+    let code_challenge: Option<String> = row
         .try_get("code_challenge")
         .map_err(|_| OAuthError::server_error())?;
     let scopes_json: String = row
@@ -307,7 +307,7 @@ async fn continue_authorize(
     sqlx::query("INSERT INTO authorization_codes (code_hash, client_id, user_id, redirect_uri, scopes, nonce, code_challenge, created_at, expires_at, auth_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(digest(&code)).bind(&client_id).bind(&session.user_id).bind(&redirect_uri)
         .bind(serde_json::to_string(&scopes).map_err(|_| OAuthError::server_error())?)
-        .bind(nonce).bind(code_challenge).bind(now).bind(now + CODE_SECONDS).bind(auth_time)
+        .bind(nonce).bind(code_challenge.as_deref()).bind(now).bind(now + CODE_SECONDS).bind(auth_time)
         .execute(&mut *transaction).await.map_err(|_| OAuthError::server_error())?;
     let deleted = sqlx::query("DELETE FROM authorization_requests WHERE request_hash = ? AND browser_hash = ? AND expires_at > ?")
         .bind(request_hash).bind(browser_hash).bind(now).execute(&mut *transaction).await.map_err(|_| OAuthError::server_error())?;
@@ -388,13 +388,11 @@ async fn pending_authorization(
 
 async fn token(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(input): Form<TokenRequest>,
 ) -> Result<Json<TokenResponse>, OAuthError> {
-    if input.grant_type != "authorization_code" || !valid_pkce_verifier(&input.code_verifier) {
-        return Err(OAuthError::invalid_grant());
-    }
     let client = sqlx::query(
-        "SELECT client_type, client_secret_hash, enabled FROM oidc_clients WHERE client_id = ?",
+        "SELECT client_type, token_endpoint_auth_method, client_secret_hash, enabled FROM oidc_clients WHERE client_id = ?",
     )
     .bind(&input.client_id)
     .fetch_optional(&state.database.pool)
@@ -410,12 +408,16 @@ async fn token(
     if !enabled {
         return Err(OAuthError::invalid_client());
     }
+    let auth_method: String = client
+        .try_get("token_endpoint_auth_method")
+        .map_err(|_| OAuthError::server_error())?;
     let stored_secret: Option<String> = client
         .try_get("client_secret_hash")
         .map_err(|_| OAuthError::server_error())?;
-    match client_type.as_str() {
-        "public" if input.client_secret.is_none() => {}
-        "confidential" => {
+    match (client_type.as_str(), auth_method.as_str()) {
+        ("public", "none")
+            if input.client_secret.is_none() && !headers.contains_key(header::AUTHORIZATION) => {}
+        ("confidential", "client_secret_post") if !headers.contains_key(header::AUTHORIZATION) => {
             let Some(secret) = input.client_secret.as_deref() else {
                 return Err(OAuthError::invalid_client());
             };
@@ -429,6 +431,9 @@ async fn token(
         }
         _ => return Err(OAuthError::invalid_client()),
     }
+    if input.grant_type != "authorization_code" {
+        return Err(OAuthError::invalid_grant());
+    }
 
     let code_hash = digest(&input.code);
     let preview = sqlx::query("SELECT code_challenge, redirect_uri, scopes, user_id FROM authorization_codes WHERE code_hash = ? AND client_id = ? AND consumed_at IS NULL AND expires_at > ?")
@@ -439,7 +444,7 @@ async fn token(
         .await
         .map_err(|_| OAuthError::server_error())?
         .ok_or_else(OAuthError::invalid_grant)?;
-    let expected_challenge: String = preview
+    let expected_challenge: Option<String> = preview
         .try_get("code_challenge")
         .map_err(|_| OAuthError::server_error())?;
     let redirect_uri: String = preview
@@ -451,9 +456,18 @@ async fn token(
     let preview_user_id: String = preview
         .try_get("user_id")
         .map_err(|_| OAuthError::server_error())?;
-    if input.redirect_uri != redirect_uri
-        || !constant_time_string_eq(&s256_challenge(&input.code_verifier), &expected_challenge)
-    {
+    let pkce_valid = match (
+        expected_challenge.as_deref(),
+        input.code_verifier.as_deref(),
+    ) {
+        (Some(challenge), Some(verifier)) => {
+            valid_pkce_verifier(verifier)
+                && constant_time_string_eq(&s256_challenge(verifier), challenge)
+        }
+        (None, None) if client_type == "confidential" => true,
+        _ => false,
+    };
+    if input.redirect_uri != redirect_uri || !pkce_valid {
         return Err(OAuthError::invalid_grant());
     }
     let scopes: Vec<String> =
@@ -774,21 +788,42 @@ async fn validate_authorize_request(
             .nonce
             .as_ref()
             .is_some_and(|nonce| nonce.is_empty() || nonce.len() > 512)
-        || input.code_challenge_method != "S256"
-        || !valid_s256_challenge(&input.code_challenge)
     {
         return Err(OAuthError::invalid_request(
             "required authorization parameters are invalid",
         ));
     }
-    validate_redirect(&state.database, &input.client_id, &input.redirect_uri).await?;
-    let _client =
-        sqlx::query("SELECT client_id FROM oidc_clients WHERE client_id = ? AND enabled = 1")
+    let client =
+        sqlx::query("SELECT client_type FROM oidc_clients WHERE client_id = ? AND enabled = 1")
             .bind(&input.client_id)
             .fetch_optional(&state.database.pool)
             .await
             .map_err(|_| OAuthError::server_error())?
             .ok_or_else(|| OAuthError::invalid_request("unknown client"))?;
+    let client_type: String = client
+        .try_get("client_type")
+        .map_err(|_| OAuthError::server_error())?;
+    let pkce_present = match (
+        input.code_challenge.as_deref(),
+        input.code_challenge_method.as_deref(),
+    ) {
+        (Some(challenge), Some("S256")) => valid_s256_challenge(challenge),
+        (None, None) => false,
+        // This provider supports only S256. A method without a challenge or an
+        // omitted method alongside a challenge cannot silently downgrade it.
+        _ => false,
+    };
+    if (client_type == "public" && !pkce_present)
+        || (client_type == "confidential" && input.code_challenge.is_some() && !pkce_present)
+        || (client_type == "confidential"
+            && input.code_challenge.is_none()
+            && input.code_challenge_method.is_some())
+    {
+        return Err(OAuthError::invalid_request(
+            "public clients require PKCE S256; confidential clients may omit PKCE or use S256",
+        ));
+    }
+    validate_redirect(&state.database, &input.client_id, &input.redirect_uri).await?;
     let scopes = parse_scopes(&input.scope)?;
     ensure_scopes_still_allowed(state, &input.client_id, &scopes).await?;
     Ok(scopes)
@@ -1279,6 +1314,326 @@ mod tests {
             .await
             .unwrap();
         (state, user_id, client_id)
+    }
+
+    async fn add_confidential_client(state: &AppState) -> (String, String) {
+        let client_id = Uuid::new_v4().to_string();
+        let secret = "test-confidential-secret".to_owned();
+        let secret_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes()));
+        sqlx::query("INSERT INTO oidc_clients (client_id, client_secret_hash, client_type, token_endpoint_auth_method, name, enabled, created_at) VALUES (?, ?, 'confidential', 'client_secret_post', 'Confidential Test Client', 1, 1)")
+            .bind(&client_id)
+            .bind(secret_hash)
+            .execute(&state.database.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO client_redirect_uris (client_id, uri) VALUES (?, 'https://client.example/callback?from=provider')")
+            .bind(&client_id)
+            .execute(&state.database.pool)
+            .await
+            .unwrap();
+        for scope in ["openid", "profile", "email", "groups"] {
+            sqlx::query("INSERT INTO client_scopes (client_id, scope) VALUES (?, ?)")
+                .bind(&client_id)
+                .bind(scope)
+                .execute(&state.database.pool)
+                .await
+                .unwrap();
+        }
+        (client_id, secret)
+    }
+
+    async fn issue_test_authorization_code(
+        state: &AppState,
+        user_id: &str,
+        client_id: &str,
+        challenge: Option<&str>,
+        challenge_method: Option<&str>,
+    ) -> Result<String, StatusCode> {
+        let app = http_router(state.clone());
+        let mut auth_url = Url::parse("http://localhost:3000/authorize").unwrap();
+        {
+            let mut query = auth_url.query_pairs_mut();
+            query
+                .append_pair("response_type", "code")
+                .append_pair("client_id", client_id)
+                .append_pair(
+                    "redirect_uri",
+                    "https://client.example/callback?from=provider",
+                )
+                .append_pair("scope", "openid profile email groups")
+                .append_pair("state", "test-state");
+            if let Some(challenge) = challenge {
+                query.append_pair("code_challenge", challenge);
+            }
+            if let Some(method) = challenge_method {
+                query.append_pair("code_challenge_method", method);
+            }
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(auth_url.as_str())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if response.status() != StatusCode::FOUND {
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let error: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(error["error"], "invalid_request");
+            return Err(status);
+        }
+        let location = response.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let preauth = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(|value| {
+                value
+                    .to_str()
+                    .ok()?
+                    .strip_prefix("hanko_preauth=")?
+                    .split(';')
+                    .next()
+                    .map(str::to_owned)
+            })
+            .unwrap();
+        let request_id = Url::parse(&location)
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "request_id")
+            .unwrap()
+            .1
+            .to_string();
+        let session = create_session(&state.database, user_id, false, unix_now())
+            .await
+            .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/authorize/continue")
+                    .header(header::ORIGIN, "http://localhost:3000")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(
+                        header::COOKIE,
+                        format!(
+                            "hanko_session={}; hanko_csrf={}; hanko_preauth={}",
+                            session.raw_token, session.raw_csrf, preauth
+                        ),
+                    )
+                    .header("x-csrf-token", &session.raw_csrf)
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "request_id": request_id }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if response.status() != StatusCode::OK {
+            return Err(response.status());
+        }
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let approved: Value = serde_json::from_slice(&body).unwrap();
+        let callback = Url::parse(approved["redirect_to"].as_str().unwrap()).unwrap();
+        Ok(callback
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .unwrap()
+            .1
+            .to_string())
+    }
+
+    fn test_token_request(
+        client_id: &str,
+        code: &str,
+        secret: Option<&str>,
+        verifier: Option<&str>,
+    ) -> Request<axum::body::Body> {
+        let mut form = url::form_urlencoded::Serializer::new(String::new());
+        form.append_pair("grant_type", "authorization_code")
+            .append_pair("code", code)
+            .append_pair(
+                "redirect_uri",
+                "https://client.example/callback?from=provider",
+            )
+            .append_pair("client_id", client_id);
+        if let Some(secret) = secret {
+            form.append_pair("client_secret", secret);
+        }
+        if let Some(verifier) = verifier {
+            form.append_pair("code_verifier", verifier);
+        }
+        Request::builder()
+            .method("POST")
+            .uri("/token")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(form.finish()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_clients_require_pkce_and_cannot_authenticate_with_a_secret() {
+        let (state, user_id, client_id) = oidc_test_state().await;
+        assert_eq!(
+            issue_test_authorization_code(&state, &user_id, &client_id, None, None).await,
+            Err(StatusCode::BAD_REQUEST)
+        );
+
+        let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+        let challenge = s256_challenge(verifier);
+        let code = issue_test_authorization_code(
+            &state,
+            &user_id,
+            &client_id,
+            Some(&challenge),
+            Some("S256"),
+        )
+        .await
+        .unwrap();
+        let response = http_router(state)
+            .oneshot(test_token_request(
+                &client_id,
+                &code,
+                Some("unexpected-secret"),
+                Some(verifier),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn confidential_clients_can_exchange_codes_with_or_without_pkce() {
+        let (state, user_id, _) = oidc_test_state().await;
+        let (client_id, secret) = add_confidential_client(&state).await;
+
+        let code = issue_test_authorization_code(&state, &user_id, &client_id, None, None)
+            .await
+            .unwrap();
+        let app = http_router(state.clone());
+        let missing_client_secret = app
+            .clone()
+            .oneshot(test_token_request(&client_id, &code, None, None))
+            .await
+            .unwrap();
+        assert_eq!(missing_client_secret.status(), StatusCode::UNAUTHORIZED);
+        let unexpected_verifier = app
+            .clone()
+            .oneshot(test_token_request(
+                &client_id,
+                &code,
+                Some(&secret),
+                Some("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unexpected_verifier.status(), StatusCode::BAD_REQUEST);
+        let response = app
+            .oneshot(test_token_request(&client_id, &code, Some(&secret), None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+        let challenge = s256_challenge(verifier);
+        let code = issue_test_authorization_code(
+            &state,
+            &user_id,
+            &client_id,
+            Some(&challenge),
+            Some("S256"),
+        )
+        .await
+        .unwrap();
+        let app = http_router(state);
+        let missing_client_secret = app
+            .clone()
+            .oneshot(test_token_request(&client_id, &code, None, Some(verifier)))
+            .await
+            .unwrap();
+        assert_eq!(missing_client_secret.status(), StatusCode::UNAUTHORIZED);
+        let missing = app
+            .clone()
+            .oneshot(test_token_request(&client_id, &code, Some(&secret), None))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+        let missing_body = axum::body::to_bytes(missing.into_body(), 4096)
+            .await
+            .unwrap();
+        let missing_error: Value = serde_json::from_slice(&missing_body).unwrap();
+        assert_eq!(missing_error["error"], "invalid_grant");
+        let wrong = app
+            .clone()
+            .oneshot(test_token_request(
+                &client_id,
+                &code,
+                Some(&secret),
+                Some("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+        let invalid_client = app
+            .clone()
+            .oneshot(test_token_request(
+                &client_id,
+                &code,
+                Some("wrong-secret"),
+                Some(verifier),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid_client.status(), StatusCode::UNAUTHORIZED);
+        let valid = app
+            .oneshot(test_token_request(
+                &client_id,
+                &code,
+                Some(&secret),
+                Some(verifier),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(valid.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn confidential_pkce_parameters_cannot_be_silently_downgraded() {
+        let (state, user_id, _) = oidc_test_state().await;
+        let (client_id, _) = add_confidential_client(&state).await;
+        let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+        let challenge = s256_challenge(verifier);
+        assert_eq!(
+            issue_test_authorization_code(&state, &user_id, &client_id, Some(&challenge), None,)
+                .await,
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            issue_test_authorization_code(&state, &user_id, &client_id, None, Some("S256"),).await,
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            issue_test_authorization_code(
+                &state,
+                &user_id,
+                &client_id,
+                Some(&challenge),
+                Some("plain"),
+            )
+            .await,
+            Err(StatusCode::BAD_REQUEST)
+        );
     }
 
     #[tokio::test]

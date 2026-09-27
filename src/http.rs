@@ -883,6 +883,11 @@ mod tests {
         let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(document["issuer"], "https://login.example");
         assert_eq!(document["code_challenge_methods_supported"][0], "S256");
+        assert_eq!(document["token_endpoint_auth_methods_supported"][0], "none");
+        assert_eq!(
+            document["token_endpoint_auth_methods_supported"][1],
+            "client_secret_post"
+        );
         assert_eq!(
             document["id_token_signing_alg_values_supported"][0],
             "ES256"
