@@ -167,7 +167,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
         </div>
       </div>
 
-      {showHanko && <div className="first-run-seal-stage">
+      {showHanko && <div className="first-run-seal-stage private-value">
         <HankoSeal state={sealState} size={216} title="Your Hanko seal" color={hankoColor} seed={hankoSeed} />
       </div>}
 

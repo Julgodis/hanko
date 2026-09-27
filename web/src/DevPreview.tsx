@@ -111,7 +111,14 @@ function installPreviewApi() {
     if (url.pathname === "/api/setup-status") return jsonResponse({ initialized: screen !== "setup", bootstrap_enabled: true });
     if (url.pathname === "/api/authorize/request") return jsonResponse({
       client_name: "Test 2",
-      scopes: ["openid", "profile", "email", "offline_access"],
+      scopes: ["openid", "profile", "email", "groups", "offline_access"],
+      claims: {
+        name: "Sana Lee",
+        preferred_username: "sana.lee",
+        email: "sana.lee@example.com",
+        groups: ["media-users", "staff"],
+        department: "Product design",
+      },
     });
     if (url.pathname === "/api/authorize/continue" && method === "POST") return jsonResponse({ redirect_to: previewHref("welcome") });
     if (url.pathname === "/api/authorize/deny" && method === "POST") return jsonResponse({ redirect_to: previewHref("signin") });
