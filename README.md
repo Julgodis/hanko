@@ -34,6 +34,8 @@ cargo run
 
 Open the configured origin and follow the short setup sequence. The administrator enters the one-time bootstrap code, then chooses optional OIDC username/name claims, creates a personal Hanko, and registers a passkey. Invited users start at the OIDC information step and then create their Hanko and register a passkey. The username and name fields control the optional `preferred_username` and `name` claims; passkey sign-in does not use either. Each account has one generated seal design and can add multiple passkeys for devices. The bootstrap token is only accepted while the user table is empty. Set `DATABASE_URL` and `BIND_ADDRESS` to override the defaults.
 
+Anonymous login, authorization, token-exchange, bootstrap, and invitation-consumption requests are limited by the source IP and by a global rate, with caps on outstanding WebAuthn ceremonies and authorization requests. When Hanko is behind a reverse proxy, set `TRUSTED_PROXY_ADDRESSES` to a comma-separated list of the proxy IP addresses that connect to Hanko. Hanko uses `X-Forwarded-For` only when the direct peer is on that list. Configure each trusted proxy to append the connecting address to that header, and prevent direct public access to Hanko around the proxy. Without this setting, Hanko uses the TCP peer address and ignores forwarded-address headers.
+
 For local development, the defaults are `PUBLIC_ORIGIN=http://localhost:3000` and `BIND_ADDRESS=127.0.0.1:3000`. For the Vite dev server, change `PUBLIC_ORIGIN` to `http://localhost:5173`, keep the backend bound to port 3000, start Hanko, then run `npm run dev` from `web`. Vite proxies API requests to `http://127.0.0.1:3000` (override with `HANKO_API` if needed). The packaged deployment serves the compiled UI from the Rust process.
 
 To inspect the admin UI without signing in or running the backend, start the Vite dev server and open `http://localhost:5173/?ui-preview=1`. This development-only preview uses in-memory sample clients, users, groups, invitations, and signing keys; writes affect only the current page session.
@@ -51,7 +53,9 @@ Sign in with an administrator passkey and open `{PUBLIC_ORIGIN}/admin/clients` t
 
 Authorization requires `response_type=code`, `scope` containing `openid`, nonempty `state`, and a `S256` challenge. The OIDC `nonce` parameter is optional. Users review an authorization request before Hanko redirects to the application.
 
-Clients can enable the `offline_access` scope to receive a rotating refresh token. Refresh tokens are stored only as hashes, are bound to their client and user, and expire after 30 days of inactivity.
+Clients can enable the `offline_access` scope to receive a rotating refresh token. Refresh tokens are stored only as hashes, are bound to their client and user, and expire after 30 days of inactivity. Reuse of a consumed refresh token revokes its active token family.
+
+`prompt=login` always requires a new passkey assertion. `max_age` requires one when the current session is older than the requested age. `prompt=none` returns `login_required` or `consent_required` when Hanko would need to show an interaction.
 
 ## Checks
 

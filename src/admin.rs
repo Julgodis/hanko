@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{ConnectInfo, Extension, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -10,13 +10,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::{
     http::AppState,
     security::{
         BrowserSession, create_session, csrf_header_matches, digest, load_session, origin_is_valid,
-        random_secret, set_session_cookies, unix_now,
+        random_secret, set_session_cookies, source_ip, try_anonymous_state_slot, unix_now,
     },
 };
 
@@ -115,6 +116,12 @@ impl AdminError {
     }
     fn internal() -> Self {
         Self(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+    }
+    fn rate_limited() -> Self {
+        Self(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many requests; try again shortly",
+        )
     }
 }
 
@@ -836,10 +843,23 @@ async fn rotate_signing_key(
 async fn consume_invitation(
     State(state): State<AppState>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(input): Json<ConsumeInvitation>,
 ) -> Result<Response, AdminError> {
     if !origin_is_valid(&headers, &state.config) {
         return Err(AdminError::forbidden());
+    }
+    let _slot = try_anonymous_state_slot().ok_or_else(AdminError::rate_limited)?;
+    let source = source_ip(
+        peer.map(|Extension(ConnectInfo(address))| address),
+        &headers,
+        &state.config,
+    );
+    if !crate::http::allow_anonymous_state_creation(&state, "consume_invitation", source, 10, 300)
+        .await
+        .map_err(|_| AdminError::internal())?
+    {
+        return Err(AdminError::rate_limited());
     }
     if input.token.len() < 32 || input.token.len() > 128 {
         return Err(AdminError::unauthorized());

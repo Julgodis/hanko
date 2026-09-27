@@ -17,7 +17,11 @@ type Session = {
   oidc_name?: string | null;
 };
 type SetupStatus = { initialized: boolean; bootstrap_enabled: boolean };
-type AuthorizationRequest = { client_name: string; scopes: string[] };
+type AuthorizationRequest = {
+  client_name: string;
+  scopes: string[];
+  requires_fresh_authentication: boolean;
+};
 type PasskeyStart = {
   ceremony_id: string;
   publicKey: Parameters<typeof startAuthentication>[0]["optionsJSON"];
@@ -75,7 +79,13 @@ function App() {
   }, [enrollmentToken, requestId]);
 
   async function refreshSession() {
-    setSession(await api<Session>("/api/session"));
+    const identity = await api<Session>("/api/session");
+    setSession(identity);
+    if (requestId) {
+      setRequest(await api<AuthorizationRequest>(
+        `/api/authorize/request?request_id=${encodeURIComponent(requestId)}`,
+      ));
+    }
   }
 
   async function completeSetup() {
@@ -85,6 +95,12 @@ function App() {
     ]);
     setSession(identity);
     setSetupStatus(setup);
+  }
+
+  function requireFreshAuthorizationAuthentication() {
+    setRequest(current => current
+      ? { ...current, requires_fresh_authentication: true }
+      : current);
   }
 
   if (loading) {
@@ -119,8 +135,23 @@ function App() {
     return <ClientAdmin isAdmin={session.is_admin} />;
   }
 
+  if (requestId && request?.requires_fresh_authentication) {
+    return <SignIn
+      clientName={request.client_name}
+      requestId={requestId}
+      freshAuthentication
+      onAuthenticated={refreshSession}
+    />;
+  }
+
   if (session?.authenticated && !session.setup_only && requestId && request) {
-    return <Consent request={request} requestId={requestId} hankoColor={session.hanko_color} hankoSeed={session.hanko_seed} />;
+    return <Consent
+      request={request}
+      requestId={requestId}
+      hankoColor={session.hanko_color}
+      hankoSeed={session.hanko_seed}
+      onFreshAuthenticationRequired={requireFreshAuthorizationAuthentication}
+    />;
   }
 
   if (session?.authenticated && !session.setup_only) {
@@ -137,10 +168,12 @@ function App() {
 function SignIn({
   clientName,
   requestId,
+  freshAuthentication = false,
   onAuthenticated,
 }: {
   clientName: string;
   requestId: string | null;
+  freshAuthentication?: boolean;
   onAuthenticated: () => Promise<void>;
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
@@ -172,8 +205,10 @@ function SignIn({
     setPhase("idle");
   }
 
-  let title = `Sign in to ${clientName}`;
-  let text = "Use your passkey to continue.";
+  let title = freshAuthentication ? "Confirm it’s you" : `Sign in to ${clientName}`;
+  let text = freshAuthentication
+    ? `Use your passkey again to continue to ${clientName}.`
+    : "Use your passkey to continue.";
   if (phase === "preparing") {
     title = "Preparing your device…";
     text = "Follow your device prompt.";
@@ -193,7 +228,7 @@ function SignIn({
     <Copy title={title} text={text} />
     {phase === "idle" && <button className="primary-action" onClick={signIn}>
       <Fingerprint aria-hidden="true" className="size-[19px]" strokeWidth={1.8} />
-      <span>Sign in with passkey</span>
+      <span>{freshAuthentication ? "Confirm with passkey" : "Sign in with passkey"}</span>
     </button>}
     {phase === "success" && <span className="success-check" aria-label="Signed in"><Check aria-hidden="true" /></span>}
     {phase === "error" && <button className="primary-action" onClick={retry}>
@@ -203,7 +238,13 @@ function SignIn({
   </Scene>;
 }
 
-function Consent({ request, requestId, hankoColor, hankoSeed }: { request: AuthorizationRequest; requestId: string; hankoColor?: string | null; hankoSeed?: string | null }) {
+function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticationRequired }: {
+  request: AuthorizationRequest;
+  requestId: string;
+  hankoColor?: string | null;
+  hankoSeed?: string | null;
+  onFreshAuthenticationRequired: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const name = request.client_name || "This application";
@@ -218,7 +259,11 @@ function Consent({ request, requestId, hankoColor, hankoSeed }: { request: Autho
         body: json({ request_id: requestId }),
       });
       window.location.assign(result.redirect_to);
-    } catch {
+    } catch (cause) {
+      if (cause instanceof Error && cause.message === "a fresh user authentication is required") {
+        onFreshAuthenticationRequired();
+        return;
+      }
       setBusy(false);
       setError("This request could not be completed. Please return to the application and try again.");
     }

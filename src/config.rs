@@ -1,4 +1,5 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
+use std::net::IpAddr;
 use url::Url;
 
 #[derive(Clone, Debug)]
@@ -9,6 +10,7 @@ pub struct Config {
     pub bind_address: String,
     pub master_key: Option<[u8; 32]>,
     pub bootstrap_token: Option<String>,
+    pub trusted_proxy_addresses: Vec<IpAddr>,
 }
 
 impl Config {
@@ -34,6 +36,22 @@ impl Config {
         config.bootstrap_token = std::env::var("BOOTSTRAP_TOKEN")
             .ok()
             .filter(|value| !value.is_empty());
+        config.trusted_proxy_addresses = std::env::var("TRUSTED_PROXY_ADDRESSES")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .map(|address| {
+                        address
+                            .parse::<IpAddr>()
+                            .map_err(|_| ConfigError::InvalidTrustedProxyAddresses)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
         Ok(config)
     }
 
@@ -83,6 +101,7 @@ impl Config {
             bind_address,
             master_key: None,
             bootstrap_token: None,
+            trusted_proxy_addresses: Vec::new(),
         })
     }
 
@@ -122,6 +141,8 @@ pub enum ConfigError {
     InvalidOrigin,
     #[error("IDENTITY_MASTER_KEY must be base64 encoding of exactly 32 random bytes")]
     InvalidMasterKey,
+    #[error("TRUSTED_PROXY_ADDRESSES must be a comma-separated list of IP addresses")]
+    InvalidTrustedProxyAddresses,
 }
 
 #[cfg(test)]

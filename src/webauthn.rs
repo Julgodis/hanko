@@ -14,6 +14,7 @@ use crate::{
 };
 
 const CEREMONY_SECONDS: i64 = 5 * 60;
+const MAX_ACTIVE_CEREMONIES: i64 = 5000;
 
 fn credential_options(value: Value) -> Result<Value, WebauthnError> {
     value
@@ -51,6 +52,8 @@ pub enum WebauthnError {
     Protocol,
     #[error("invalid WebAuthn configuration")]
     Configuration,
+    #[error("too many active WebAuthn ceremonies")]
+    Capacity,
 }
 
 impl WebauthnService {
@@ -240,7 +243,11 @@ impl WebauthnService {
     ) -> Result<String, WebauthnError> {
         let raw_id = random_secret();
         let now = unix_now();
-        sqlx::query("INSERT INTO webauthn_ceremonies (ceremony_hash, kind, user_id, browser_hash, state_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        sqlx::query("DELETE FROM webauthn_ceremonies WHERE expires_at <= ?")
+            .bind(now)
+            .execute(&self.database.pool)
+            .await?;
+        let inserted = sqlx::query("INSERT INTO webauthn_ceremonies (ceremony_hash, kind, user_id, browser_hash, state_json, created_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM webauthn_ceremonies WHERE consumed_at IS NULL AND expires_at > ?) < ?")
             .bind(digest(&raw_id))
             .bind(kind)
             .bind(user_id)
@@ -248,8 +255,13 @@ impl WebauthnService {
             .bind(serde_json::to_string(state)?)
             .bind(now)
             .bind(now + CEREMONY_SECONDS)
+            .bind(now)
+            .bind(MAX_ACTIVE_CEREMONIES)
             .execute(&self.database.pool)
             .await?;
+        if inserted.rows_affected() != 1 {
+            return Err(WebauthnError::Capacity);
+        }
         Ok(raw_id)
     }
 
