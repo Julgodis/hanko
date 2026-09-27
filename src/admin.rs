@@ -20,17 +20,24 @@ use crate::{
     },
 };
 
-const INVITATION_SECONDS: i64 = 24 * 60 * 60;
+const MAX_INVITATION_SECONDS: i64 = 10 * 365 * 24 * 60 * 60;
 
 #[derive(Deserialize)]
-struct CreateUser {
-    username: String,
-    display_name: String,
+struct CreateInvitation {
+    label: String,
     email: Option<String>,
-    #[serde(default)]
-    attributes: Value,
+    max_uses: i64,
+    expires_in: i64,
+    expires_unit: String,
     #[serde(default)]
     groups: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct CreatedInvitation {
+    id: String,
+    enrollment_url: String,
+    expires_at: i64,
 }
 
 #[derive(Deserialize)]
@@ -117,7 +124,15 @@ impl IntoResponse for AdminError {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/admin/users", get(list_users).post(create_user))
+        .route("/api/admin/users", get(list_users))
+        .route(
+            "/api/admin/invitations",
+            get(list_invitations).post(create_invitation),
+        )
+        .route(
+            "/api/admin/invitations/{id}/revoke",
+            post(revoke_invitation),
+        )
         .route("/api/admin/groups", get(list_groups).post(create_group))
         .route("/api/admin/clients", get(list_clients).post(create_client))
         .route(
@@ -136,7 +151,7 @@ async fn list_users(
     headers: HeaderMap,
 ) -> Result<Json<Value>, AdminError> {
     let _admin = require_admin(&state, &headers, false).await?;
-    let rows = sqlx::query("SELECT id, username, display_name, email, attributes, is_admin, disabled_at, created_at FROM users ORDER BY username")
+    let rows = sqlx::query("SELECT id, username, display_name, email, attributes, invitation_label, is_admin, disabled_at, created_at FROM users ORDER BY username")
         .fetch_all(&state.database.pool)
         .await
         .map_err(|_| AdminError::internal())?;
@@ -151,6 +166,7 @@ async fn list_users(
             "username": row.try_get::<String, _>("username").map_err(|_| AdminError::internal())?,
             "display_name": row.try_get::<String, _>("display_name").map_err(|_| AdminError::internal())?,
             "email": row.try_get::<Option<String>, _>("email").map_err(|_| AdminError::internal())?,
+            "invitation_label": row.try_get::<Option<String>, _>("invitation_label").map_err(|_| AdminError::internal())?,
             "attributes": serde_json::from_str::<Value>(&attributes).map_err(|_| AdminError::internal())?,
             "is_admin": row.try_get::<bool, _>("is_admin").map_err(|_| AdminError::internal())?,
             "disabled": row.try_get::<Option<i64>, _>("disabled_at").map_err(|_| AdminError::internal())?.is_some(),
@@ -161,75 +177,116 @@ async fn list_users(
     Ok(Json(Value::Array(users)))
 }
 
-async fn create_user(
+async fn list_invitations(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(input): Json<CreateUser>,
 ) -> Result<Json<Value>, AdminError> {
+    let _admin = require_admin(&state, &headers, false).await?;
+    let rows = sqlx::query("SELECT id, label, email, max_uses, use_count, created_at, expires_at, revoked_at FROM invitation_links ORDER BY created_at DESC")
+        .fetch_all(&state.database.pool)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    let invitations = rows
+        .into_iter()
+        .map(|row| {
+            Ok(serde_json::json!({
+                "id": row.try_get::<String, _>("id").map_err(|_| AdminError::internal())?,
+                "label": row.try_get::<String, _>("label").map_err(|_| AdminError::internal())?,
+                "email": row.try_get::<Option<String>, _>("email").map_err(|_| AdminError::internal())?,
+                "max_uses": row.try_get::<i64, _>("max_uses").map_err(|_| AdminError::internal())?,
+                "use_count": row.try_get::<i64, _>("use_count").map_err(|_| AdminError::internal())?,
+                "created_at": row.try_get::<i64, _>("created_at").map_err(|_| AdminError::internal())?,
+                "expires_at": row.try_get::<i64, _>("expires_at").map_err(|_| AdminError::internal())?,
+                "revoked": row.try_get::<Option<i64>, _>("revoked_at").map_err(|_| AdminError::internal())?.is_some(),
+            }))
+        })
+        .collect::<Result<Vec<_>, AdminError>>()?;
+    Ok(Json(Value::Array(invitations)))
+}
+
+async fn create_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateInvitation>,
+) -> Result<Json<CreatedInvitation>, AdminError> {
     let _admin = require_admin(&state, &headers, true).await?;
-    let username = normalize_name(&input.username)
-        .ok_or_else(|| AdminError::bad_request("invalid username"))?;
-    let display_name = input.display_name.trim();
-    if display_name.is_empty() || display_name.len() > 120 {
-        return Err(AdminError::bad_request("invalid display name"));
+    let label = input.label.trim();
+    if label.is_empty() || label.len() > 80 {
+        return Err(AdminError::bad_request("invalid invitation label"));
     }
-    if input
+    if !(1..=500).contains(&input.max_uses) {
+        return Err(AdminError::bad_request("user limit must be between 1 and 500"));
+    }
+    let unit_seconds = match input.expires_unit.as_str() {
+        "seconds" => 1,
+        "minutes" => 60,
+        "hours" => 60 * 60,
+        "days" => 24 * 60 * 60,
+        "years" => 365 * 24 * 60 * 60,
+        _ => return Err(AdminError::bad_request("invalid expiry unit")),
+    };
+    let expires_in_seconds = input
+        .expires_in
+        .checked_mul(unit_seconds)
+        .filter(|duration| *duration > 0 && *duration <= MAX_INVITATION_SECONDS)
+        .ok_or_else(|| AdminError::bad_request("expiry must be between 1 second and 10 years"))?;
+    let email = input
         .email
         .as_deref()
-        .is_some_and(|email| email.len() > 320 || !email.contains('@'))
-    {
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if email.is_some_and(|value| value.len() > 320 || !value.contains('@')) {
         return Err(AdminError::bad_request("invalid email"));
     }
-    if !input.attributes.is_object() {
-        return Err(AdminError::bad_request("attributes must be a JSON object"));
+    if email.is_some() && input.max_uses != 1 {
+        return Err(AdminError::bad_request(
+            "email invitations can only be used once",
+        ));
     }
+
+    let mut groups = input.groups;
+    groups.sort();
+    groups.dedup();
     let mut transaction = state
         .database
         .pool
         .begin()
         .await
         .map_err(|_| AdminError::internal())?;
-    let user_id = Uuid::new_v4().to_string();
-    let hanko_seed = random_secret();
-    let now = unix_now();
-    sqlx::query("INSERT INTO users (id, username, email, display_name, attributes, hanko_seed, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(&user_id)
-        .bind(&username)
-        .bind(input.email.as_deref().map(str::trim))
-        .bind(display_name)
-        .bind(input.attributes.to_string())
-        .bind(hanko_seed)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "user creation failed");
-            AdminError::conflict("username or email already exists")
-        })?;
-    for group in &input.groups {
-        let group_id: Option<String> = sqlx::query_scalar("SELECT id FROM groups WHERE name = ?")
-            .bind(group)
-            .fetch_optional(&mut *transaction)
+    if let Some(email) = email {
+        let already_used: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE email = ?)")
+            .bind(email)
+            .fetch_one(&mut *transaction)
             .await
             .map_err(|_| AdminError::internal())?;
-        let Some(group_id) = group_id else {
-            return Err(AdminError::bad_request("unknown group"));
-        };
-        sqlx::query("INSERT INTO user_groups (user_id, group_id, created_at) VALUES (?, ?, ?)")
-            .bind(&user_id)
-            .bind(group_id)
-            .bind(now)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| AdminError::internal())?;
+        if already_used {
+            return Err(AdminError::conflict("email already belongs to an account"));
+        }
     }
-    let invitation = random_secret();
-    sqlx::query("INSERT INTO enrollment_invitations (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)")
-        .bind(digest(&invitation))
-        .bind(&user_id)
+    for group in &groups {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM groups WHERE name = ?)")
+            .bind(group)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+        if !exists {
+            return Err(AdminError::bad_request("unknown group"));
+        }
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let token = random_secret();
+    let now = unix_now();
+    let expires_at = now + expires_in_seconds;
+    sqlx::query("INSERT INTO invitation_links (id, token_hash, label, email, group_names, max_uses, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(&id)
+        .bind(digest(&token))
+        .bind(label)
+        .bind(email)
+        .bind(serde_json::to_string(&groups).map_err(|_| AdminError::internal())?)
+        .bind(input.max_uses)
         .bind(now)
-        .bind(now + INVITATION_SECONDS)
+        .bind(expires_at)
         .execute(&mut *transaction)
         .await
         .map_err(|_| AdminError::internal())?;
@@ -237,13 +294,30 @@ async fn create_user(
         .commit()
         .await
         .map_err(|_| AdminError::internal())?;
-    Ok(Json(serde_json::json!({
-        "id": user_id,
-        "username": username,
-        "enrollment_token": invitation,
-        "enrollment_url": format!("{}/?enroll={}", state.config.issuer(), invitation),
-        "expires_in": INVITATION_SECONDS,
-    })))
+
+    Ok(Json(CreatedInvitation {
+        id,
+        enrollment_url: format!("{}/?enroll={token}", state.config.issuer()),
+        expires_at,
+    }))
+}
+
+async fn revoke_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AdminError> {
+    let _admin = require_admin(&state, &headers, true).await?;
+    let result = sqlx::query("UPDATE invitation_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+        .bind(unix_now())
+        .bind(id)
+        .execute(&state.database.pool)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    if result.rows_affected() == 0 {
+        return Err(AdminError::conflict("invitation is already revoked or unavailable"));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_groups(
@@ -739,15 +813,87 @@ async fn consume_invitation(
         return Err(AdminError::unauthorized());
     }
     let now = unix_now();
-    let row = sqlx::query("UPDATE enrollment_invitations SET consumed_at = ? WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ? AND EXISTS (SELECT 1 FROM users WHERE users.id = enrollment_invitations.user_id AND users.disabled_at IS NULL) AND NOT EXISTS (SELECT 1 FROM passkeys WHERE passkeys.user_id = enrollment_invitations.user_id) RETURNING user_id")
-        .bind(now)
-        .bind(digest(&input.token))
-        .bind(now)
-        .fetch_optional(&state.database.pool)
+    let token_hash = digest(&input.token);
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
         .await
-        .map_err(|_| AdminError::internal())?
-        .ok_or_else(AdminError::unauthorized)?;
-    let user_id: String = row.try_get("user_id").map_err(|_| AdminError::internal())?;
+        .map_err(|_| AdminError::internal())?;
+    let invitation = sqlx::query("UPDATE invitation_links SET use_count = use_count + 1 WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ? AND use_count < max_uses RETURNING label, email, group_names")
+        .bind(&token_hash)
+        .bind(now)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+
+    let user_id = if let Some(invitation) = invitation {
+        let label: String = invitation
+            .try_get("label")
+            .map_err(|_| AdminError::internal())?;
+        let email: Option<String> = invitation
+            .try_get("email")
+            .map_err(|_| AdminError::internal())?;
+        let group_json: String = invitation
+            .try_get("group_names")
+            .map_err(|_| AdminError::internal())?;
+        let groups: Vec<String> = serde_json::from_str(&group_json)
+            .map_err(|_| AdminError::internal())?;
+
+        let user_id = Uuid::new_v4().to_string();
+        let username = format!("user-{}", Uuid::new_v4().simple());
+        sqlx::query("INSERT INTO users (id, username, email, display_name, attributes, hanko_seed, invitation_label, expose_preferred_username, expose_name, created_at, updated_at) VALUES (?, ?, ?, ?, '{}', ?, ?, 0, 0, ?, ?)")
+            .bind(&user_id)
+            .bind(&username)
+            .bind(email)
+            .bind(&username)
+            .bind(random_secret())
+            .bind(label)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "invited user creation failed");
+                AdminError::conflict("this invitation could not create an account")
+            })?;
+
+        for group in groups {
+            let group_id: Option<String> = sqlx::query_scalar("SELECT id FROM groups WHERE name = ?")
+                .bind(group)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|_| AdminError::internal())?;
+            if let Some(group_id) = group_id {
+                sqlx::query("INSERT INTO user_groups (user_id, group_id, created_at) VALUES (?, ?, ?)")
+                    .bind(&user_id)
+                    .bind(group_id)
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| AdminError::internal())?;
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| AdminError::internal())?;
+        user_id
+    } else {
+        transaction
+            .rollback()
+            .await
+            .map_err(|_| AdminError::internal())?;
+        let row = sqlx::query("UPDATE enrollment_invitations SET consumed_at = ? WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ? AND EXISTS (SELECT 1 FROM users WHERE users.id = enrollment_invitations.user_id AND users.disabled_at IS NULL) AND NOT EXISTS (SELECT 1 FROM passkeys WHERE passkeys.user_id = enrollment_invitations.user_id) RETURNING user_id")
+            .bind(now)
+            .bind(token_hash)
+            .bind(now)
+            .fetch_optional(&state.database.pool)
+            .await
+            .map_err(|_| AdminError::internal())?
+            .ok_or_else(AdminError::unauthorized)?;
+        row.try_get("user_id").map_err(|_| AdminError::internal())?
+    };
     let session = create_session(&state.database, &user_id, true, now)
         .await
         .map_err(|_| AdminError::internal())?;
