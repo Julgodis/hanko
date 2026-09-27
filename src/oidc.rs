@@ -596,6 +596,13 @@ async fn token(
         .await
         .map_err(|_| OAuthError::server_error())?;
 
+    sqlx::query("INSERT OR IGNORE INTO client_users (client_id, user_id) VALUES (?, ?)")
+        .bind(&input.client_id)
+        .bind(&user_id)
+        .execute(&state.database.pool)
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+
     Ok(Json(TokenResponse {
         access_token,
         token_type: "Bearer",
