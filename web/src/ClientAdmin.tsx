@@ -104,6 +104,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [error, setError] = useState("");
   const [clientFormMode, setClientFormMode] = useState<"create" | "edit" | null>(previewScreen === "client-form" ? "create" : null);
   const [userFormOpen, setUserFormOpen] = useState(previewScreen === "invite" || previewScreen === "invite-ready");
+  const [groupFormOpen, setGroupFormOpen] = useState(false);
   const [editingClientId, setEditingClientId] = useState("");
   const [deletingClientId, setDeletingClientId] = useState("");
   const [created, setCreated] = useState<CreatedClient | null>(null);
@@ -285,6 +286,18 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     setAdminActionMessage("");
   }
 
+  function openCreateGroup() {
+    setGroupName("");
+    setGroupDisplayName("");
+    setAdminActionMessage("");
+    setGroupFormOpen(true);
+  }
+
+  function closeGroupForm() {
+    setGroupFormOpen(false);
+    setAdminActionMessage("");
+  }
+
   async function saveClient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
@@ -337,7 +350,8 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   }
 
   async function removeClient(client: Client) {
-    if (!window.confirm("Remove this application? Its settings and sign-in count will be deleted.")) return;
+    const confirmed = window.confirm(`Remove ${client.name}? This permanently deletes its client settings, in-progress sign-in requests, authorization codes, refresh tokens, and linked-user records. Hanko user accounts remain, but this application will no longer be able to sign users in through Hanko.`);
+    if (!confirmed) return;
     setDeletingClientId(client.client_id);
     setError("");
     try {
@@ -410,6 +424,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       setGroupName("");
       setGroupDisplayName("");
       setGroups(await api<Group[]>("/api/admin/groups"));
+      setGroupFormOpen(false);
     } catch (createError) {
       setAdminActionMessage(errorMessage(createError));
     } finally {
@@ -431,8 +446,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     }
   }
 
-  async function addPasskey(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function addPasskey() {
     setAddingPasskey(true);
     setPasskeyError("");
     setPasskeyMessage("");
@@ -575,12 +589,15 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     passkeys: ["Passkeys", "Manage the devices that can sign in to your account."],
   };
   const [tabTitle, tabDescription] = tabTitles[activeTab];
+  const clientBeingEdited = clients.find((client) => client.client_id === editingClientId) ?? null;
   const title = activeTab === "clients" && clientFormMode !== null
     ? clientFormMode === "edit" ? "Edit OIDC client" : "Add an OIDC client"
-    : activeTab === "users" && userFormOpen ? "Invite a user" : tabTitle;
+    : activeTab === "users" && userFormOpen ? "Invite a user"
+      : activeTab === "groups" && groupFormOpen ? "Create a group" : tabTitle;
   const description = activeTab === "clients" && clientFormMode !== null
     ? "Configure how this application connects to Hanko."
-    : activeTab === "users" && userFormOpen ? "Create an invitation for someone to set up an account." : tabDescription;
+    : activeTab === "users" && userFormOpen ? "Create an invitation for someone to set up an account."
+      : activeTab === "groups" && groupFormOpen ? "Add a group to organize access to OIDC clients." : tabDescription;
 
   return <AdminScene>
     <div className="admin-layout">
@@ -603,6 +620,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         <header className="admin-heading">
           {(activeTab === "clients" && clientFormMode !== null) && <button className="admin-back-action" type="button" onClick={closeClientForm}>← Back to clients</button>}
           {(activeTab === "users" && userFormOpen) && <button className="admin-back-action" type="button" onClick={closeUserForm}>← Back to users</button>}
+          {(activeTab === "groups" && groupFormOpen) && <button className="admin-back-action" type="button" onClick={closeGroupForm}>← Back to groups</button>}
           <h1 id="admin-page-title">{title}</h1>
           <p>{description}</p>
         </header>
@@ -628,7 +646,6 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
             <td><span className={client.enabled ? "client-status" : "client-status disabled"}>{client.enabled ? "Enabled" : "Disabled"}</span></td>
             <td><div className="table-actions">
               <button className="client-list-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => openEditClient(client)}><Pencil aria-hidden="true" /><span>Edit</span></button>
-              <button className="client-list-action client-remove-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => void removeClient(client)}><Trash2 aria-hidden="true" /><span>{deletingClientId === client.client_id ? "Removing…" : "Remove"}</span></button>
             </div></td>
           </tr>)}</tbody>
         </table></div>}
@@ -681,10 +698,15 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
         <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={busy || !name.trim()}>{busy ? "Saving client…" : clientFormMode === "edit" ? "Save changes" : "Create OIDC client"}</button><button className="client-list-action" type="button" disabled={busy} onClick={closeClientForm}>Cancel</button></div>
       </form>
+      {clientFormMode === "edit" && clientBeingEdited && <section className="client-danger-zone" aria-labelledby="client-remove-title">
+        <h2 id="client-remove-title">Remove client</h2>
+        <p>Permanently delete this client’s settings, pending sign-ins, authorization codes, refresh tokens, and linked-user records. Hanko user accounts will remain, but this application will no longer be able to sign users in through Hanko.</p>
+        <button className="client-list-action client-remove-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => void removeClient(clientBeingEdited)}><Trash2 aria-hidden="true" />{deletingClientId === clientBeingEdited.client_id ? "Removing…" : "Remove client"}</button>
+      </section>}
     </section>}
 
           {activeTab === "users" && isAdmin && !userFormOpen && <>
-            <div className="client-list-heading user-list-heading"><h2>Accounts <span>{users.length}</span></h2><button className="client-add-action" type="button" onClick={openCreateUser}><Plus aria-hidden="true" /> Add a user</button></div>
+            <div className="client-list-heading user-list-heading"><h2>Accounts <span>{users.length}</span></h2></div>
             {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
             <section className="registered-clients admin-records user-records">
               {users.length === 0 ? <p className="admin-hint">No accounts found.</p> : <div className="admin-table-scroll"><table className="admin-table user-table">
@@ -695,7 +717,8 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
                 </tr>)}</tbody>
               </table></div>}
             </section>
-            <section className="registered-clients admin-records"><h2>Invite links <span>{invitations.length}</span></h2>
+            <section className="registered-clients admin-records">
+              <div className="client-list-heading"><h2>Invite links <span>{invitations.length}</span></h2><button className="client-add-action" type="button" onClick={openCreateUser}><Plus aria-hidden="true" /> Create an invite</button></div>
               {invitations.length === 0 ? <p className="admin-hint">No invite links yet.</p> : <div className="admin-table-scroll"><table className="admin-table invitation-table">
                 <thead><tr><th scope="col">Invite</th><th scope="col">Email</th><th scope="col">Uses</th><th scope="col">Expires</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
                 <tbody>{invitations.map((invitation) => {
@@ -727,14 +750,17 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
             </form>}
           </>}
 
-          {activeTab === "groups" && isAdmin && <>
-            <form className="client-form admin-create-form" onSubmit={createGroup}>
+          {activeTab === "groups" && isAdmin && groupFormOpen && <form className="client-form admin-create-form user-create-page" onSubmit={createGroup}>
               <label className="admin-field"><span>Group name</span><input autoComplete="off" maxLength={80} value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="media-users" required /></label>
               <label className="admin-field"><span>Display name</span><input maxLength={120} value={groupDisplayName} onChange={(event) => setGroupDisplayName(event.target.value)} placeholder="Media users" required /></label>
               {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
-              <button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !groupName.trim() || !groupDisplayName.trim()}>{adminActionBusy ? "Creating…" : "Create group"}</button>
-            </form>
-            <section className="registered-clients admin-records"><h2>Groups <span>{groups.length}</span></h2>{groups.length === 0 ? <p className="admin-hint">No groups have been created.</p> : <div className="admin-table-scroll"><table className="admin-table group-table">
+              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !groupName.trim() || !groupDisplayName.trim()}>{adminActionBusy ? "Creating…" : "Create group"}</button><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={closeGroupForm}>Cancel</button></div>
+            </form>}
+
+          {activeTab === "groups" && isAdmin && !groupFormOpen && <>
+            <div className="client-list-heading user-list-heading"><h2>Groups <span>{groups.length}</span></h2><button className="client-add-action" type="button" onClick={openCreateGroup}><Plus aria-hidden="true" /> Add a group</button></div>
+            {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
+            <section className="registered-clients admin-records user-records">{groups.length === 0 ? <p className="admin-hint">No groups have been created.</p> : <div className="admin-table-scroll"><table className="admin-table group-table">
               <thead><tr><th scope="col">Group name</th><th scope="col">Display name</th><th scope="col">Members</th></tr></thead>
               <tbody>{groups.map((group) => <tr key={group.id}>
                 <td><code className="table-id"><PrivateValue>{group.name}</PrivateValue></code></td>
@@ -766,10 +792,9 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           </section>}
 
           {activeTab === "passkeys" && <section className="account-passkeys">
-            <form className="passkey-add-form" onSubmit={addPasskey}><button className="secondary-action passkey-add-button" type="submit" disabled={addingPasskey}><Fingerprint aria-hidden="true" /> {addingPasskey ? "Follow your device prompt…" : "Add passkey"}</button></form>
-            {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
             <section className="passkey-list" aria-labelledby="passkey-list-title">
-              <h3 id="passkey-list-title">Registered devices <span>{passkeys.length}</span></h3>
+              <div className="client-list-heading"><h2 id="passkey-list-title">Registered devices <span>{passkeys.length}</span></h2><button className="client-add-action" type="button" onClick={() => void addPasskey()} disabled={addingPasskey}><Plus aria-hidden="true" /> {addingPasskey ? "Follow your device prompt…" : "Add passkey"}</button></div>
+              {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
               {passkeysLoading ? <p className="admin-hint">Loading passkeys…</p> : passkeys.length === 0 ? <p className="admin-hint">No passkeys are registered.</p> : <div className="admin-table-scroll"><table className="admin-table passkey-table">
                 <thead><tr><th scope="col">Device</th><th scope="col">Added</th><th scope="col">Last used</th><th scope="col">Actions</th></tr></thead>
                 <tbody>{passkeys.map((passkey) => <tr key={passkey.id}>
