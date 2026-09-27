@@ -888,9 +888,9 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .client-table { min-width: 0; }
 .client-table th,
 .client-table td { padding-inline: 8px; }
-.user-table { min-width: 830px; }
+.user-table { min-width: 940px; }
 .invitation-table { min-width: 775px; }
-.group-table { min-width: 570px; }
+.group-table { min-width: 690px; }
 .signing-key-table { min-width: 650px; }
 .passkey-table { min-width: 790px; }
 .admin-table th,
@@ -910,6 +910,12 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .admin-table .invitation-revoke { margin: 0; padding: 5px 7px; border-radius: 5px; font-size: 14px; white-space: nowrap; }
 .admin-table .invitation-revoke:hover:not(:disabled) { background: color-mix(in srgb, var(--error), transparent 93%); }
 .table-actions .client-list-action svg { width: 13px; height: 13px; }
+.membership-action { min-height: 36px; padding-inline: 9px; font-size: 14px; white-space: nowrap; }
+.membership-action svg { width: 13px; height: 13px; }
+.membership-editor { display: grid; max-width: 740px; gap: 14px; padding: 4px 2px; }
+.membership-editor h3 { margin: 0; color: var(--ink); font-size: 16px; font-weight: 590; }
+.membership-editor .admin-options { padding-top: 12px; }
+.membership-editor .client-form-actions .primary-action { min-height: 40px; }
 .user-list-heading { margin-top: 0; }
 .user-records { margin-top: 0; padding-top: 0; border-top: 0; }
 
