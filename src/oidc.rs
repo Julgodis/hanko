@@ -1251,13 +1251,12 @@ async fn validate_authorize_request(
             "required authorization parameters are invalid",
         ));
     }
-    let client = sqlx::query(
-        "SELECT client_type FROM oidc_clients WHERE client_id = ? AND enabled = 1",
-    )
-    .bind(&input.client_id)
-    .fetch_optional(&state.database.pool)
-    .await
-    .map_err(|_| OAuthError::server_error())?;
+    let client =
+        sqlx::query("SELECT client_type FROM oidc_clients WHERE client_id = ? AND enabled = 1")
+            .bind(&input.client_id)
+            .fetch_optional(&state.database.pool)
+            .await
+            .map_err(|_| OAuthError::server_error())?;
     let Some(client) = client else {
         tracing::warn!(
             endpoint = "/authorize",
