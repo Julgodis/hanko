@@ -95,36 +95,36 @@ struct AccessClaims {
 struct OAuthError {
     status: StatusCode,
     error: &'static str,
-    description: &'static str,
+    description: String,
 }
 
 impl OAuthError {
-    fn invalid_request(description: &'static str) -> Self {
+    fn invalid_request(description: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             error: "invalid_request",
-            description,
+            description: description.into(),
         }
     }
     fn invalid_client() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
             error: "invalid_client",
-            description: "client authentication failed",
+            description: "client authentication failed".to_owned(),
         }
     }
     fn invalid_grant() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             error: "invalid_grant",
-            description: "authorization grant is invalid or expired",
+            description: "authorization grant is invalid or expired".to_owned(),
         }
     }
     fn server_error() -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             error: "server_error",
-            description: "identity provider error",
+            description: "identity provider error".to_owned(),
         }
     }
 }
@@ -885,15 +885,28 @@ async fn ensure_scopes_still_allowed(
 
 fn parse_scopes(scope: &str) -> Result<Vec<String>, OAuthError> {
     let scopes: Vec<String> = scope.split_ascii_whitespace().map(str::to_owned).collect();
-    if scopes.is_empty()
-        || !scopes.iter().any(|scope| scope == "openid")
-        || scopes
-            .iter()
-            .any(|scope| !matches!(scope.as_str(), "openid" | "profile" | "email" | "groups"))
-    {
-        return Err(OAuthError::invalid_request(
-            "scope must include openid and only supported scopes",
-        ));
+    let missing_openid = !scopes.iter().any(|scope| scope == "openid");
+    let unsupported: Vec<&str> = scopes
+        .iter()
+        .filter(|scope| {
+            !matches!(scope.as_str(), "openid" | "profile" | "email" | "groups")
+        })
+        .map(String::as_str)
+        .collect();
+    if scopes.is_empty() || missing_openid || !unsupported.is_empty() {
+        let mut reasons = Vec::new();
+        if missing_openid {
+            reasons.push("missing required scope \"openid\"".to_owned());
+        }
+        if unsupported.is_empty() {
+            reasons.push("unsupported scopes: none".to_owned());
+        } else {
+            reasons.push(format!("unsupported scopes: {}", unsupported.join(", ")));
+        }
+        return Err(OAuthError::invalid_request(format!(
+            "requested scope \"{scope}\" is invalid: {}",
+            reasons.join("; ")
+        )));
     }
     let unique: std::collections::HashSet<_> = scopes.iter().collect();
     if unique.len() != scopes.len() {
