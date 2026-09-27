@@ -173,6 +173,27 @@ function installPreviewApi() {
       return jsonResponse({});
     }
     if (url.pathname === "/api/admin/users" && method === "GET") return jsonResponse(users);
+    if (url.pathname.startsWith("/api/admin/users/") && method === "PUT") {
+      const userId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
+      const user = users.find((item) => item.id === userId);
+      if (!user) return jsonResponse({ error: "user not found" }, 404);
+      user.groups = JSON.parse(String(init?.body ?? "{}")).groups ?? [];
+      for (const group of groups) group.member_count = users.filter((item) => item.groups.includes(group.name)).length;
+      return jsonResponse({});
+    }
+    if (url.pathname.startsWith("/api/admin/groups/") && method === "PUT") {
+      const groupId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
+      const group = groups.find((item) => item.id === groupId);
+      if (!group) return jsonResponse({ error: "group not found" }, 404);
+      const memberIds: string[] = JSON.parse(String(init?.body ?? "{}")).users ?? [];
+      for (const user of users) {
+        user.groups = memberIds.includes(user.id)
+          ? [...new Set([...user.groups, group.name])]
+          : user.groups.filter((name) => name !== group.name);
+      }
+      for (const item of groups) item.member_count = users.filter((user) => user.groups.includes(item.name)).length;
+      return jsonResponse({});
+    }
     if (url.pathname === "/api/admin/invitations" && method === "GET") return jsonResponse(previewInvitations);
     if (url.pathname === "/api/admin/invitations" && method === "POST") {
       const payload = JSON.parse(String(init?.body ?? "{}"));

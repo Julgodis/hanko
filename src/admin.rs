@@ -64,6 +64,18 @@ struct GroupClaimInput {
 }
 
 #[derive(Deserialize)]
+struct UpdateUserGroups {
+    #[serde(default)]
+    groups: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateGroupMembers {
+    #[serde(default)]
+    users: Vec<String>,
+}
+
+#[derive(Deserialize)]
 struct CreateClient {
     name: String,
     client_type: String,
@@ -130,6 +142,12 @@ impl AdminError {
     fn not_found() -> Self {
         Self(StatusCode::NOT_FOUND, "client not found")
     }
+    fn user_not_found() -> Self {
+        Self(StatusCode::NOT_FOUND, "user not found")
+    }
+    fn group_not_found() -> Self {
+        Self(StatusCode::NOT_FOUND, "group not found")
+    }
     fn internal() -> Self {
         Self(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
     }
@@ -150,6 +168,7 @@ impl IntoResponse for AdminError {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/users", get(list_users))
+        .route("/api/admin/users/{user_id}/groups", put(update_user_groups))
         .route(
             "/api/admin/invitations",
             get(list_invitations).post(create_invitation),
@@ -160,6 +179,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/admin/groups", get(list_groups).post(create_group))
         .route("/api/admin/groups/{group_id}", put(update_group))
+        .route(
+            "/api/admin/groups/{group_id}/members",
+            put(update_group_members),
+        )
         .route("/api/admin/clients", get(list_clients).post(create_client))
         .route(
             "/api/admin/clients/{client_id}",
@@ -201,6 +224,76 @@ async fn list_users(
         }));
     }
     Ok(Json(Value::Array(users)))
+}
+
+async fn update_user_groups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Json(mut input): Json<UpdateUserGroups>,
+) -> Result<StatusCode, AdminError> {
+    let _admin = require_admin(&state, &headers, true).await?;
+    input.groups.sort();
+    input.groups.dedup();
+
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    let user_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)")
+        .bind(&user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    if !user_exists {
+        return Err(AdminError::user_not_found());
+    }
+
+    let mut desired_group_ids = Vec::with_capacity(input.groups.len());
+    for group_name in input.groups {
+        let group_id: Option<String> = sqlx::query_scalar("SELECT id FROM groups WHERE name = ?")
+            .bind(group_name)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+        desired_group_ids.push(group_id.ok_or_else(|| AdminError::bad_request("unknown group"))?);
+    }
+
+    let current_group_ids: Vec<String> =
+        sqlx::query_scalar("SELECT group_id FROM user_groups WHERE user_id = ?")
+            .bind(&user_id)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    for group_id in &current_group_ids {
+        if !desired_group_ids.contains(group_id) {
+            sqlx::query("DELETE FROM user_groups WHERE user_id = ? AND group_id = ?")
+                .bind(&user_id)
+                .bind(group_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| AdminError::internal())?;
+        }
+    }
+    let now = unix_now();
+    for group_id in &desired_group_ids {
+        if !current_group_ids.contains(group_id) {
+            sqlx::query("INSERT INTO user_groups (user_id, group_id, created_at) VALUES (?, ?, ?)")
+                .bind(&user_id)
+                .bind(group_id)
+                .bind(now)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| AdminError::internal())?;
+        }
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_invitations(
@@ -398,6 +491,78 @@ async fn list_groups(
         }));
     }
     Ok(Json(Value::Array(groups)))
+}
+
+async fn update_group_members(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    Json(mut input): Json<UpdateGroupMembers>,
+) -> Result<StatusCode, AdminError> {
+    let _admin = require_admin(&state, &headers, true).await?;
+    input.users.sort();
+    input.users.dedup();
+
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    let group_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM groups WHERE id = ?)")
+        .bind(&group_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    if !group_exists {
+        return Err(AdminError::group_not_found());
+    }
+
+    for user_id in &input.users {
+        let user_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)")
+                .bind(user_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| AdminError::internal())?;
+        if !user_exists {
+            return Err(AdminError::bad_request("unknown user"));
+        }
+    }
+
+    let current_user_ids: Vec<String> =
+        sqlx::query_scalar("SELECT user_id FROM user_groups WHERE group_id = ?")
+            .bind(&group_id)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    for user_id in &current_user_ids {
+        if !input.users.contains(user_id) {
+            sqlx::query("DELETE FROM user_groups WHERE user_id = ? AND group_id = ?")
+                .bind(user_id)
+                .bind(&group_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| AdminError::internal())?;
+        }
+    }
+    let now = unix_now();
+    for user_id in &input.users {
+        if !current_user_ids.contains(user_id) {
+            sqlx::query("INSERT INTO user_groups (user_id, group_id, created_at) VALUES (?, ?, ?)")
+                .bind(user_id)
+                .bind(&group_id)
+                .bind(now)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| AdminError::internal())?;
+        }
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_group(

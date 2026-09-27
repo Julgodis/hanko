@@ -1,5 +1,5 @@
 import { Check, Copy, Fingerprint, KeyRound, Mail, Pencil, Plus, Shield, Users, UserRound, Stamp, Trash2 } from "lucide-react";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
@@ -28,6 +28,7 @@ type Client = {
 type GroupClaimMapping = { claim_name: string; claim_value: unknown; required_scope: Scope };
 type Group = { id: string; name: string; display_name: string; member_count: number; claims?: GroupClaimMapping[] };
 type AdminUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
+type MembershipEditor = { kind: "user"; id: string } | { kind: "group"; id: string };
 type Invitation = { id: string; label: string; email: string | null; max_uses: number; use_count: number; created_at: number; expires_at: number; revoked: boolean };
 type CreatedInvitation = { id: string; label: string; email: string | null; enrollment_url: string; expires_at: number };
 type SigningKey = { kid: string; algorithm: string; status: string; created_at: number; retire_after: number | null };
@@ -144,6 +145,12 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [groupClaims, setGroupClaims] = useState<GroupClaimDraft[]>([]);
   const [adminActionBusy, setAdminActionBusy] = useState(false);
   const [adminActionMessage, setAdminActionMessage] = useState("");
+  const [membershipEditor, setMembershipEditor] = useState<MembershipEditor | null>(null);
+  const [membershipSelection, setMembershipSelection] = useState<string[]>([]);
+  const [membershipBusy, setMembershipBusy] = useState(false);
+  const [membershipLoading, setMembershipLoading] = useState(false);
+  const [membershipReady, setMembershipReady] = useState(false);
+  const [membershipError, setMembershipError] = useState("");
 
   async function refreshClients() {
     setClients(await api<Client[]>("/api/admin/clients"));
@@ -191,6 +198,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           setUsers(userList);
           setInvitations(invitationList);
         }
+        if (activeTab === "groups" && isAdmin) setUsers(await api<AdminUser[]>("/api/admin/users"));
         if (activeTab === "keys" && isAdmin) setSigningKeys(await api<SigningKey[]>("/api/admin/signing-keys"));
         if (activeTab === "passkeys") {
           setPasskeysLoading(true);
@@ -325,6 +333,74 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     setGroupFormOpen(false);
     setEditingGroupId("");
     setAdminActionMessage("");
+  }
+
+  function openUserGroups(user: AdminUser) {
+    setMembershipEditor({ kind: "user", id: user.id });
+    setMembershipSelection(user.groups);
+    setMembershipReady(true);
+    setMembershipError("");
+  }
+
+  async function openGroupMembers(group: Group) {
+    setMembershipEditor({ kind: "group", id: group.id });
+    setMembershipSelection([]);
+    setMembershipReady(false);
+    setMembershipError("");
+    setMembershipLoading(true);
+    try {
+      const userList = await api<AdminUser[]>("/api/admin/users");
+      setUsers(userList);
+      setMembershipSelection(userList.filter((user) => user.groups.includes(group.name)).map((user) => user.id));
+      setMembershipReady(true);
+    } catch (loadError) {
+      setMembershipError(errorMessage(loadError));
+    } finally {
+      setMembershipLoading(false);
+    }
+  }
+
+  function toggleMembership(value: string) {
+    setMembershipSelection((current) => current.includes(value)
+      ? current.filter((item) => item !== value)
+      : [...current, value]);
+  }
+
+  async function saveMembership(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!membershipEditor) return;
+    setMembershipBusy(true);
+    setMembershipError("");
+    try {
+      if (membershipEditor.kind === "user") {
+        await api(`/api/admin/users/${encodeURIComponent(membershipEditor.id)}/groups`, {
+          method: "PUT",
+          body: json({ groups: membershipSelection }),
+        });
+      } else {
+        await api(`/api/admin/groups/${encodeURIComponent(membershipEditor.id)}/members`, {
+          method: "PUT",
+          body: json({ users: membershipSelection }),
+        });
+      }
+      const [userList, groupList] = await Promise.all([
+        api<AdminUser[]>("/api/admin/users"),
+        api<Group[]>("/api/admin/groups"),
+      ]);
+      setUsers(userList);
+      setGroups(groupList);
+      setMembershipEditor(null);
+    } catch (saveError) {
+      setMembershipError(errorMessage(saveError));
+    } finally {
+      setMembershipBusy(false);
+    }
+  }
+
+  function closeMembershipEditor() {
+    setMembershipEditor(null);
+    setMembershipReady(false);
+    setMembershipError("");
   }
 
   async function saveClient(event: FormEvent<HTMLFormElement>) {
@@ -614,6 +690,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   function selectTab(tab: Tab) {
     setAdminActionMessage("");
     setLoadError("");
+    closeMembershipEditor();
     setActiveTab(tab);
   }
 
@@ -629,8 +706,8 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   ];
   const tabTitles: Record<Tab, [string, string]> = {
     clients: ["OIDC clients", "Connect applications to Hanko."],
-    users: ["Users", "Create labeled invite links and review their accounts."],
-    groups: ["Groups", "Organize client access and add scoped claims for members."],
+    users: ["Users", "Create invite links, review accounts, and manage group memberships."],
+    groups: ["Groups", "Manage memberships, scoped claims, and OIDC client access."],
     keys: ["Signing keys", "Manage the keys used to sign tokens."],
     hanko: ["Your Hanko", "Your personal seal."],
     passkeys: ["Passkeys", "Manage the devices that can sign in to your account."],
@@ -757,11 +834,22 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
             {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
             <section className="registered-clients admin-records user-records">
               {users.length === 0 ? <p className="admin-hint">No accounts found.</p> : <div className="admin-table-scroll"><table className="admin-table user-table">
-                <thead><tr><th scope="col">User</th><th scope="col">Username</th><th scope="col">Email</th><th scope="col">Groups</th><th scope="col">Invite label</th><th scope="col">Status</th></tr></thead>
-                <tbody>{users.map((user) => <tr key={user.id}>
-                  <td><strong><PrivateValue>{user.display_name || user.username}</PrivateValue></strong></td><td><code className="table-id"><PrivateValue>{user.username}</PrivateValue></code></td><td>{user.email ? <PrivateValue>{user.email}</PrivateValue> : <span className="table-muted">No email</span>}</td><td>{user.groups.length ? <PrivateValue>{user.groups.join(", ")}</PrivateValue> : <span className="table-muted">—</span>}</td><td>{user.invitation_label ? <PrivateValue>{user.invitation_label}</PrivateValue> : <span className="table-muted">—</span>}</td>
-                  <td><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></td>
-                </tr>)}</tbody>
+                <thead><tr><th scope="col">User</th><th scope="col">Username</th><th scope="col">Email</th><th scope="col">Groups</th><th scope="col">Invite label</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+                <tbody>{users.map((user) => <Fragment key={user.id}>
+                  <tr key={user.id}>
+                    <td><strong><PrivateValue>{user.display_name || user.username}</PrivateValue></strong></td><td><code className="table-id"><PrivateValue>{user.username}</PrivateValue></code></td><td>{user.email ? <PrivateValue>{user.email}</PrivateValue> : <span className="table-muted">No email</span>}</td><td>{user.groups.length ? <PrivateValue>{user.groups.join(", ")}</PrivateValue> : <span className="table-muted">—</span>}</td><td>{user.invitation_label ? <PrivateValue>{user.invitation_label}</PrivateValue> : <span className="table-muted">—</span>}</td>
+                    <td><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></td>
+                    <td><button className="client-list-action membership-action" type="button" onClick={() => openUserGroups(user)} disabled={membershipBusy || membershipLoading}><Pencil aria-hidden="true" />Edit groups</button></td>
+                  </tr>
+                  {membershipEditor?.kind === "user" && membershipEditor.id === user.id && <tr key={`${user.id}-groups`}><td colSpan={7}>
+                    <form className="membership-editor" onSubmit={saveMembership}>
+                      <h3>Groups for <PrivateValue>{user.display_name || user.username}</PrivateValue></h3>
+                      {groups.length === 0 ? <p className="admin-hint">Create a group before assigning one to this user.</p> : <fieldset className="admin-options"><legend>Choose groups</legend><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check" key={group.id}><input type="checkbox" checked={membershipSelection.includes(group.name)} onChange={() => toggleMembership(group.name)} disabled={membershipBusy} /><span><strong><PrivateValue>{group.display_name}</PrivateValue></strong><small><PrivateValue>{group.name}</PrivateValue></small></span></label>)}</div></fieldset>}
+                      {membershipError && <p className="admin-message admin-message-error" role="alert">{membershipError}</p>}
+                      <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={membershipBusy || !membershipReady || groups.length === 0}>{membershipBusy ? "Saving…" : "Save groups"}</button><button className="client-list-action" type="button" disabled={membershipBusy} onClick={closeMembershipEditor}>Cancel</button></div>
+                    </form>
+                  </td></tr>}
+                </Fragment>)}</tbody>
               </table></div>}
             </section>
             <section className="registered-clients admin-records">
@@ -820,13 +908,23 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
             {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
             <section className="registered-clients admin-records user-records">{groups.length === 0 ? <p className="admin-hint">No groups have been created.</p> : <div className="admin-table-scroll"><table className="admin-table group-table">
               <thead><tr><th scope="col">Group name</th><th scope="col">Display name</th><th scope="col">Claims</th><th scope="col">Members</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
-              <tbody>{groups.map((group) => <tr key={group.id}>
-                <td><code className="table-id"><PrivateValue>{group.name}</PrivateValue></code></td>
-                <td><strong><PrivateValue>{group.display_name}</PrivateValue></strong></td>
-                <td>{(group.claims ?? []).length ? <span>{(group.claims ?? []).map((claim) => claim.claim_name).join(", ")}</span> : <span className="table-muted">—</span>}</td>
-                <td><PrivateValue>{group.member_count}</PrivateValue></td>
-                <td><div className="table-actions"><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={() => openEditGroup(group)}><Pencil aria-hidden="true" /><span>Edit</span></button></div></td>
-              </tr>)}</tbody>
+              <tbody>{groups.map((group) => <Fragment key={group.id}>
+                <tr key={group.id}>
+                  <td><code className="table-id"><PrivateValue>{group.name}</PrivateValue></code></td>
+                  <td><strong><PrivateValue>{group.display_name}</PrivateValue></strong></td>
+                  <td>{(group.claims ?? []).length ? <span>{(group.claims ?? []).map((claim) => claim.claim_name).join(", ")}</span> : <span className="table-muted">—</span>}</td>
+                  <td><PrivateValue>{group.member_count}</PrivateValue></td>
+                  <td><div className="table-actions"><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={() => openEditGroup(group)}><Pencil aria-hidden="true" /><span>Edit</span></button><button className="client-list-action membership-action" type="button" onClick={() => void openGroupMembers(group)} disabled={membershipBusy || membershipLoading}><Users aria-hidden="true" />Manage members</button></div></td>
+                </tr>
+                {membershipEditor?.kind === "group" && membershipEditor.id === group.id && <tr key={`${group.id}-members`}><td colSpan={5}>
+                  <form className="membership-editor" onSubmit={saveMembership}>
+                    <h3>Members of <PrivateValue>{group.display_name}</PrivateValue></h3>
+                    {membershipLoading ? <p className="admin-hint">Loading users…</p> : users.length === 0 ? <p className="admin-hint">No user accounts are available.</p> : <fieldset className="admin-options"><legend>Choose users</legend><div className="admin-choice-grid">{users.map((user) => <label className="admin-check" key={user.id}><input type="checkbox" checked={membershipSelection.includes(user.id)} onChange={() => toggleMembership(user.id)} disabled={membershipBusy} /><span><strong><PrivateValue>{user.display_name || user.username}</PrivateValue></strong><small><PrivateValue>{user.username}{user.disabled ? " · disabled" : ""}</PrivateValue></small></span></label>)}</div></fieldset>}
+                    {membershipError && <p className="admin-message admin-message-error" role="alert">{membershipError}</p>}
+                    <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={membershipBusy || membershipLoading || !membershipReady}>{membershipBusy ? "Saving…" : "Save members"}</button><button className="client-list-action" type="button" disabled={membershipBusy} onClick={closeMembershipEditor}>Cancel</button></div>
+                  </form>
+                </td></tr>}
+              </Fragment>)}</tbody>
             </table></div>}</section>
           </>}
 
