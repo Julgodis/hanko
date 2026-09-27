@@ -5,7 +5,7 @@ import { HankoSeal } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
-import { api, json } from "./lib/utils";
+import { api, defaultPasskeyLabel, json } from "./lib/utils";
 
 const AVAILABLE_SCOPES = ["profile", "email", "groups", "offline_access"] as const;
 const EXPIRY_UNIT_SECONDS = { seconds: 1, minutes: 60, hours: 60 * 60, days: 24 * 60 * 60, years: 365 * 24 * 60 * 60 } as const;
@@ -108,7 +108,6 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [deletingClientId, setDeletingClientId] = useState("");
   const [created, setCreated] = useState<CreatedClient | null>(null);
   const [copied, setCopied] = useState("");
-  const [passkeyLabel, setPasskeyLabel] = useState("");
   const [addingPasskey, setAddingPasskey] = useState(false);
   const [passkeyError, setPasskeyError] = useState("");
   const [passkeyMessage, setPasskeyMessage] = useState("");
@@ -455,11 +454,10 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       const credential = await credentialPromise;
       await api("/api/passkeys/register/verify", {
         method: "POST",
-        body: json({ ceremony_id: start.ceremony_id, credential, label: passkeyLabel.trim() }),
+        body: json({ ceremony_id: start.ceremony_id, credential, label: defaultPasskeyLabel(new Date()) }),
       });
       await refreshPasskeys();
       setPasskeyMessage("Passkey added to this account.");
-      setPasskeyLabel("");
     } catch {
       setPasskeyError("Passkey registration wasn’t completed. You can try again.");
     } finally {
@@ -620,15 +618,10 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       {clients.length === 0
         ? <p className="admin-hint">No clients have been added yet.</p>
         : <div className="admin-table-scroll"><table className="admin-table client-table">
-          <thead><tr><th scope="col">Application</th><th scope="col">Client ID</th><th scope="col">Type</th><th scope="col">Users</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+          <thead><tr><th scope="col">Application</th><th scope="col">Scopes</th><th scope="col">Client ID</th><th scope="col">Type</th><th scope="col">Users</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
           <tbody>{clients.map((client) => <tr key={client.client_id}>
-            <td><strong><PrivateValue>{client.name}</PrivateValue></strong><details className="table-details"><summary>Settings</summary>
-              <p>Scopes: <PrivateValue>{client.scopes.join(", ")}</PrivateValue></p>
-              <p><PrivateValue>{client.allowed_groups.length ? `Allowed groups: ${client.allowed_groups.join(", ")}` : "Available to all users"}</PrivateValue></p>
-              <strong>Callback URLs</strong><ul>{client.redirect_uris.map((uri) => <li key={uri}><code><PrivateValue>{uri}</PrivateValue></code></li>)}</ul>
-              {client.post_logout_redirect_uris.length > 0 && <><strong>Post-logout URLs</strong><ul>{client.post_logout_redirect_uris.map((uri) => <li key={uri}><code><PrivateValue>{uri}</PrivateValue></code></li>)}</ul></>}
-              {client.claims.length > 0 && <><strong>Custom claims</strong><ul>{client.claims.map((claim) => <li key={claim.claim_name}><code><PrivateValue>{claim.claim_name}</PrivateValue></code> from <code><PrivateValue>{claim.user_attribute_path}</PrivateValue></code>{claim.required_scope ? ` · ${claim.required_scope}` : ""}</li>)}</ul></>}
-            </details></td>
+            <td><strong><PrivateValue>{client.name}</PrivateValue></strong></td>
+            <td><div className="client-scope-list" aria-label={`Enabled scopes: ${client.scopes.join(", ")}`}>{client.scopes.map((scope) => <span className="client-scope-chip" key={scope}>{scope}</span>)}</div></td>
             <td><code className="table-id"><PrivateValue>{client.client_id}</PrivateValue></code></td>
             <td>{client.client_type === "public" ? "Public" : "Confidential"}<small>{client.token_endpoint_auth_method}</small></td>
             <td>{client.user_count ?? 0}</td>
@@ -752,7 +745,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           </>}
 
           {activeTab === "keys" && isAdmin && <>
-            <div className="key-management"><p className="admin-hint">New tokens use the active key. Previous public keys remain available to verify tokens already issued.</p><button className="secondary-action" type="button" onClick={rotateSigningKey} disabled={adminActionBusy}><Shield aria-hidden="true" />{adminActionBusy ? "Rotating…" : "Rotate signing key"}</button></div>
+            <div className="key-management"><div className="key-management-copy"><p className="admin-hint">Signing keys let Hanko sign the ID and access tokens it issues. Connected apps use the matching public keys to verify each token.</p><p className="admin-hint">Rotating creates a new active key for future tokens. The old public key stays available for 15 minutes so current tokens remain verifiable; users stay signed in.</p></div><button className="secondary-action" type="button" onClick={rotateSigningKey} disabled={adminActionBusy}><Shield aria-hidden="true" />{adminActionBusy ? "Creating new key…" : "Rotate signing key"}</button></div>
             {adminActionMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{adminActionMessage}</p>}
             <section className="registered-clients admin-records"><h2>Keys <span>{signingKeys.length}</span></h2>{signingKeys.length === 0 ? <p className="admin-hint">No signing keys found.</p> : <div className="admin-table-scroll"><table className="admin-table signing-key-table">
               <thead><tr><th scope="col">Key ID</th><th scope="col">Algorithm</th><th scope="col">Status</th><th scope="col">Created</th><th scope="col">Retires</th></tr></thead>
@@ -773,8 +766,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           </section>}
 
           {activeTab === "passkeys" && <section className="account-passkeys">
-            <div className="passkey-section-heading"><span><Fingerprint aria-hidden="true" /></span><div><h2>Your passkeys</h2><p>Confirm with an existing passkey to add or remove a device. Keep at least one passkey on your account.</p></div></div>
-            <form className="passkey-add-form" onSubmit={addPasskey}><label className="admin-field"><span>Device label <em>Optional</em></span><input value={passkeyLabel} onChange={(event) => setPasskeyLabel(event.target.value)} maxLength={100} placeholder="e.g. MacBook" /></label><button className="secondary-action passkey-add-button" type="submit" disabled={addingPasskey}><Fingerprint aria-hidden="true" /> {addingPasskey ? "Follow your device prompt…" : "Add passkey"}</button></form>
+            <form className="passkey-add-form" onSubmit={addPasskey}><button className="secondary-action passkey-add-button" type="submit" disabled={addingPasskey}><Fingerprint aria-hidden="true" /> {addingPasskey ? "Follow your device prompt…" : "Add passkey"}</button></form>
             {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
             <section className="passkey-list" aria-labelledby="passkey-list-title">
               <h3 id="passkey-list-title">Registered devices <span>{passkeys.length}</span></h3>
