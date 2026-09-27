@@ -1,5 +1,19 @@
-import ClientAdmin from "./ClientAdmin";
+import App from "./App";
 import "./styles.css";
+
+type PreviewScreen = "signin" | "consent" | "welcome" | "setup" | "clients" | "account";
+
+const previewScreens: { id: PreviewScreen; label: string }[] = [
+  { id: "signin", label: "Sign in" },
+  { id: "consent", label: "Consent" },
+  { id: "welcome", label: "Welcome" },
+  { id: "setup", label: "First run" },
+  { id: "clients", label: "Admin" },
+  { id: "account", label: "Account" },
+];
+
+const screenParam = new URLSearchParams(window.location.search).get("screen") as PreviewScreen | null;
+const screen: PreviewScreen = previewScreens.some((item) => item.id === screenParam) ? screenParam! : "clients";
 
 const clients = [
   {
@@ -70,6 +84,11 @@ let previewClients = [...clients];
 let previewInvitations = [...invitations];
 const originalFetch = window.fetch.bind(window);
 
+const previewPasskeys = [
+  { id: "pk_01", label: "MacBook Touch ID", created_at: 1_790_517_600, last_used_at: 1_790_604_000 },
+  { id: "pk_02", label: "YubiKey 5C NFC", created_at: 1_781_884_800, last_used_at: 1_790_431_200 },
+];
+
 function jsonResponse(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 }
@@ -80,7 +99,22 @@ function installPreviewApi() {
     if (!url.pathname.startsWith("/api/")) return originalFetch(input, init);
 
     const method = init?.method?.toUpperCase() ?? (input instanceof Request ? input.method : "GET");
-    if (url.pathname === "/api/session") return jsonResponse({ hanko_color: "#d64135", hanko_seed: "hanko" });
+    if (url.pathname === "/api/session") return jsonResponse({
+      authenticated: ["consent", "welcome", "clients", "account"].includes(screen),
+      setup_only: false,
+      is_admin: screen === "clients",
+      hanko_color: "#d64135",
+      hanko_seed: "hanko",
+      oidc_username: "sana.lee",
+      oidc_name: "Sana Lee",
+    });
+    if (url.pathname === "/api/setup-status") return jsonResponse({ initialized: screen !== "setup", bootstrap_enabled: true });
+    if (url.pathname === "/api/authorize/request") return jsonResponse({
+      client_name: "Test 2",
+      scopes: ["openid", "profile", "email", "offline_access"],
+    });
+    if (url.pathname === "/api/authorize/continue" && method === "POST") return jsonResponse({ redirect_to: previewHref("welcome") });
+    if (url.pathname === "/api/authorize/deny" && method === "POST") return jsonResponse({ redirect_to: previewHref("signin") });
     if (url.pathname === "/api/admin/clients" && method === "GET") return jsonResponse(previewClients);
     if (url.pathname === "/api/admin/clients" && method === "POST") {
       const payload = JSON.parse(String(init?.body ?? "{}"));
@@ -120,7 +154,7 @@ function installPreviewApi() {
     }
     if (url.pathname === "/api/admin/signing-keys" && method === "GET") return jsonResponse(signingKeys);
     if (url.pathname === "/api/admin/signing-keys" && method === "POST") return jsonResponse({});
-    if (url.pathname === "/api/passkeys") return jsonResponse([]);
+    if (url.pathname === "/api/passkeys") return jsonResponse(previewPasskeys);
     return jsonResponse({});
   };
 
@@ -130,6 +164,24 @@ function installPreviewApi() {
 document.title = "Hanko · UI preview";
 installPreviewApi();
 
+function previewHref(target: PreviewScreen) {
+  const path = target === "clients" ? "/admin/clients" : target === "account" ? "/account" : "/";
+  const query = new URLSearchParams({ "ui-preview": "1", screen: target });
+  if (target === "consent") query.set("request_id", "preview-consent");
+  return `${path}?${query.toString()}`;
+}
+
 export default function DevPreview() {
-  return <ClientAdmin />;
+  return <>
+    <nav className="preview-toolbar" aria-label="UI preview screens">
+      <span className="preview-label">Preview</span>
+      {previewScreens.map((item) => <a
+        key={item.id}
+        href={previewHref(item.id)}
+        aria-current={screen === item.id ? "page" : undefined}
+      >{item.label}</a>)}
+      <span className="preview-hint">Admin includes users, groups, keys &amp; seal settings</span>
+    </nav>
+    <App key={screen} />
+  </>;
 }
