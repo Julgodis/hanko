@@ -120,6 +120,14 @@ impl OAuthError {
             description: "client authentication failed".to_owned(),
         }
     }
+    fn access_denied() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            error: "access_denied",
+            description: "Your account is not a member of a group allowed to access this application. Ask an administrator to add your account to an allowed group."
+                .to_owned(),
+        }
+    }
     fn invalid_grant() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -237,6 +245,7 @@ async fn authorize(
             return authorization_protocol_error(&input, "login_required");
         };
         if !user_allowed_for_client(&state, &input.client_id, &session.user_id).await? {
+            log_group_access_denial(&input.client_id, &session.user_id);
             return authorization_protocol_error(&input, "access_denied");
         }
         return authorization_protocol_error(
@@ -360,9 +369,8 @@ async fn authorize_request_info(
             .try_get("client_id")
             .map_err(|_| OAuthError::server_error())?;
         if !user_allowed_for_client(&state, &client_id, &session.user_id).await? {
-            return Err(OAuthError::invalid_request(
-                "user is not allowed to access this client",
-            ));
+            log_group_access_denial(&client_id, &session.user_id);
+            return Err(OAuthError::access_denied());
         }
         let claims = preview_user_claims(&state, &client_id, &session.user_id, &scopes).await?;
         let authenticated_at_ms = sqlx::query_scalar::<_, i64>(
@@ -436,9 +444,8 @@ async fn continue_authorize(
         .try_get("created_at_ms")
         .map_err(|_| OAuthError::server_error())?;
     if !user_allowed_for_client(&state, &client_id, &session.user_id).await? {
-        return Err(OAuthError::invalid_request(
-            "user is not allowed to access this client",
-        ));
+        log_group_access_denial(&client_id, &session.user_id);
+        return Err(OAuthError::access_denied());
     }
     validate_redirect(&state.database, &client_id, &redirect_uri).await?;
     ensure_scopes_still_allowed(&state, &client_id, &scopes).await?;
@@ -1432,6 +1439,16 @@ async fn user_allowed_for_client(
         .fetch_one(&state.database.pool)
         .await
         .map_err(|_| OAuthError::server_error())
+}
+
+fn log_group_access_denial(client_id: &str, user_id: &str) {
+    tracing::warn!(
+        event = "authorization_denied",
+        reason = "group_policy",
+        client_id = %client_id,
+        user_id = %user_id,
+        "OIDC authorization denied by client group policy"
+    );
 }
 
 fn callback_with_code(uri: &str, code: &str, state: &str) -> Result<String, OAuthError> {

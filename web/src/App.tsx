@@ -5,7 +5,7 @@ import ClientAdmin from "./ClientAdmin";
 import FirstRun from "./FirstRun";
 import { HankoSeal, type HankoState } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
-import { api, appPath, json } from "./lib/utils";
+import { ApiError, api, appPath, json } from "./lib/utils";
 
 type Phase = "idle" | "preparing" | "authenticating" | "success" | "error";
 type Session = {
@@ -29,6 +29,12 @@ type PasskeyStart = {
   publicKey: Parameters<typeof startAuthentication>[0]["optionsJSON"];
 };
 
+const GROUP_ACCESS_DENIED_MESSAGE = "Your account is not a member of a group allowed to access this application. Ask an administrator to add your account to an allowed group.";
+
+function isGroupAccessDenied(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.code === "access_denied";
+}
+
 function App() {
   const requestId = useMemo(() => new URLSearchParams(window.location.search).get("request_id"), []);
   const enrollmentToken = useMemo(() => new URLSearchParams(window.location.search).get("enroll"), []);
@@ -44,7 +50,7 @@ function App() {
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [request, setRequest] = useState<AuthorizationRequest | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(false);
+  const [loadError, setLoadError] = useState<{ accessDenied: boolean } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -70,8 +76,8 @@ function App() {
           setSetupStatus(setup);
           setRequest(authorizationRequest);
         }
-      } catch {
-        if (active) setLoadError(true);
+      } catch (cause) {
+        if (active) setLoadError({ accessDenied: isGroupAccessDenied(cause) });
       } finally {
         if (active) setLoading(false);
       }
@@ -115,7 +121,10 @@ function App() {
   }
 
   if (loadError) {
-    return <Scene phase="error"><Seal phase="error" /><Copy title={requestId ? "This sign-in has expired" : "Hanko is unavailable"} text={requestId ? "Return to the application and start again." : "Please try again in a moment."} /></Scene>;
+    return <Scene phase="error"><Seal phase="error" /><Copy
+      title={loadError.accessDenied ? "Access not allowed" : requestId ? "This sign-in has expired" : "Hanko is unavailable"}
+      text={loadError.accessDenied ? GROUP_ACCESS_DENIED_MESSAGE : requestId ? "Return to the application and start again." : "Please try again in a moment."}
+    /></Scene>;
   }
 
   if (setupStatus && (!setupStatus.initialized || session?.setup_only || enrollmentToken)) {
@@ -184,8 +193,10 @@ function SignIn({
   onAuthenticated: () => Promise<void>;
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
+  const [accessDenied, setAccessDenied] = useState(false);
 
   async function signIn() {
+    setAccessDenied(false);
     setPhase("preparing");
     try {
       const start = await api<PasskeyStart>("/api/passkeys/login/options", {
@@ -203,12 +214,14 @@ function SignIn({
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       await new Promise(resolve => window.setTimeout(resolve, reducedMotion ? 120 : 820));
       await onAuthenticated();
-    } catch {
+    } catch (cause) {
+      if (isGroupAccessDenied(cause)) setAccessDenied(true);
       setPhase("error");
     }
   }
 
   function retry() {
+    setAccessDenied(false);
     setPhase("idle");
   }
 
@@ -226,8 +239,8 @@ function SignIn({
     title = "Welcome back";
     text = `You’re signed in to ${clientName}.`;
   } else if (phase === "error") {
-    title = "Passkey wasn’t accepted";
-    text = "Please try again.";
+    title = accessDenied ? "Access not allowed" : "Passkey wasn’t accepted";
+    text = accessDenied ? GROUP_ACCESS_DENIED_MESSAGE : "Please try again.";
   }
 
   return <Scene phase={phase}>
@@ -238,7 +251,7 @@ function SignIn({
       <span>{freshAuthentication ? "Confirm with passkey" : "Sign in with passkey"}</span>
     </button>}
     {phase === "success" && <span className="success-check" aria-label="Signed in"><Check aria-hidden="true" /></span>}
-    {phase === "error" && <button className="primary-action" onClick={retry}>
+    {phase === "error" && !accessDenied && <button className="primary-action" onClick={retry}>
       <span>Try again</span><ArrowRight aria-hidden="true" className="size-4" />
     </button>}
     {requestId && phase === "idle" && <p className="device-note"><LockKeyhole aria-hidden="true" /> Your passkey stays on your device.</p>}
@@ -285,7 +298,9 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
         return;
       }
       setDecision("idle");
-      setError("This request could not be completed. Please return to the application and try again.");
+      setError(isGroupAccessDenied(cause)
+        ? GROUP_ACCESS_DENIED_MESSAGE
+        : "This request could not be completed. Please return to the application and try again.");
     }
   }
 
