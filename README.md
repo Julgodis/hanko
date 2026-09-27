@@ -16,7 +16,7 @@ The initial release includes local users, passkeys, groups, OIDC clients, exact 
 cp .env.example .env
 ```
 
-Set `PUBLIC_ORIGIN` to the URL users and OIDC clients reach. It may include a clean path prefix, for example `https://id.example/hanko`. Generate a stable master key and a first-run bootstrap token:
+Set `PUBLIC_ORIGIN` to the URL users and OIDC clients reach. It may include a clean path prefix, for example `https://id.example/hanko`. The WebAuthn RP ID defaults to the hostname in `PUBLIC_ORIGIN`; optionally set `WEBAUTHN_RP_ID` to that hostname or a valid parent domain. A parent-domain RP ID lets passkeys work across its subdomains, so only use one when all those subdomains are trusted. Keep the RP ID stable after users register passkeys. Generate a stable master key and a first-run bootstrap token:
 
 ```sh
 openssl rand -base64 32

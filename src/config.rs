@@ -4,6 +4,7 @@ use url::Url;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub public_origin: Url,
+    pub webauthn_rp_id: String,
     pub database_url: String,
     pub bind_address: String,
     pub master_key: Option<[u8; 32]>,
@@ -20,6 +21,13 @@ impl Config {
             std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
 
         let mut config = Self::new(&public_origin, database_url, bind_address)?;
+        if let Some(rp_id) = std::env::var("WEBAUTHN_RP_ID")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            config.webauthn_rp_id = rp_id;
+        }
         let encoded_key = std::env::var("IDENTITY_MASTER_KEY")
             .map_err(|_| ConfigError::Missing("IDENTITY_MASTER_KEY"))?;
         config.master_key = Some(parse_master_key(&encoded_key)?);
@@ -64,8 +72,13 @@ impl Config {
         if public_origin.path() == "/" {
             public_origin.set_path("");
         }
+        let webauthn_rp_id = public_origin
+            .host_str()
+            .ok_or(ConfigError::InvalidOrigin)?
+            .to_owned();
         Ok(Self {
             public_origin,
+            webauthn_rp_id,
             database_url,
             bind_address,
             master_key: None,

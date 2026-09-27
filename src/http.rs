@@ -849,9 +849,12 @@ mod tests {
         let signing_keys = SigningKeys::initialize(database.clone(), [5_u8; 32])
             .await
             .unwrap();
-        let rp_id = config.public_origin.host_str().unwrap().to_owned();
-        let webauthn =
-            WebauthnService::new(&rp_id, &config.webauthn_origin(), database.clone()).unwrap();
+        let webauthn = WebauthnService::new(
+            &config.webauthn_rp_id,
+            &config.webauthn_origin(),
+            database.clone(),
+        )
+        .unwrap();
         router(AppState {
             config: Arc::new(config),
             database,
@@ -1242,7 +1245,7 @@ mod tests {
         let origin = Url::parse("http://localhost:3000").unwrap();
         assert!(
             WebauthnService::new(
-                "localhost",
+                &config.webauthn_rp_id,
                 &origin,
                 Database::connect("sqlite::memory:").await.unwrap()
             )
