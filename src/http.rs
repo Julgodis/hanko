@@ -142,6 +142,24 @@ struct RenamePasskeyInput {
 #[derive(Deserialize)]
 struct RemovePasskeyInput {
     confirmation: String,
+    approval_token: String,
+}
+
+#[derive(Default, Deserialize)]
+struct RegistrationOptionsInput {
+    approval_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CredentialChangeOptionsInput {
+    action: String,
+    passkey_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CredentialChangeVerifyInput {
+    ceremony_id: String,
+    credential: webauthn_rs::prelude::PublicKeyCredential,
 }
 
 #[derive(Serialize)]
@@ -225,6 +243,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bootstrap", post(bootstrap))
         .route("/api/passkeys/login/options", post(login_options))
         .route("/api/passkeys/login/verify", post(login_verify))
+        .route("/api/passkeys/change/options", post(credential_change_options))
+        .route("/api/passkeys/change/verify", post(credential_change_verify))
         .route("/api/passkeys/register/options", post(register_options))
         .route("/api/passkeys/register/verify", post(register_verify))
         .route("/api/passkeys", get(list_passkeys))
@@ -695,10 +715,31 @@ async fn login_verify(
 async fn register_options(
     State(state): State<AppState>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    input: Option<Json<RegistrationOptionsInput>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_origin(&headers, &state.config)?;
     let session = require_session(&headers, &state.database).await?;
     require_csrf(&headers, &session)?;
+    let _slot = try_anonymous_state_slot().ok_or(ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        message: "too many passkey registration requests; try again shortly",
+    })?;
+    let source = source_ip(
+        peer.map(|Extension(ConnectInfo(address))| address),
+        &headers,
+        &state.config,
+    );
+    if !allow_anonymous_state_creation(&state, "registration_options", source, 10, 300)
+        .await
+        .map_err(|_| ApiError::internal())?
+    {
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "too many passkey registration requests; try again shortly",
+        });
+    }
+    let input = input.map(|Json(input)| input).unwrap_or_default();
     let row = sqlx::query(
         "SELECT username, display_name FROM users WHERE id = ? AND disabled_at IS NULL",
     )
@@ -718,6 +759,7 @@ async fn register_options(
             &username,
             &display_name,
             &session.session_hash,
+            input.approval_token.as_deref(),
         )
         .await
         .map_err(|error| {
@@ -725,14 +767,97 @@ async fn register_options(
             if matches!(error, crate::webauthn::WebauthnError::Capacity) {
                 ApiError {
                     status: StatusCode::TOO_MANY_REQUESTS,
-                    message: "too many active authentication requests; try again shortly",
+                    message: "too many active registration requests; try again shortly",
                 }
+            } else if matches!(error, crate::webauthn::WebauthnError::Authentication) {
+                ApiError::forbidden()
             } else {
                 ApiError::bad_request("could not start passkey registration")
             }
         })?;
     Ok(Json(
         serde_json::json!({ "ceremony_id": ceremony_id, "publicKey": public_key }),
+    ))
+}
+
+async fn credential_change_options(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    Json(input): Json<CredentialChangeOptionsInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_origin(&headers, &state.config)?;
+    let session = require_session(&headers, &state.database).await?;
+    require_csrf(&headers, &session)?;
+    if session.setup_only {
+        return Err(ApiError::forbidden());
+    }
+    let _slot = try_anonymous_state_slot().ok_or(ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        message: "too many passkey confirmation requests; try again shortly",
+    })?;
+    let source = source_ip(
+        peer.map(|Extension(ConnectInfo(address))| address),
+        &headers,
+        &state.config,
+    );
+    if !allow_anonymous_state_creation(&state, "credential_change_options", source, 10, 300)
+        .await
+        .map_err(|_| ApiError::internal())?
+    {
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "too many passkey confirmation requests; try again shortly",
+        });
+    }
+    let (ceremony_id, public_key) = state
+        .webauthn
+        .start_credential_change(
+            &session.user_id,
+            &session.session_hash,
+            &input.action,
+            input.passkey_id.as_deref(),
+        )
+        .await
+        .map_err(|error| match error {
+            crate::webauthn::WebauthnError::Capacity => ApiError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                message: "too many active passkey confirmation requests; try again shortly",
+            },
+            crate::webauthn::WebauthnError::User => ApiError::not_found(),
+            _ => ApiError::bad_request("could not start passkey confirmation"),
+        })?;
+    Ok(Json(
+        serde_json::json!({ "ceremony_id": ceremony_id, "publicKey": public_key }),
+    ))
+}
+
+async fn credential_change_verify(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CredentialChangeVerifyInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_origin(&headers, &state.config)?;
+    let session = require_session(&headers, &state.database).await?;
+    require_csrf(&headers, &session)?;
+    if session.setup_only {
+        return Err(ApiError::forbidden());
+    }
+    let approval_token = state
+        .webauthn
+        .finish_credential_change(
+            &input.ceremony_id,
+            &session.user_id,
+            &session.session_hash,
+            input.credential,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "passkey change confirmation failed");
+            ApiError::bad_request("passkey confirmation failed")
+        })?;
+    Ok(Json(
+        serde_json::json!({ "approval_token": approval_token }),
     ))
 }
 
@@ -758,8 +883,7 @@ async fn register_verify(
             tracing::warn!(%error, "passkey registration failed");
             ApiError::bad_request("passkey registration failed")
         })?;
-    // Bootstrap and invitation sessions are deliberately limited to enrolling a passkey.
-    // Promote the session only after the credential has been committed successfully.
+    // Setup and invitation sessions leave setup mode only after the first passkey commits.
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -843,6 +967,31 @@ async fn remove_passkey(
         ));
     }
 
+    let now = unix_now();
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    let approved = sqlx::query("UPDATE credential_change_approvals SET consumed_at = ? WHERE approval_hash = ? AND user_id = ? AND session_hash = ? AND action = 'remove' AND target_passkey_id = ? AND consumed_at IS NULL AND expires_at > ? AND EXISTS (SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 0 AND expires_at > ?) AND EXISTS (SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL) RETURNING approval_hash")
+        .bind(now)
+        .bind(digest(&input.approval_token))
+        .bind(&session.user_id)
+        .bind(&session.session_hash)
+        .bind(&passkey_id)
+        .bind(now)
+        .bind(&session.session_hash)
+        .bind(&session.user_id)
+        .bind(now)
+        .bind(&session.user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ApiError::internal())?;
+    if approved.is_none() {
+        return Err(ApiError::forbidden());
+    }
+
     // Keep this count check in the DELETE itself so concurrent removals cannot
     // leave an account without a credential.
     let deleted = sqlx::query(
@@ -851,7 +1000,7 @@ async fn remove_passkey(
     .bind(&passkey_id)
     .bind(&session.user_id)
     .bind(&session.user_id)
-    .execute(&state.database.pool)
+    .execute(&mut *transaction)
     .await
     .map_err(|_| ApiError::internal())?;
     if deleted.rows_affected() == 0 {
@@ -860,7 +1009,7 @@ async fn remove_passkey(
         )
         .bind(passkey_id)
         .bind(&session.user_id)
-        .fetch_one(&state.database.pool)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(|_| ApiError::internal())?;
         if !exists {
@@ -868,6 +1017,10 @@ async fn remove_passkey(
         }
         return Err(ApiError::conflict("at least one passkey must remain"));
     }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| ApiError::internal())?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -933,6 +1086,10 @@ mod tests {
     use url::Url;
 
     async fn test_app(config: Config) -> Router {
+        test_app_with_database(config).await.0
+    }
+
+    async fn test_app_with_database(config: Config) -> (Router, Database) {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         let signing_keys = SigningKeys::initialize(database.clone(), [5_u8; 32])
             .await
@@ -943,13 +1100,14 @@ mod tests {
             database.clone(),
         )
         .unwrap();
-        router(AppState {
+        let app = router(AppState {
             config: Arc::new(config),
-            database,
+            database: database.clone(),
             signing_keys,
             webauthn,
             anonymous_request_limiter: crate::security::AnonymousRequestLimiter::default(),
-        })
+        });
+        (app, database)
     }
 
     #[tokio::test]
@@ -1411,5 +1569,213 @@ mod tests {
             .unwrap(),
         );
         assert!(load_session(&headers, &database).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn registration_ceremonies_are_limited_per_session_and_do_not_block_login() {
+        let config = Config::new(
+            "http://localhost:3000",
+            "sqlite::memory:".into(),
+            "127.0.0.1:0".into(),
+        )
+        .unwrap();
+        let (app, database) = test_app_with_database(config).await;
+        sqlx::query("INSERT INTO users (id, username, display_name, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000001', 'setup-user', 'Setup User', 1, 1)")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let session = create_session(
+            &database,
+            "00000000-0000-4000-8000-000000000001",
+            true,
+            unix_now(),
+        )
+        .await
+        .unwrap();
+        let registration_request = || {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/passkeys/register/options")
+                .header(header::ORIGIN, "http://localhost:3000")
+                .header(
+                    header::COOKIE,
+                    format!(
+                        "hanko_session={}; hanko_csrf={}",
+                        session.raw_token, session.raw_csrf
+                    ),
+                )
+                .header("x-csrf-token", &session.raw_csrf)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        for _ in 0..2 {
+            let response = app.clone().oneshot(registration_request()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let over_quota = app.clone().oneshot(registration_request()).await.unwrap();
+        assert_eq!(over_quota.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let registration_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webauthn_ceremonies WHERE kind = 'registration' AND consumed_at IS NULL",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(registration_count, 2);
+
+        let login = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/passkeys/login/options")
+                    .header(header::ORIGIN, "http://localhost:3000")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn normal_session_without_an_existing_factor_cannot_use_setup_registration() {
+        let config = Config::new(
+            "http://localhost:3000",
+            "sqlite::memory:".into(),
+            "127.0.0.1:0".into(),
+        )
+        .unwrap();
+        let (app, database) = test_app_with_database(config).await;
+        sqlx::query("INSERT INTO users (id, username, display_name, created_at, updated_at) VALUES ('normal-user', 'normal-user', 'Normal User', 1, 1)")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let session = create_session(&database, "normal-user", false, unix_now())
+            .await
+            .unwrap();
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/passkeys/register/options")
+                    .header(header::ORIGIN, "http://localhost:3000")
+                    .header(
+                        header::COOKIE,
+                        format!(
+                            "hanko_session={}; hanko_csrf={}",
+                            session.raw_token, session.raw_csrf
+                        ),
+                    )
+                    .header("x-csrf-token", &session.raw_csrf)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let ceremonies: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webauthn_ceremonies WHERE kind = 'registration'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(ceremonies, 0);
+    }
+
+    #[tokio::test]
+    async fn passkey_removal_requires_a_matching_one_use_approval() {
+        let config = Config::new(
+            "http://localhost:3000",
+            "sqlite::memory:".into(),
+            "127.0.0.1:0".into(),
+        )
+        .unwrap();
+        let (app, database) = test_app_with_database(config).await;
+        let user_id = "00000000-0000-4000-8000-000000000002";
+        sqlx::query("INSERT INTO users (id, username, display_name, created_at, updated_at) VALUES (?, 'passkey-user', 'Passkey User', 1, 1)")
+            .bind(user_id)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        for (id, credential_id) in [("key-1", vec![1_u8]), ("key-2", vec![2_u8])] {
+            sqlx::query("INSERT INTO passkeys (id, user_id, credential_id, passkey_json, label, created_at) VALUES (?, ?, ?, '{}', ?, 1)")
+                .bind(id)
+                .bind(user_id)
+                .bind(credential_id)
+                .bind(id)
+                .execute(&database.pool)
+                .await
+                .unwrap();
+        }
+        let session = create_session(&database, user_id, false, unix_now())
+            .await
+            .unwrap();
+        let wrong_action_token = "approval-for-add-action";
+        let wrong_target_token = "approval-for-other-key";
+        let valid_token = "approval-for-key-one";
+        for (token, action, target) in [
+            (wrong_action_token, "add", None),
+            (wrong_target_token, "remove", Some("key-2")),
+            (valid_token, "remove", Some("key-1")),
+        ] {
+            sqlx::query("INSERT INTO credential_change_approvals (approval_hash, user_id, session_hash, action, target_passkey_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                .bind(digest(token))
+                .bind(user_id)
+                .bind(&session.session_hash)
+                .bind(action)
+                .bind(target)
+                .bind(unix_now())
+                .bind(unix_now() + 300)
+                .execute(&database.pool)
+                .await
+                .unwrap();
+        }
+
+        let remove_request = |token: &str| {
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri("/api/passkeys/key-1")
+                .header(header::ORIGIN, "http://localhost:3000")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(
+                    header::COOKIE,
+                    format!(
+                        "hanko_session={}; hanko_csrf={}",
+                        session.raw_token, session.raw_csrf
+                    ),
+                )
+                .header("x-csrf-token", &session.raw_csrf)
+                .body(axum::body::Body::from(format!(
+                    "{{\"confirmation\":\"REMOVE\",\"approval_token\":\"{token}\"}}"
+                )))
+                .unwrap()
+        };
+
+        for token in [wrong_action_token, wrong_target_token] {
+            let response = app.clone().oneshot(remove_request(token)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let still_present: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM passkeys WHERE id = 'key-1')")
+                    .fetch_one(&database.pool)
+                    .await
+                    .unwrap();
+            assert!(still_present);
+        }
+
+        let removed = app
+            .clone()
+            .oneshot(remove_request(valid_token))
+            .await
+            .unwrap();
+        assert_eq!(removed.status(), StatusCode::OK);
+        let replay = app.oneshot(remove_request(valid_token)).await.unwrap();
+        assert_eq!(replay.status(), StatusCode::FORBIDDEN);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM passkeys WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1);
     }
 }
