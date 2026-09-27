@@ -509,9 +509,12 @@ async fn create_client(
         scopes.push("openid".to_owned());
     }
     if !scopes.iter().any(|scope| scope == "openid")
-        || scopes
-            .iter()
-            .any(|scope| !matches!(scope.as_str(), "openid" | "profile" | "email" | "groups"))
+        || scopes.iter().any(|scope| {
+            !matches!(
+                scope.as_str(),
+                "openid" | "profile" | "email" | "groups" | "offline_access"
+            )
+        })
     {
         return Err(AdminError::bad_request(
             "client scopes must include openid and use supported scopes",
@@ -648,9 +651,12 @@ async fn update_client(
         scopes.push("openid".to_owned());
     }
     if !scopes.iter().any(|scope| scope == "openid")
-        || scopes
-            .iter()
-            .any(|scope| !matches!(scope.as_str(), "openid" | "profile" | "email" | "groups"))
+        || scopes.iter().any(|scope| {
+            !matches!(
+                scope.as_str(),
+                "openid" | "profile" | "email" | "groups" | "offline_access"
+            )
+        })
     {
         return Err(AdminError::bad_request(
             "client scopes must include openid and use supported scopes",

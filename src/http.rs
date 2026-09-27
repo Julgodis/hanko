@@ -50,7 +50,8 @@ struct DiscoveryDocument {
     id_token_signing_alg_values_supported: [&'static str; 1],
     token_endpoint_auth_methods_supported: [&'static str; 2],
     code_challenge_methods_supported: [&'static str; 1],
-    scopes_supported: [&'static str; 4],
+    grant_types_supported: [&'static str; 2],
+    scopes_supported: [&'static str; 5],
 }
 
 #[derive(Deserialize)]
@@ -281,7 +282,8 @@ async fn discovery(State(state): State<AppState>) -> Json<DiscoveryDocument> {
         id_token_signing_alg_values_supported: ["ES256"],
         token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
         code_challenge_methods_supported: ["S256"],
-        scopes_supported: ["openid", "profile", "email", "groups"],
+        grant_types_supported: ["authorization_code", "refresh_token"],
+        scopes_supported: ["openid", "profile", "email", "groups", "offline_access"],
     })
 }
 
@@ -883,6 +885,8 @@ mod tests {
         let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(document["issuer"], "https://login.example");
         assert_eq!(document["code_challenge_methods_supported"][0], "S256");
+        assert_eq!(document["scopes_supported"][4], "offline_access");
+        assert_eq!(document["grant_types_supported"][1], "refresh_token");
         assert_eq!(document["token_endpoint_auth_methods_supported"][0], "none");
         assert_eq!(
             document["token_endpoint_auth_methods_supported"][1],

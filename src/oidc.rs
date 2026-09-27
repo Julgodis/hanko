@@ -27,6 +27,7 @@ use crate::{
 const CODE_SECONDS: i64 = 60;
 const ACCESS_SECONDS: i64 = 5 * 60;
 const ID_SECONDS: i64 = 5 * 60;
+const REFRESH_SECONDS: i64 = 30 * 24 * 60 * 60;
 const AUTH_REQUEST_SECONDS: i64 = 5 * 60;
 
 #[derive(Deserialize)]
@@ -54,9 +55,10 @@ struct ContinueRequest {
 #[derive(Deserialize)]
 struct TokenRequest {
     grant_type: String,
-    code: String,
-    redirect_uri: String,
+    code: Option<String>,
+    redirect_uri: Option<String>,
     client_id: String,
+    refresh_token: Option<String>,
     code_verifier: Option<String>,
     client_secret: Option<String>,
 }
@@ -68,6 +70,8 @@ struct TokenResponse {
     expires_in: i64,
     id_token: String,
     scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -431,14 +435,51 @@ async fn token(
         }
         _ => return Err(OAuthError::invalid_client()),
     }
-    if input.grant_type != "authorization_code" {
-        return Err(OAuthError::invalid_grant());
-    }
 
-    let code_hash = digest(&input.code);
+    match input.grant_type.as_str() {
+        "authorization_code" => {
+            let code = input
+                .code
+                .as_deref()
+                .ok_or_else(OAuthError::invalid_grant)?;
+            let redirect_uri = input
+                .redirect_uri
+                .as_deref()
+                .ok_or_else(OAuthError::invalid_grant)?;
+            exchange_authorization_code(
+                &state,
+                &input.client_id,
+                &client_type,
+                code,
+                redirect_uri,
+                input.code_verifier.as_deref(),
+            )
+            .await
+        }
+        "refresh_token" => {
+            let refresh_token = input
+                .refresh_token
+                .as_deref()
+                .ok_or_else(OAuthError::invalid_grant)?;
+            exchange_refresh_token(&state, &input.client_id, refresh_token).await
+        }
+        _ => Err(OAuthError::invalid_grant()),
+    }
+    .map(Json)
+}
+
+async fn exchange_authorization_code(
+    state: &AppState,
+    client_id: &str,
+    client_type: &str,
+    code_value: &str,
+    requested_redirect_uri: &str,
+    code_verifier: Option<&str>,
+) -> Result<TokenResponse, OAuthError> {
+    let code_hash = digest(code_value);
     let preview = sqlx::query("SELECT code_challenge, redirect_uri, scopes, user_id FROM authorization_codes WHERE code_hash = ? AND client_id = ? AND consumed_at IS NULL AND expires_at > ?")
         .bind(&code_hash)
-        .bind(&input.client_id)
+        .bind(client_id)
         .bind(unix_now())
         .fetch_optional(&state.database.pool)
         .await
@@ -456,10 +497,7 @@ async fn token(
     let preview_user_id: String = preview
         .try_get("user_id")
         .map_err(|_| OAuthError::server_error())?;
-    let pkce_valid = match (
-        expected_challenge.as_deref(),
-        input.code_verifier.as_deref(),
-    ) {
+    let pkce_valid = match (expected_challenge.as_deref(), code_verifier) {
         (Some(challenge), Some(verifier)) => {
             valid_pkce_verifier(verifier)
                 && constant_time_string_eq(&s256_challenge(verifier), challenge)
@@ -467,13 +505,13 @@ async fn token(
         (None, None) if client_type == "confidential" => true,
         _ => false,
     };
-    if input.redirect_uri != redirect_uri || !pkce_valid {
+    if requested_redirect_uri != redirect_uri || !pkce_valid {
         return Err(OAuthError::invalid_grant());
     }
     let scopes: Vec<String> =
         serde_json::from_str(&scopes_json).map_err(|_| OAuthError::server_error())?;
-    ensure_scopes_still_allowed(&state, &input.client_id, &scopes).await?;
-    if !user_allowed_for_client(&state, &input.client_id, &preview_user_id).await? {
+    ensure_scopes_still_allowed(state, client_id, &scopes).await?;
+    if !user_allowed_for_client(state, client_id, &preview_user_id).await? {
         return Err(OAuthError::invalid_grant());
     }
 
@@ -487,8 +525,8 @@ async fn token(
     let code = sqlx::query("UPDATE authorization_codes SET consumed_at = ? WHERE code_hash = ? AND client_id = ? AND redirect_uri = ? AND consumed_at IS NULL AND expires_at > ? RETURNING user_id, nonce, scopes, auth_time")
         .bind(now)
         .bind(code_hash)
-        .bind(&input.client_id)
-        .bind(&input.redirect_uri)
+        .bind(client_id)
+        .bind(requested_redirect_uri)
         .bind(now)
         .fetch_optional(&mut *transaction)
         .await
@@ -513,10 +551,78 @@ async fn token(
         .await
         .map_err(|_| OAuthError::server_error())?;
 
+    issue_tokens(
+        state,
+        client_id,
+        &user_id,
+        &consumed_scopes,
+        auth_time,
+        (!nonce.is_empty()).then_some(nonce.as_str()),
+        None,
+    )
+    .await
+}
+
+async fn exchange_refresh_token(
+    state: &AppState,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<TokenResponse, OAuthError> {
+    let refresh_hash = digest(refresh_token);
+    let row = sqlx::query("SELECT user_id, scopes, auth_time FROM refresh_tokens WHERE token_hash = ? AND client_id = ? AND expires_at > ?")
+        .bind(&refresh_hash)
+        .bind(client_id)
+        .bind(unix_now())
+        .fetch_optional(&state.database.pool)
+        .await
+        .map_err(|_| OAuthError::server_error())?
+        .ok_or_else(OAuthError::invalid_grant)?;
+    let user_id: String = row
+        .try_get("user_id")
+        .map_err(|_| OAuthError::server_error())?;
+    let scopes_json: String = row
+        .try_get("scopes")
+        .map_err(|_| OAuthError::server_error())?;
+    let scopes: Vec<String> =
+        serde_json::from_str(&scopes_json).map_err(|_| OAuthError::server_error())?;
+    let auth_time: i64 = row
+        .try_get("auth_time")
+        .map_err(|_| OAuthError::server_error())?;
+    if !scopes.iter().any(|scope| scope == "offline_access") {
+        return Err(OAuthError::invalid_grant());
+    }
+    ensure_scopes_still_allowed(state, client_id, &scopes).await?;
+    if !user_allowed_for_client(state, client_id, &user_id).await? {
+        return Err(OAuthError::invalid_grant());
+    }
+
+    issue_tokens(
+        state,
+        client_id,
+        &user_id,
+        &scopes,
+        auth_time,
+        None,
+        Some(refresh_hash),
+    )
+    .await
+}
+
+async fn issue_tokens(
+    state: &AppState,
+    client_id: &str,
+    user_id: &str,
+    scopes: &[String],
+    auth_time: i64,
+    nonce: Option<&str>,
+    rotate_refresh_hash: Option<Vec<u8>>,
+) -> Result<TokenResponse, OAuthError> {
+    let now = unix_now();
+
     let user = sqlx::query(
         "SELECT username, display_name, expose_preferred_username, expose_name, email, attributes FROM users WHERE id = ? AND disabled_at IS NULL",
     )
-    .bind(&user_id)
+    .bind(user_id)
     .fetch_optional(&state.database.pool)
     .await
     .map_err(|_| OAuthError::server_error())?
@@ -541,19 +647,18 @@ async fn token(
         .map_err(|_| OAuthError::server_error())?;
     let attributes: Value =
         serde_json::from_str(&attributes).map_err(|_| OAuthError::server_error())?;
-    let groups = user_groups(&state, &user_id).await?;
-    let custom_claims =
-        custom_claims(&state, &input.client_id, &attributes, &consumed_scopes).await?;
+    let groups = user_groups(state, user_id).await?;
+    let custom_claims = custom_claims(state, client_id, &attributes, scopes).await?;
 
-    let scope_string = consumed_scopes.join(" ");
+    let scope_string = scopes.join(" ");
     let access_exp = now + ACCESS_SECONDS;
     let id_exp = now + ID_SECONDS;
     let mut access_claims = Map::new();
     add_standard_claims(
         &mut access_claims,
-        &state,
-        &user_id,
-        &input.client_id,
+        state,
+        user_id,
+        client_id,
         now,
         access_exp,
         auth_time,
@@ -562,7 +667,7 @@ async fn token(
     access_claims.insert("scope".into(), Value::String(scope_string.clone()));
     add_user_claims(
         &mut access_claims,
-        &consumed_scopes,
+        scopes,
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
         email.as_deref(),
@@ -580,16 +685,16 @@ async fn token(
     let mut id_claims = Map::new();
     add_standard_claims(
         &mut id_claims,
-        &state,
-        &user_id,
-        &input.client_id,
+        state,
+        user_id,
+        client_id,
         now,
         id_exp,
         auth_time,
         "id",
     );
-    if !nonce.is_empty() {
-        id_claims.insert("nonce".into(), Value::String(nonce));
+    if let Some(nonce) = nonce {
+        id_claims.insert("nonce".into(), Value::String(nonce.to_owned()));
     }
     let at_hash = Sha256::digest(access_token.as_bytes());
     id_claims.insert(
@@ -598,7 +703,7 @@ async fn token(
     );
     add_user_claims(
         &mut id_claims,
-        &consumed_scopes,
+        scopes,
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
         email.as_deref(),
@@ -613,20 +718,63 @@ async fn token(
         .await
         .map_err(|_| OAuthError::server_error())?;
 
+    let refresh_token = if scopes.iter().any(|scope| scope == "offline_access") {
+        Some(crate::security::random_secret())
+    } else {
+        None
+    };
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+    if let Some(refresh_hash) = rotate_refresh_hash {
+        let deleted = sqlx::query(
+            "DELETE FROM refresh_tokens WHERE token_hash = ? AND client_id = ? AND expires_at > ?",
+        )
+        .bind(refresh_hash)
+        .bind(client_id)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+        if deleted.rows_affected() != 1 {
+            return Err(OAuthError::invalid_grant());
+        }
+    }
+    if let Some(refresh_token) = &refresh_token {
+        sqlx::query("INSERT INTO refresh_tokens (token_hash, client_id, user_id, scopes, auth_time, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(digest(refresh_token))
+            .bind(client_id)
+            .bind(user_id)
+            .bind(serde_json::to_string(scopes).map_err(|_| OAuthError::server_error())?)
+            .bind(auth_time)
+            .bind(now)
+            .bind(now + REFRESH_SECONDS)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| OAuthError::server_error())?;
+    }
     sqlx::query("INSERT OR IGNORE INTO client_users (client_id, user_id) VALUES (?, ?)")
-        .bind(&input.client_id)
-        .bind(&user_id)
-        .execute(&state.database.pool)
+        .bind(client_id)
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+    transaction
+        .commit()
         .await
         .map_err(|_| OAuthError::server_error())?;
 
-    Ok(Json(TokenResponse {
+    Ok(TokenResponse {
         access_token,
         token_type: "Bearer",
         expires_in: ACCESS_SECONDS,
         id_token,
         scope: scope_string,
-    }))
+        refresh_token,
+    })
 }
 
 async fn userinfo(
@@ -889,7 +1037,10 @@ fn parse_scopes(scope: &str) -> Result<Vec<String>, OAuthError> {
     let unsupported: Vec<&str> = scopes
         .iter()
         .filter(|scope| {
-            !matches!(scope.as_str(), "openid" | "profile" | "email" | "groups")
+            !matches!(
+                scope.as_str(),
+                "openid" | "profile" | "email" | "groups" | "offline_access"
+            )
         })
         .map(String::as_str)
         .collect();
@@ -1236,6 +1387,10 @@ mod tests {
         assert_eq!(
             parse_scopes("openid profile").unwrap(),
             vec!["openid", "profile"]
+        );
+        assert_eq!(
+            parse_scopes("openid offline_access").unwrap(),
+            vec!["openid", "offline_access"]
         );
         assert!(parse_scopes("profile").is_err());
         assert!(parse_scopes("openid openid").is_err());

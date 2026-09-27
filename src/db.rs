@@ -43,15 +43,15 @@ mod tests {
                 .fetch_all(&database.pool)
                 .await
                 .unwrap();
-        assert_eq!(migration_versions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(migration_versions, vec![1, 2, 3, 4, 5, 6, 7]);
 
         let tables: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'passkeys', 'groups', 'oidc_clients', 'authorization_codes', 'webauthn_ceremonies', 'signing_keys')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'passkeys', 'groups', 'oidc_clients', 'authorization_codes', 'refresh_tokens', 'webauthn_ceremonies', 'signing_keys')",
         )
         .fetch_one(&database.pool)
         .await
         .unwrap();
-        assert_eq!(tables, 7);
+        assert_eq!(tables, 8);
 
         let foreign_keys: Vec<(i64, i64, String, String, String, String, String, String)> =
             sqlx::query_as("PRAGMA foreign_key_list(user_groups)")
