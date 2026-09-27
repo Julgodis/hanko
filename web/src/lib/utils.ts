@@ -37,3 +37,20 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
 }
 
 export const json = (value: unknown): string => JSON.stringify(value);
+
+export function defaultPasskeyLabel(addedAt = new Date()) {
+  const navigatorInfo = navigator as Navigator & { userAgentData?: { platform?: string } };
+  const platform = `${navigatorInfo.userAgentData?.platform ?? ""} ${navigator.platform} ${navigator.userAgent}`.toLowerCase();
+  let device = "This device";
+
+  if (/iphone|ipod/.test(platform)) device = "iPhone";
+  else if (/ipad/.test(platform) || (/macintel/.test(platform) && navigator.maxTouchPoints > 1)) device = "iPad";
+  else if (/android/.test(platform)) device = "Android device";
+  else if (/macintosh|macintel|macos/.test(platform)) device = "Mac";
+  else if (/windows|win32|win64/.test(platform)) device = "Windows PC";
+  else if (/cros/.test(platform)) device = "Chromebook";
+  else if (/linux/.test(platform)) device = "Linux computer";
+
+  const time = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(addedAt);
+  return `${device} · added ${time}`;
+}

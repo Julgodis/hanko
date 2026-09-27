@@ -111,13 +111,13 @@ function installPreviewApi() {
 
     const method = init?.method?.toUpperCase() ?? (input instanceof Request ? input.method : "GET");
     if (url.pathname === "/api/session") return jsonResponse({
-      authenticated: !["signin", "setup"].includes(screen),
+      authenticated: screen === "join-invite" ? false : !["signin", "setup"].includes(screen),
       setup_only: false,
       is_admin: adminScreens.includes(screen),
       hanko_color: "#d64135",
       hanko_seed: "hanko",
-      oidc_username: "sana.lee",
-      oidc_name: "Sana Lee",
+      oidc_username: screen === "join-invite" ? null : "sana.lee",
+      oidc_name: screen === "join-invite" ? null : "Sana Lee",
     });
     if (url.pathname === "/api/setup-status") return jsonResponse({ initialized: screen !== "setup", bootstrap_enabled: true });
     if (url.pathname === "/api/authorize/request") return jsonResponse({

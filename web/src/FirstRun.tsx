@@ -4,7 +4,7 @@ import { startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal, type HankoState } from "./components/HankoSeal";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { generateHankoPalette, makeHankoSeed, ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
-import { api, json } from "./lib/utils";
+import { api, defaultPasskeyLabel, json } from "./lib/utils";
 
 type RegistrationStart = {
   ceremony_id: string;
@@ -51,7 +51,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
 
   const steps: { id: Step; label: string }[] = isAdminSetup
     ? [{ id: "bootstrap", label: "Bootstrap code" }, { id: "profile", label: "OIDC information" }, { id: "hanko", label: "Hanko" }, { id: "passkey", label: "Passkey" }]
-    : [{ id: "profile", label: "OIDC information" }, { id: "hanko", label: "Hanko" }, { id: "passkey", label: "Passkey" }];
+    : [{ id: "profile", label: invitationToken ? "Your profile" : "OIDC information" }, { id: "hanko", label: "Hanko" }, { id: "passkey", label: "Passkey" }];
   const currentStep = Math.max(0, steps.findIndex((item) => item.id === step));
   const stepLabel = steps[currentStep]?.label ?? "Setup";
   const interactive = phase === "idle" || phase === "error";
@@ -117,7 +117,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
       const credential = await credentialPromise;
       await api("/api/passkeys/register/verify", {
         method: "POST",
-        body: json({ ceremony_id: start.ceremony_id, credential, label: "This device" }),
+        body: json({ ceremony_id: start.ceremony_id, credential, label: defaultPasskeyLabel(new Date()) }),
       });
       setPhase("success");
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -133,7 +133,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
 
   let title = "Enter setup code";
   if (step === "profile") {
-    title = "OIDC information";
+    title = invitationToken ? "Set up your account" : "OIDC information";
   } else if (step === "hanko") {
     title = "Create your Hanko";
   } else if (step === "passkey") {
@@ -157,6 +157,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
     <section className="setup-panel" aria-live="polite">
       <div className="auth-copy">
         <h1>{title}</h1>
+        {invitationToken && step === "profile" && <p>Choose the profile details apps can see. Next, you’ll create your Hanko and add a passkey.</p>}
       </div>
 
       <div className="setup-progress" aria-label={`${stepLabel}, step ${currentStep + 1} of ${steps.length}`}>
