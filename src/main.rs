@@ -25,15 +25,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::from_env()?;
     let database = Database::connect(&config.database_url).await?;
+    let webauthn = webauthn::WebauthnService::new(
+        &config.webauthn_rp_id,
+        &config.webauthn_origin(),
+        database.clone(),
+    )?;
     let master_key = config.master_key.ok_or("missing identity master key")?;
     let signing_keys = keys::SigningKeys::initialize(database.clone(), master_key).await?;
     spawn_cleanup(database.clone(), signing_keys.clone());
-    let rp_id = config
-        .public_origin
-        .host_str()
-        .ok_or("PUBLIC_ORIGIN has no host")?;
-    let webauthn =
-        webauthn::WebauthnService::new(rp_id, &config.webauthn_origin(), database.clone())?;
     let app = http::router(AppState {
         config: Arc::new(config.clone()),
         database,
