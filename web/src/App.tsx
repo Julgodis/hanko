@@ -1,5 +1,5 @@
 import { startAuthentication } from "@simplewebauthn/browser";
-import { ArrowRight, Check, Fingerprint, LockKeyhole, Mail, ShieldCheck, UserRound, Users } from "lucide-react";
+import { ArrowRight, Check, Clock3, Fingerprint, LockKeyhole, Mail, ShieldCheck, UserRound, Users } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import ClientAdmin from "./ClientAdmin";
 import FirstRun from "./FirstRun";
@@ -245,44 +245,56 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
   hankoSeed?: string | null;
   onFreshAuthenticationRequired: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  const [decision, setDecision] = useState<"idle" | "allowing" | "denying">("idle");
   const [error, setError] = useState("");
   const name = request.client_name || "This application";
 
   async function decide(allow: boolean) {
-    setBusy(true);
+    setDecision(allow ? "allowing" : "denying");
     setError("");
     try {
       const endpoint = allow ? "/api/authorize/continue" : "/api/authorize/deny";
-      const result = await api<{ redirect_to: string }>(endpoint, {
-        method: "POST",
-        body: json({ request_id: requestId }),
-      });
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const animation = reducedMotion
+        ? Promise.resolve()
+        : new Promise(resolve => window.setTimeout(resolve, allow ? 860 : 540));
+      const [result] = await Promise.all([
+        api<{ redirect_to: string }>(endpoint, {
+          method: "POST",
+          body: json({ request_id: requestId }),
+        }),
+        animation,
+      ]);
       window.location.assign(result.redirect_to);
     } catch (cause) {
       if (cause instanceof Error && cause.message === "a fresh user authentication is required") {
+        setDecision("idle");
         onFreshAuthenticationRequired();
         return;
       }
-      setBusy(false);
+      setDecision("idle");
       setError("This request could not be completed. Please return to the application and try again.");
     }
   }
 
-  return <Scene phase="idle" className="consent-scene">
-    <div className="connection-row" role="img" aria-label={`Hanko connecting to ${name}`}>
-      <span className="connection-seal"><HankoSeal size={40} variant="clean" color={hankoColor ?? undefined} seed={hankoSeed ?? undefined} title="Your Hanko" /></span>
-      <span className="connection-line"><ArrowRight aria-hidden="true" /></span>
-      <span className="application-mark" aria-hidden="true">{name.trim().charAt(0).toLocaleUpperCase() || "·"}</span>
+  return <Scene phase="idle" className={`consent-scene consent-is-${decision}`}>
+    <div className="application-mark" role="img" aria-label={`${name} application`}>
+      <span className="application-initial" aria-hidden="true">{name.trim().charAt(0).toLocaleUpperCase() || "·"}</span>
+      <span className="approval-stamp" aria-hidden="true">
+        <HankoSeal state={decision === "allowing" ? "stamping" : "idle"} size={58} variant="clean" color={hankoColor ?? undefined} seed={hankoSeed ?? undefined} title="" />
+      </span>
     </div>
     <Copy title={`${name} is requesting access`} text="Review what will be shared with this application." />
     <ul className="claim-list">
       {(request.scopes ?? []).filter(scope => scope !== "openid").map(scope => {
-        const claim = claimForScope(scope);
+        const claim = claimForScope(scope, name);
         const ClaimIcon = claim.icon;
         return <li key={scope}>
           <ClaimIcon aria-hidden="true" />
-          <span>{claim.label}</span>
+          <span className="claim-copy">
+            <span className="claim-label">{claim.label}</span>
+            {claim.detail && <span className="claim-detail">{claim.detail}</span>}
+          </span>
         </li>;
       })}
       {(request.scopes ?? []).every(scope => scope === "openid") && <li><ShieldCheck aria-hidden="true" /><span>Confirm your identity</span></li>}
@@ -290,19 +302,26 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
     <p className="trust-note"><LockKeyhole aria-hidden="true" /> Hanko will not share your passkey with {name}.</p>
     {error && <p className="inline-error" role="alert">{error}</p>}
     <div className="consent-actions">
-      <button className="secondary-action" onClick={() => decide(false)} disabled={busy}>Cancel</button>
-      <button className="primary-action" onClick={() => decide(true)} disabled={busy}>
-        <span>{busy ? "Continuing…" : "Allow"}</span><ArrowRight aria-hidden="true" className="size-4" />
+      <button className="secondary-action" onClick={() => decide(false)} disabled={decision !== "idle"}>
+        {decision === "denying" ? "Returning…" : "Cancel"}
+      </button>
+      <button className="primary-action" onClick={() => decide(true)} disabled={decision !== "idle"}>
+        <span>{decision === "allowing" ? "Stamping…" : "Allow"}</span><ArrowRight aria-hidden="true" className="size-4" />
       </button>
     </div>
   </Scene>;
 }
 
-function claimForScope(scope: string): { label: string; icon: typeof UserRound } {
+function claimForScope(scope: string, clientName: string): { label: string; icon: typeof UserRound; detail?: string } {
   switch (scope) {
     case "profile": return { label: "Your profile", icon: UserRound };
     case "email": return { label: "Your email address", icon: Mail };
     case "groups": return { label: "Your group memberships", icon: Users };
+    case "offline_access": return {
+      label: "Stay signed in",
+      detail: `${clientName} can renew your access between visits without asking for your passkey each time.`,
+      icon: Clock3,
+    };
     default: return { label: scope.replace(/[_-]+/g, " "), icon: ShieldCheck };
   }
 }

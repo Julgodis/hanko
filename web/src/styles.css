@@ -43,7 +43,7 @@ body {
 }
 
 button { font: inherit; }
-button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px; }
 ::selection { background: rgba(214, 65, 53, .23); }
 
 .auth-scene {
@@ -205,7 +205,7 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
   margin: 0;
   color: var(--ink);
   font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
-  font-size: clamp(27px, 7vw, 31px);
+  font-size: clamp(29px, 7vw, 34px);
   font-weight: 400;
   letter-spacing: -.032em;
   line-height: 1.2;
@@ -213,9 +213,9 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
 }
 
 .auth-copy p {
-  margin: 11px 0 0;
+  margin: 12px 0 0;
   color: var(--ink-muted);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 400;
   line-height: 1.65;
   text-wrap: balance;
@@ -235,7 +235,7 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
   border-radius: 9px;
   color: #fffefa;
   background: var(--vermilion);
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 550;
   letter-spacing: .005em;
   cursor: pointer;
@@ -267,56 +267,101 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
   gap: 7px;
   margin: 23px 0 0;
   color: var(--ink-faint);
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: .01em;
 }
 
-.device-note svg { width: 13px; height: 13px; stroke-width: 1.7; }
+.device-note svg { width: 15px; height: 15px; stroke-width: 1.7; }
 
-.consent-scene .auth-panel { width: min(100%, 410px); }
-
-.connection-row {
+.preview-toolbar {
+  position: fixed;
+  z-index: 20;
+  top: 12px;
+  left: 50%;
   display: flex;
+  width: max-content;
+  max-width: calc(100vw - 24px);
   align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin: 0 auto 29px;
+  gap: 3px;
+  padding: 6px;
+  overflow-x: auto;
+  border: 1px solid color-mix(in srgb, var(--rule), transparent 8%);
+  border-radius: 12px;
+  color: var(--ink-muted);
+  background: color-mix(in srgb, var(--paper-raised), transparent 5%);
+  box-shadow: 0 7px 28px rgba(26, 23, 17, .12);
+  backdrop-filter: blur(16px);
+  transform: translateX(-50%);
+  scrollbar-width: thin;
 }
 
-.connection-seal { display: block; width: 40px; height: 40px; color: var(--vermilion); }
-.connection-seal .hanko-wrap { width: 40px !important; height: 40px !important; }
-.connection-seal .hanko-splatter { display: none; }
+.preview-label { padding: 0 9px; color: var(--vermilion); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.preview-toolbar a { display: inline-flex; min-height: 33px; flex: 0 0 auto; align-items: center; padding: 0 10px; border-radius: 7px; color: inherit; font-size: 13px; text-decoration: none; }
+.preview-toolbar a:hover { color: var(--ink); background: color-mix(in srgb, var(--paper), transparent 5%); }
+.preview-toolbar a[aria-current="page"] { color: var(--paper-raised); background: var(--ink); }
+.preview-hint { margin: 0 7px 0 10px; color: var(--ink-faint); font-size: 12px; white-space: nowrap; }
+.preview-toolbar ~ .admin-scene { padding-top: max(76px, 8vh); }
+.preview-toolbar ~ .setup-scene { padding-top: 76px; }
 
-.connection-line {
-  display: grid;
-  width: 45px;
-  height: 1px;
-  place-items: center;
-  color: var(--ink-faint);
-  background: var(--rule);
+.consent-scene {
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-block: max(42px, 7vh) max(42px, env(safe-area-inset-bottom));
 }
 
-.connection-line svg { width: 15px; height: 15px; padding: 2px; background: var(--paper); stroke-width: 1.5; }
+.consent-scene .auth-panel { width: min(100%, 480px); }
 
 .application-mark {
+  position: relative;
   display: grid;
-  width: 38px;
-  height: 38px;
+  width: 68px;
+  height: 68px;
+  margin: 0 auto 25px;
   place-items: center;
   border: 1px solid var(--rule);
-  border-radius: 10px;
-  color: var(--ink-muted);
+  border-radius: 17px;
+  color: var(--ink);
   background: color-mix(in srgb, var(--paper-raised), transparent 12%);
   font-family: "Iowan Old Style", Georgia, serif;
-  font-size: 20px;
+  font-size: 31px;
+  box-shadow: 0 8px 24px rgba(26, 23, 17, .07);
+  transform-style: preserve-3d;
 }
 
-.consent-scene .auth-copy h1 { font-size: clamp(26px, 6vw, 30px); }
+.application-initial { position: relative; z-index: 1; }
+
+.approval-stamp {
+  position: absolute;
+  z-index: 2;
+  inset: 4px;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transform: translateY(-62px) rotate(-13deg) scale(.86);
+  transform-origin: center;
+  pointer-events: none;
+}
+
+.approval-stamp .hanko-wrap { filter: drop-shadow(0 1px 1px rgba(71, 19, 15, .22)); }
+.approval-stamp .hanko-splatter { display: none; }
+
+.consent-is-allowing .approval-stamp {
+  animation: consent-stamp-drop .86s cubic-bezier(.18, .76, .23, 1) forwards;
+}
+
+.consent-is-allowing .application-mark { animation: application-receive .86s ease-out both; }
+
+.consent-is-denying .application-mark {
+  animation: application-decline .54s cubic-bezier(.2, .7, .28, 1) both;
+}
+
+.consent-scene .auth-copy h1 { font-size: clamp(30px, 6.3vw, 36px); }
+.consent-scene .auth-copy p { margin-top: 12px; font-size: 17px; }
 
 .claim-list {
   display: grid;
   gap: 0;
-  margin: 25px 0 0;
+  margin: 27px 0 0;
   padding: 4px 0;
   border-top: 1px solid var(--rule);
   border-bottom: 1px solid var(--rule);
@@ -326,30 +371,34 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
 
 .claim-list li {
   display: flex;
-  min-height: 43px;
+  min-height: 57px;
   align-items: center;
-  gap: 12px;
+  gap: 15px;
   color: var(--ink);
-  font-size: 13px;
+  font-size: 16px;
 }
 
-.claim-list svg { width: 16px; height: 16px; color: var(--ink-muted); stroke-width: 1.7; }
+.claim-list > li > svg { width: 19px; height: 19px; flex: 0 0 auto; color: var(--ink-muted); stroke-width: 1.7; }
+.claim-copy { display: grid; gap: 3px; min-width: 0; }
+.claim-label { font-size: 16px; line-height: 1.35; }
+.claim-detail { max-width: 390px; color: var(--ink-muted); font-size: 14px; line-height: 1.45; }
 
 .trust-note {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin: 19px 0 0;
+  margin: 20px 0 0;
   color: var(--ink-muted);
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1.55;
 }
 
-.trust-note svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--vermilion); stroke-width: 1.7; }
+.trust-note svg { width: 16px; height: 16px; flex: 0 0 auto; color: var(--vermilion); stroke-width: 1.7; }
 
-.consent-actions { display: flex; gap: 11px; margin-top: 26px; }
+.consent-actions { display: flex; gap: 12px; margin-top: 25px; }
 .consent-actions .primary-action, .consent-actions .secondary-action { width: 50%; margin: 0; }
+.consent-actions .primary-action, .consent-actions .secondary-action { min-height: 56px; font-size: 16px; }
 
 .secondary-action {
   border-color: var(--rule);
@@ -838,6 +887,27 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
   to { opacity: 1; transform: scale(1); }
 }
 
+@keyframes consent-stamp-drop {
+  0% { opacity: 0; transform: translateY(-62px) rotate(-13deg) scale(.86); }
+  25% { opacity: 1; }
+  60% { opacity: 1; transform: translateY(5px) rotate(3deg) scale(1.06); }
+  76% { transform: translateY(-3px) rotate(-1.2deg) scale(.98); }
+  100% { opacity: .92; transform: translateY(0) rotate(0) scale(1); }
+}
+
+@keyframes application-receive {
+  0%, 53% { transform: scale(1); }
+  64% { transform: scale(.94, 1.04); }
+  80% { transform: scale(1.025, .98); }
+  100% { transform: scale(1); }
+}
+
+@keyframes application-decline {
+  0% { opacity: 1; filter: none; transform: translateY(0) rotate(0) scale(1); }
+  38% { opacity: .72; transform: translateY(-5px) rotate(-3deg) scale(.94); }
+  100% { opacity: .2; filter: grayscale(1); transform: translateY(17px) rotate(6deg) scale(.82); }
+}
+
 @media (max-width: 1060px) {
   .admin-layout { grid-template-columns: minmax(0, 1fr); gap: 25px; }
   .admin-nav { position: static; display: flex; align-items: stretch; gap: 16px; padding: 0 0 11px; overflow-x: auto; border-bottom: 1px solid var(--rule); scrollbar-width: thin; }
@@ -850,6 +920,10 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
 }
 
 @media (max-width: 600px) {
+  .preview-hint { display: none; }
+  .preview-toolbar { gap: 1px; }
+  .preview-label { padding-inline: 7px; }
+  .preview-toolbar a { padding-inline: 9px; font-size: 12px; }
   .admin-layout { gap: 23px; }
   .admin-nav { display: block; padding: 0; overflow: visible; border: 0; }
   .admin-nav-group { display: none; }
@@ -862,8 +936,15 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
   .auth-scene { padding-inline: 25px; }
   .auth-panel { max-width: 370px; }
   .seal-stage { transform: scale(.95); transform-origin: center top; margin-bottom: -7px; }
+  .consent-scene { padding: 32px 25px max(34px, env(safe-area-inset-bottom)); }
+  .consent-scene .auth-panel { max-width: 400px; }
+  .application-mark { width: 62px; height: 62px; margin-bottom: 22px; border-radius: 15px; }
+  .application-mark > .approval-stamp { inset: 2px; }
+  .claim-list { margin-top: 23px; }
+  .claim-list li { min-height: 53px; }
+  .claim-detail { font-size: 13px; }
   .consent-actions { flex-direction: column-reverse; }
-  .consent-actions .primary-action, .consent-actions .secondary-action { width: 100%; min-height: 49px; }
+  .consent-actions .primary-action, .consent-actions .secondary-action { width: 100%; min-height: 54px; }
   .admin-scene { padding-inline: 20px; }
   .admin-heading { margin-bottom: 28px; }
   .admin-choice-grid { grid-template-columns: 1fr; }
@@ -910,7 +991,6 @@ button:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 4px;
   .paper-grain { opacity: .045; mix-blend-mode: screen; }
   .ink-wash { opacity: .34; }
   .seal-wear { opacity: .7; }
-  .connection-line svg { background: var(--paper); }
   .secondary-action:hover:not(:disabled) { background: #302d28; }
   .admin-message-error { border-color: color-mix(in srgb, var(--error), transparent 42%); background: color-mix(in srgb, var(--error), transparent 90%); }
 }
