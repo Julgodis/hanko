@@ -1,6 +1,6 @@
 use axum::{
     Form, Json, Router,
-    extract::{Query, State},
+    extract::{ConnectInfo, Extension, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::net::SocketAddr;
 use subtle::ConstantTimeEq;
 use url::Url;
 use uuid::Uuid;
@@ -40,6 +41,8 @@ struct AuthorizeRequest {
     nonce: Option<String>,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
+    prompt: Option<String>,
+    max_age: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -124,6 +127,20 @@ impl OAuthError {
             description: "authorization grant is invalid or expired".to_owned(),
         }
     }
+    fn login_required() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: "login_required",
+            description: "a fresh user authentication is required".to_owned(),
+        }
+    }
+    fn rate_limited() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            error: "temporarily_unavailable",
+            description: "too many authorization requests; try again shortly".to_owned(),
+        }
+    }
     fn server_error() -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -168,12 +185,87 @@ pub fn router() -> Router<AppState> {
 async fn authorize(
     State(state): State<AppState>,
     Query(input): Query<AuthorizeRequest>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Result<Response, OAuthError> {
+    let _slot = crate::security::try_anonymous_state_slot().ok_or_else(OAuthError::rate_limited)?;
+    let source = crate::security::source_ip(
+        peer.map(|Extension(ConnectInfo(address))| address),
+        &headers,
+        &state.config,
+    );
+    if !crate::http::allow_anonymous_state_creation(&state, "authorize", source, 30, 600)
+        .await
+        .map_err(|_| OAuthError::server_error())?
+    {
+        return Err(OAuthError::rate_limited());
+    }
     let scopes = validate_authorize_request(&state, &input).await?;
+    let prompts = authorize_prompts(&input)?;
+    if prompts.iter().any(|prompt| *prompt == "select_account") {
+        return authorization_protocol_error(&input, "account_selection_required");
+    }
+    let now_ms = crate::security::unix_now_millis();
+    let now = now_ms / 1000;
+    let existing_session = load_session(&headers, &state.database)
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+    let session_auth_time_ms = if let Some(session) = &existing_session {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT authenticated_at_ms FROM sessions WHERE session_hash = ?",
+        )
+        .bind(&session.session_hash)
+        .fetch_optional(&state.database.pool)
+        .await
+        .map_err(|_| OAuthError::server_error())?
+    } else {
+        None
+    };
+    let max_age_is_stale = input.max_age.is_some_and(|max_age| {
+        session_auth_time_ms.is_none_or(|authenticated_at_ms| {
+            max_age == 0
+                || now_ms.saturating_sub(authenticated_at_ms) > max_age.saturating_mul(1000)
+        })
+    });
+    let force_reauthentication = prompts.contains(&"login") || max_age_is_stale;
+
+    if prompts.contains(&"none") {
+        let Some(session) = existing_session
+            .as_ref()
+            .filter(|session| !session.setup_only)
+        else {
+            return authorization_protocol_error(&input, "login_required");
+        };
+        if !user_allowed_for_client(&state, &input.client_id, &session.user_id).await? {
+            return authorization_protocol_error(&input, "access_denied");
+        }
+        return authorization_protocol_error(
+            &input,
+            if force_reauthentication {
+                "login_required"
+            } else {
+                // This provider asks for consent on every authorization and has no
+                // stored grant that could satisfy prompt=none.
+                "consent_required"
+            },
+        );
+    }
+
+    let prior_session_hash = if force_reauthentication {
+        existing_session
+            .as_ref()
+            .map(|session| session.session_hash.clone())
+    } else {
+        None
+    };
     let preauth = crate::security::random_secret();
     let request_id = crate::security::random_secret();
-    let now = unix_now();
-    sqlx::query("INSERT INTO authorization_requests (request_hash, browser_hash, client_id, redirect_uri, state, nonce, code_challenge, scopes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    sqlx::query("DELETE FROM authorization_requests WHERE expires_at <= ?")
+        .bind(now)
+        .execute(&state.database.pool)
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+    let inserted = sqlx::query("INSERT INTO authorization_requests (request_hash, browser_hash, client_id, redirect_uri, state, nonce, code_challenge, scopes, created_at, expires_at, max_age, force_reauthentication, prior_session_hash, created_at_ms) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM authorization_requests WHERE expires_at > ?) < 5000")
         .bind(digest(&request_id))
         .bind(digest(&preauth))
         .bind(&input.client_id)
@@ -185,9 +277,17 @@ async fn authorize(
         .bind(serde_json::to_string(&scopes).map_err(|_| OAuthError::server_error())?)
         .bind(now)
         .bind(now + AUTH_REQUEST_SECONDS)
+        .bind(input.max_age)
+        .bind(force_reauthentication)
+        .bind(prior_session_hash)
+        .bind(now_ms)
+        .bind(now)
         .execute(&state.database.pool)
         .await
         .map_err(|_| OAuthError::server_error())?;
+    if inserted.rows_affected() != 1 {
+        return Err(OAuthError::rate_limited());
+    }
     let location = format!(
         "{}/?request_id={}",
         state.config.issuer(),
@@ -234,6 +334,19 @@ async fn authorize_request_info(
         .await
         .map_err(|_| OAuthError::server_error())?;
     let (row, client_name) = pending_authorization(&state, &headers, &input.request_id).await?;
+    let max_age: Option<i64> = row
+        .try_get("max_age")
+        .map_err(|_| OAuthError::server_error())?;
+    let force_reauthentication: bool = row
+        .try_get("force_reauthentication")
+        .map_err(|_| OAuthError::server_error())?;
+    let prior_session_hash: Option<Vec<u8>> = row
+        .try_get("prior_session_hash")
+        .map_err(|_| OAuthError::server_error())?;
+    let request_created_at_ms: i64 = row
+        .try_get("created_at_ms")
+        .map_err(|_| OAuthError::server_error())?;
+    let mut requires_fresh_authentication = false;
     if let Some(session) = session {
         if session.setup_only {
             return Err(OAuthError::invalid_grant());
@@ -246,6 +359,24 @@ async fn authorize_request_info(
                 "user is not allowed to access this client",
             ));
         }
+        let authenticated_at_ms = sqlx::query_scalar::<_, i64>(
+            "SELECT authenticated_at_ms FROM sessions WHERE session_hash = ?",
+        )
+        .bind(&session.session_hash)
+        .fetch_optional(&state.database.pool)
+        .await
+        .map_err(|_| OAuthError::server_error())?
+        .ok_or_else(OAuthError::invalid_grant)?;
+        let same_prior_session = prior_session_hash
+            .as_deref()
+            .is_some_and(|hash| hash == session.session_hash.as_slice());
+        let now_ms = crate::security::unix_now_millis();
+        let stale_by_max_age = max_age.is_some_and(|max_age| {
+            max_age > 0 && now_ms.saturating_sub(authenticated_at_ms) > max_age.saturating_mul(1000)
+        });
+        let authenticated_after_request = authenticated_at_ms > request_created_at_ms;
+        requires_fresh_authentication = stale_by_max_age
+            || (force_reauthentication && (same_prior_session || !authenticated_after_request));
     }
     let scopes_json: String = row
         .try_get("scopes")
@@ -254,6 +385,7 @@ async fn authorize_request_info(
         "client_name": client_name,
         "redirect_uri": row.try_get::<String, _>("redirect_uri").map_err(|_| OAuthError::server_error())?,
         "scopes": serde_json::from_str::<Vec<String>>(&scopes_json).map_err(|_| OAuthError::server_error())?,
+        "requires_fresh_authentication": requires_fresh_authentication,
     })))
 }
 
@@ -284,6 +416,18 @@ async fn continue_authorize(
         .map_err(|_| OAuthError::server_error())?;
     let scopes: Vec<String> =
         serde_json::from_str(&scopes_json).map_err(|_| OAuthError::server_error())?;
+    let max_age: Option<i64> = row
+        .try_get("max_age")
+        .map_err(|_| OAuthError::server_error())?;
+    let force_reauthentication: bool = row
+        .try_get("force_reauthentication")
+        .map_err(|_| OAuthError::server_error())?;
+    let prior_session_hash: Option<Vec<u8>> = row
+        .try_get("prior_session_hash")
+        .map_err(|_| OAuthError::server_error())?;
+    let request_created_at_ms: i64 = row
+        .try_get("created_at_ms")
+        .map_err(|_| OAuthError::server_error())?;
     if !user_allowed_for_client(&state, &client_id, &session.user_id).await? {
         return Err(OAuthError::invalid_request(
             "user is not allowed to access this client",
@@ -291,14 +435,35 @@ async fn continue_authorize(
     }
     validate_redirect(&state.database, &client_id, &redirect_uri).await?;
     ensure_scopes_still_allowed(&state, &client_id, &scopes).await?;
-    let auth_time =
-        sqlx::query_scalar::<_, i64>("SELECT created_at FROM sessions WHERE session_hash = ?")
+    let session_auth =
+        sqlx::query("SELECT created_at, authenticated_at_ms FROM sessions WHERE session_hash = ?")
             .bind(&session.session_hash)
-            .fetch_one(&state.database.pool)
+            .fetch_optional(&state.database.pool)
             .await
-            .map_err(|_| OAuthError::server_error())?;
+            .map_err(|_| OAuthError::server_error())?
+            .ok_or_else(OAuthError::invalid_grant)?;
+    let auth_time: i64 = session_auth
+        .try_get("created_at")
+        .map_err(|_| OAuthError::server_error())?;
+    let authenticated_at_ms: i64 = session_auth
+        .try_get("authenticated_at_ms")
+        .map_err(|_| OAuthError::server_error())?;
+    let now_ms = crate::security::unix_now_millis();
+    let now = now_ms / 1000;
+    if max_age.is_some_and(|max_age| {
+        max_age > 0 && now_ms.saturating_sub(authenticated_at_ms) > max_age.saturating_mul(1000)
+    }) {
+        return Err(OAuthError::login_required());
+    }
+    if force_reauthentication
+        && (authenticated_at_ms <= request_created_at_ms
+            || prior_session_hash
+                .as_deref()
+                .is_some_and(|hash| hash == session.session_hash.as_slice()))
+    {
+        return Err(OAuthError::login_required());
+    }
     let code = crate::security::random_secret();
-    let now = unix_now();
     let request_hash = digest(&input.request_id);
     let preauth = cookie_value(&headers, PREAUTH_COOKIE).ok_or_else(OAuthError::invalid_grant)?;
     let browser_hash = digest(&preauth);
@@ -373,7 +538,7 @@ async fn pending_authorization(
     request_id: &str,
 ) -> Result<(sqlx::sqlite::SqliteRow, String), OAuthError> {
     let preauth = cookie_value(headers, PREAUTH_COOKIE).ok_or_else(OAuthError::invalid_grant)?;
-    let row = sqlx::query("SELECT client_id, redirect_uri, state, nonce, code_challenge, scopes FROM authorization_requests WHERE request_hash = ? AND browser_hash = ? AND expires_at > ?")
+    let row = sqlx::query("SELECT client_id, redirect_uri, state, nonce, code_challenge, scopes, max_age, force_reauthentication, prior_session_hash, created_at_ms FROM authorization_requests WHERE request_hash = ? AND browser_hash = ? AND expires_at > ?")
         .bind(digest(request_id)).bind(digest(&preauth)).bind(unix_now())
         .fetch_optional(&state.database.pool).await.map_err(|_| OAuthError::server_error())?.ok_or_else(OAuthError::invalid_grant)?;
     let client_id: String = row
@@ -393,8 +558,21 @@ async fn pending_authorization(
 async fn token(
     State(state): State<AppState>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Form(input): Form<TokenRequest>,
 ) -> Result<Json<TokenResponse>, OAuthError> {
+    let _slot = crate::security::try_anonymous_state_slot().ok_or_else(OAuthError::rate_limited)?;
+    let source = crate::security::source_ip(
+        peer.map(|Extension(ConnectInfo(address))| address),
+        &headers,
+        &state.config,
+    );
+    if !crate::http::allow_anonymous_state_creation(&state, "token", source, 120, 6000)
+        .await
+        .map_err(|_| OAuthError::server_error())?
+    {
+        return Err(OAuthError::rate_limited());
+    }
     let client = sqlx::query(
         "SELECT client_type, token_endpoint_auth_method, client_secret_hash, enabled FROM oidc_clients WHERE client_id = ?",
     )
@@ -569,14 +747,38 @@ async fn exchange_refresh_token(
     refresh_token: &str,
 ) -> Result<TokenResponse, OAuthError> {
     let refresh_hash = digest(refresh_token);
-    let row = sqlx::query("SELECT user_id, scopes, auth_time FROM refresh_tokens WHERE token_hash = ? AND client_id = ? AND expires_at > ?")
+    let now = unix_now();
+    let row = sqlx::query("SELECT rt.user_id, rt.scopes, rt.auth_time, rt.family_id, rt.consumed_at, rt.expires_at, f.expires_at AS family_expires_at, f.revoked_at FROM refresh_tokens rt JOIN refresh_token_families f ON f.family_id = rt.family_id WHERE rt.token_hash = ? AND rt.client_id = ?")
         .bind(&refresh_hash)
         .bind(client_id)
-        .bind(unix_now())
         .fetch_optional(&state.database.pool)
         .await
         .map_err(|_| OAuthError::server_error())?
         .ok_or_else(OAuthError::invalid_grant)?;
+    let family_id: String = row
+        .try_get("family_id")
+        .map_err(|_| OAuthError::server_error())?;
+    let consumed_at: Option<i64> = row
+        .try_get("consumed_at")
+        .map_err(|_| OAuthError::server_error())?;
+    let expires_at: i64 = row
+        .try_get("expires_at")
+        .map_err(|_| OAuthError::server_error())?;
+    let family_expires_at: i64 = row
+        .try_get("family_expires_at")
+        .map_err(|_| OAuthError::server_error())?;
+    let revoked_at: Option<i64> = row
+        .try_get("revoked_at")
+        .map_err(|_| OAuthError::server_error())?;
+    if consumed_at.is_some() {
+        if family_expires_at > now {
+            revoke_refresh_family(&state.database, &family_id, now).await?;
+        }
+        return Err(OAuthError::invalid_grant());
+    }
+    if expires_at <= now || family_expires_at <= now || revoked_at.is_some() {
+        return Err(OAuthError::invalid_grant());
+    }
     let user_id: String = row
         .try_get("user_id")
         .map_err(|_| OAuthError::server_error())?;
@@ -606,6 +808,34 @@ async fn exchange_refresh_token(
         Some(refresh_hash),
     )
     .await
+}
+
+async fn revoke_refresh_family(
+    database: &crate::db::Database,
+    family_id: &str,
+    now: i64,
+) -> Result<(), OAuthError> {
+    let mut transaction = database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+    sqlx::query("UPDATE refresh_token_families SET revoked_at = COALESCE(revoked_at, ?) WHERE family_id = ? AND expires_at > ?")
+        .bind(now)
+        .bind(family_id)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+    sqlx::query("DELETE FROM refresh_tokens WHERE family_id = ? AND consumed_at IS NULL")
+        .bind(family_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| OAuthError::server_error())
 }
 
 async fn issue_tokens(
@@ -729,22 +959,89 @@ async fn issue_tokens(
         .begin()
         .await
         .map_err(|_| OAuthError::server_error())?;
-    if let Some(refresh_hash) = rotate_refresh_hash {
-        let deleted = sqlx::query(
-            "DELETE FROM refresh_tokens WHERE token_hash = ? AND client_id = ? AND expires_at > ?",
-        )
-        .bind(refresh_hash)
-        .bind(client_id)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| OAuthError::server_error())?;
-        if deleted.rows_affected() != 1 {
+    let refresh_family_id = if let Some(refresh_hash) = rotate_refresh_hash {
+        // Make this the transaction's first statement: SQLite serializes writers
+        // here, so replay checks cannot race a successor insertion.
+        let consumed = sqlx::query("UPDATE refresh_tokens SET consumed_at = ? WHERE token_hash = ? AND client_id = ? AND consumed_at IS NULL AND expires_at > ? AND family_id IN (SELECT family_id FROM refresh_token_families WHERE revoked_at IS NULL AND expires_at > ?) RETURNING family_id")
+            .bind(now)
+            .bind(&refresh_hash)
+            .bind(client_id)
+            .bind(now)
+            .bind(now)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| OAuthError::server_error())?;
+        if let Some(consumed) = consumed {
+            let family_id: String = consumed
+                .try_get("family_id")
+                .map_err(|_| OAuthError::server_error())?;
+            let extended = sqlx::query("UPDATE refresh_token_families SET expires_at = ? WHERE family_id = ? AND revoked_at IS NULL")
+                .bind(now + REFRESH_SECONDS)
+                .bind(&family_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| OAuthError::server_error())?;
+            if extended.rows_affected() != 1 {
+                return Err(OAuthError::invalid_grant());
+            }
+            Some(family_id)
+        } else {
+            let replay = sqlx::query("SELECT rt.family_id, rt.consumed_at, f.expires_at AS family_expires_at FROM refresh_tokens rt JOIN refresh_token_families f ON f.family_id = rt.family_id WHERE rt.token_hash = ? AND rt.client_id = ?")
+                .bind(&refresh_hash)
+                .bind(client_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|_| OAuthError::server_error())?;
+            if let Some(replay) = replay {
+                let replay_family: String = replay
+                    .try_get("family_id")
+                    .map_err(|_| OAuthError::server_error())?;
+                let replay_consumed: Option<i64> = replay
+                    .try_get("consumed_at")
+                    .map_err(|_| OAuthError::server_error())?;
+                let family_expires_at: i64 = replay
+                    .try_get("family_expires_at")
+                    .map_err(|_| OAuthError::server_error())?;
+                if replay_consumed.is_some() && family_expires_at > now {
+                    sqlx::query("UPDATE refresh_token_families SET revoked_at = COALESCE(revoked_at, ?) WHERE family_id = ? AND expires_at > ?")
+                        .bind(now)
+                        .bind(&replay_family)
+                        .bind(now)
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(|_| OAuthError::server_error())?;
+                    sqlx::query(
+                        "DELETE FROM refresh_tokens WHERE family_id = ? AND consumed_at IS NULL",
+                    )
+                    .bind(&replay_family)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| OAuthError::server_error())?;
+                }
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|_| OAuthError::server_error())?;
             return Err(OAuthError::invalid_grant());
         }
-    }
+    } else if refresh_token.is_some() {
+        let family_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO refresh_token_families (family_id, client_id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(&family_id)
+            .bind(client_id)
+            .bind(user_id)
+            .bind(now)
+            .bind(now + REFRESH_SECONDS)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| OAuthError::server_error())?;
+        Some(family_id)
+    } else {
+        None
+    };
     if let Some(refresh_token) = &refresh_token {
-        sqlx::query("INSERT INTO refresh_tokens (token_hash, client_id, user_id, scopes, auth_time, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO refresh_tokens (token_hash, client_id, user_id, scopes, auth_time, created_at, expires_at, family_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(digest(refresh_token))
             .bind(client_id)
             .bind(user_id)
@@ -752,6 +1049,7 @@ async fn issue_tokens(
             .bind(auth_time)
             .bind(now)
             .bind(now + REFRESH_SECONDS)
+            .bind(refresh_family_id)
             .execute(&mut *transaction)
             .await
             .map_err(|_| OAuthError::server_error())?;
@@ -894,6 +1192,7 @@ async fn end_session(
             ));
         }
     }
+    let mut matched_session = false;
     if let Some(session) = load_session(&headers, &state.database)
         .await
         .map_err(|_| OAuthError::server_error())?
@@ -909,6 +1208,7 @@ async fn end_session(
                 .execute(&state.database.pool)
                 .await
                 .map_err(|_| OAuthError::server_error())?;
+            matched_session = true;
         }
     }
     let mut response = if let Some(uri) = input.post_logout_redirect_uri {
@@ -921,7 +1221,9 @@ async fn end_session(
     } else {
         (StatusCode::OK, "signed out").into_response()
     };
-    crate::security::clear_session_cookies(&mut response, &state.config);
+    if matched_session {
+        crate::security::clear_session_cookies(&mut response, &state.config);
+    }
     Ok(response)
 }
 
@@ -932,6 +1234,7 @@ async fn validate_authorize_request(
     if input.response_type != "code"
         || input.state.is_empty()
         || input.state.len() > 512
+        || input.max_age.is_some_and(|max_age| max_age < 0)
         || input
             .nonce
             .as_ref()
@@ -975,6 +1278,35 @@ async fn validate_authorize_request(
     let scopes = parse_scopes(&input.scope)?;
     ensure_scopes_still_allowed(state, &input.client_id, &scopes).await?;
     Ok(scopes)
+}
+
+fn authorize_prompts(input: &AuthorizeRequest) -> Result<Vec<&str>, OAuthError> {
+    let Some(prompt) = input.prompt.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let prompts: Vec<&str> = prompt.split_ascii_whitespace().collect();
+    if prompts.is_empty()
+        || prompts.iter().enumerate().any(|(index, prompt)| {
+            prompts[..index].contains(prompt)
+                || !matches!(*prompt, "none" | "login" | "consent" | "select_account")
+        })
+        || (prompts.contains(&"none") && prompts.len() != 1)
+    {
+        return Err(OAuthError::invalid_request("prompt parameter is invalid"));
+    }
+    Ok(prompts)
+}
+
+fn authorization_protocol_error(
+    input: &AuthorizeRequest,
+    error: &str,
+) -> Result<Response, OAuthError> {
+    let mut url = Url::parse(&input.redirect_uri)
+        .map_err(|_| OAuthError::invalid_request("redirect_uri is invalid"))?;
+    url.query_pairs_mut()
+        .append_pair("error", error)
+        .append_pair("state", &input.state);
+    redirect(url.as_str())
 }
 
 async fn validate_redirect(
@@ -1450,6 +1782,7 @@ mod tests {
             database,
             signing_keys,
             webauthn,
+            anonymous_request_limiter: crate::security::AnonymousRequestLimiter::default(),
         };
         let user_id = Uuid::new_v4().to_string();
         let client_id = Uuid::new_v4().to_string();
@@ -1508,6 +1841,29 @@ mod tests {
                 .unwrap();
         }
         (client_id, secret)
+    }
+
+    async fn issue_test_refresh_token(state: &AppState, user_id: &str, client_id: &str) -> String {
+        sqlx::query(
+            "INSERT OR IGNORE INTO client_scopes (client_id, scope) VALUES (?, 'offline_access')",
+        )
+        .bind(client_id)
+        .execute(&state.database.pool)
+        .await
+        .unwrap();
+        issue_tokens(
+            state,
+            client_id,
+            user_id,
+            &["openid".to_owned(), "offline_access".to_owned()],
+            unix_now(),
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .refresh_token
+        .unwrap()
     }
 
     async fn issue_test_authorization_code(
@@ -2013,6 +2369,705 @@ mod tests {
 
         let replay = app.oneshot(token_request(verifier)).await.unwrap();
         assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn refresh_token_reuse_revokes_the_active_successor_and_family() {
+        let (state, user_id, client_id) = oidc_test_state().await;
+        let original = issue_test_refresh_token(&state, &user_id, &client_id).await;
+        let family_id: String =
+            sqlx::query_scalar("SELECT family_id FROM refresh_tokens WHERE token_hash = ?")
+                .bind(digest(&original))
+                .fetch_one(&state.database.pool)
+                .await
+                .unwrap();
+
+        // Whether the legitimate client or a thief redeems the bearer token first,
+        // a subsequent use of the consumed value must revoke the entire family.
+        let thief = exchange_refresh_token(&state, &client_id, &original)
+            .await
+            .unwrap();
+        let successor = thief.refresh_token.unwrap();
+        let replay = exchange_refresh_token(&state, &client_id, &original)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(replay.error, "invalid_grant");
+
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM refresh_tokens WHERE family_id = ? AND consumed_at IS NULL",
+        )
+        .bind(&family_id)
+        .fetch_one(&state.database.pool)
+        .await
+        .unwrap();
+        let revoked_at: Option<i64> =
+            sqlx::query_scalar("SELECT revoked_at FROM refresh_token_families WHERE family_id = ?")
+                .bind(&family_id)
+                .fetch_one(&state.database.pool)
+                .await
+                .unwrap();
+        assert_eq!(active, 0);
+        assert!(revoked_at.is_some());
+        assert_eq!(
+            exchange_refresh_token(&state, &client_id, &successor)
+                .await
+                .err()
+                .unwrap()
+                .error,
+            "invalid_grant"
+        );
+        assert_eq!(
+            exchange_refresh_token(&state, &client_id, &original)
+                .await
+                .err()
+                .unwrap()
+                .error,
+            "invalid_grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_token_cross_client_attempt_does_not_revoke_owner_family() {
+        let (state, user_id, client_id) = oidc_test_state().await;
+        let original = issue_test_refresh_token(&state, &user_id, &client_id).await;
+        let other_client = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO oidc_clients (client_id, client_secret_hash, client_type, name, enabled, created_at) VALUES (?, NULL, 'public', 'Other Client', 1, 1)")
+            .bind(&other_client)
+            .execute(&state.database.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO client_scopes (client_id, scope) VALUES (?, 'openid'), (?, 'offline_access')")
+            .bind(&other_client)
+            .bind(&other_client)
+            .execute(&state.database.pool)
+            .await
+            .unwrap();
+
+        let cross_client = exchange_refresh_token(&state, &other_client, &original)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(cross_client.error, "invalid_grant");
+        let owner_rotation = exchange_refresh_token(&state, &client_id, &original)
+            .await
+            .unwrap();
+        let successor = owner_rotation.refresh_token.unwrap();
+        let replay = exchange_refresh_token(&state, &client_id, &original)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(replay.error, "invalid_grant");
+        assert_eq!(
+            exchange_refresh_token(&state, &client_id, &successor)
+                .await
+                .err()
+                .unwrap()
+                .error,
+            "invalid_grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn simultaneous_refresh_redemptions_revoke_the_winning_successor() {
+        let (state, user_id, client_id) = oidc_test_state().await;
+        let original = issue_test_refresh_token(&state, &user_id, &client_id).await;
+        let (first, second) = tokio::join!(
+            exchange_refresh_token(&state, &client_id, &original),
+            exchange_refresh_token(&state, &client_id, &original),
+        );
+        assert_ne!(first.is_ok(), second.is_ok());
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM refresh_tokens WHERE token_hash = ? AND consumed_at IS NULL",
+        )
+        .bind(digest(&original))
+        .fetch_one(&state.database.pool)
+        .await
+        .unwrap();
+        assert_eq!(active, 0);
+        let successors: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM refresh_tokens WHERE family_id = (SELECT family_id FROM refresh_tokens WHERE token_hash = ?) AND consumed_at IS NULL",
+        )
+        .bind(digest(&original))
+        .fetch_one(&state.database.pool)
+        .await
+        .unwrap();
+        assert_eq!(successors, 0);
+    }
+
+    #[tokio::test]
+    async fn max_age_requires_a_new_passkey_session_before_consent() {
+        let (state, user_id, client_id) = oidc_test_state().await;
+        let app = http_router(state.clone());
+        let previous_session =
+            create_session(&state.database, &user_id, false, unix_now() - 60 * 60)
+                .await
+                .unwrap();
+        let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+        let mut authorization_url = Url::parse("http://localhost:3000/authorize").unwrap();
+        authorization_url
+            .query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &client_id)
+            .append_pair(
+                "redirect_uri",
+                "https://client.example/callback?from=provider",
+            )
+            .append_pair("scope", "openid profile")
+            .append_pair("state", "fresh-state")
+            .append_pair("code_challenge", &s256_challenge(verifier))
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("max_age", "30");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(authorization_url.as_str())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let preauth = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(|value| {
+                value
+                    .to_str()
+                    .ok()?
+                    .strip_prefix("hanko_preauth=")?
+                    .split(';')
+                    .next()
+                    .map(str::to_owned)
+            })
+            .unwrap();
+        let request_id = Url::parse(&location)
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "request_id")
+            .unwrap()
+            .1
+            .to_string();
+        let info_uri = format!("/api/authorize/request?request_id={request_id}");
+        let old_cookie = format!(
+            "hanko_session={}; hanko_csrf={}; hanko_preauth={preauth}",
+            previous_session.raw_token, previous_session.raw_csrf
+        );
+        let info = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&info_uri)
+                    .header(header::COOKIE, &old_cookie)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(info.into_body(), 4096).await.unwrap();
+        let info: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(info["requires_fresh_authentication"], true);
+
+        let continue_with = |session: &crate::security::BrowserSession| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/authorize/continue")
+                .header(header::ORIGIN, "http://localhost:3000")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(
+                    header::COOKIE,
+                    format!(
+                        "hanko_session={}; hanko_csrf={}; hanko_preauth={preauth}",
+                        session.raw_token, session.raw_csrf
+                    ),
+                )
+                .header("x-csrf-token", &session.raw_csrf)
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "request_id": request_id }).to_string(),
+                ))
+                .unwrap()
+        };
+        let denied = app
+            .clone()
+            .oneshot(continue_with(&previous_session))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(denied.into_body(), 4096)
+            .await
+            .unwrap();
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"], "login_required");
+
+        let enrollment_session = create_session(&state.database, &user_id, true, unix_now())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET setup_only = 0 WHERE session_hash = ?")
+            .bind(&enrollment_session.session_hash)
+            .execute(&state.database.pool)
+            .await
+            .unwrap();
+        let enrollment_cookie = format!(
+            "hanko_session={}; hanko_csrf={}; hanko_preauth={preauth}",
+            enrollment_session.raw_token, enrollment_session.raw_csrf
+        );
+        let info = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&info_uri)
+                    .header(header::COOKIE, &enrollment_cookie)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(info.into_body(), 4096).await.unwrap();
+        let info: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(info["requires_fresh_authentication"], true);
+        let denied = app
+            .clone()
+            .oneshot(continue_with(&enrollment_session))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(denied.into_body(), 4096)
+            .await
+            .unwrap();
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"], "login_required");
+
+        let fresh_session = crate::security::create_passkey_session(&state.database, &user_id)
+            .await
+            .unwrap();
+        let info = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&info_uri)
+                    .header(
+                        header::COOKIE,
+                        format!(
+                            "hanko_session={}; hanko_csrf={}; hanko_preauth={preauth}",
+                            fresh_session.raw_token, fresh_session.raw_csrf
+                        ),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(info.into_body(), 4096).await.unwrap();
+        let info: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(info["requires_fresh_authentication"], false);
+
+        let approved = app.oneshot(continue_with(&fresh_session)).await.unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(approved.into_body(), 4096)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        let callback = Url::parse(result["redirect_to"].as_str().unwrap()).unwrap();
+        let code = callback
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .unwrap()
+            .1
+            .to_string();
+        let auth_time: i64 =
+            sqlx::query_scalar("SELECT auth_time FROM authorization_codes WHERE code_hash = ?")
+                .bind(digest(&code))
+                .fetch_one(&state.database.pool)
+                .await
+                .unwrap();
+        let fresh_auth_time: i64 =
+            sqlx::query_scalar("SELECT created_at FROM sessions WHERE session_hash = ?")
+                .bind(fresh_session.session_hash)
+                .fetch_one(&state.database.pool)
+                .await
+                .unwrap();
+        assert_eq!(auth_time, fresh_auth_time);
+    }
+
+    #[tokio::test]
+    async fn prompt_login_requires_a_new_assertion_even_for_a_recent_session() {
+        let (state, user_id, client_id) = oidc_test_state().await;
+        let app = http_router(state.clone());
+        let session = create_session(&state.database, &user_id, false, unix_now())
+            .await
+            .unwrap();
+        let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+        let mut authorization_url = Url::parse("http://localhost:3000/authorize").unwrap();
+        authorization_url
+            .query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &client_id)
+            .append_pair(
+                "redirect_uri",
+                "https://client.example/callback?from=provider",
+            )
+            .append_pair("scope", "openid")
+            .append_pair("state", "prompt-login-state")
+            .append_pair("code_challenge", &s256_challenge(verifier))
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("prompt", "login");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(authorization_url.as_str())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let preauth = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(|value| {
+                value
+                    .to_str()
+                    .ok()?
+                    .strip_prefix("hanko_preauth=")?
+                    .split(';')
+                    .next()
+                    .map(str::to_owned)
+            })
+            .unwrap();
+        let request_id = Url::parse(&location)
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "request_id")
+            .unwrap()
+            .1
+            .to_string();
+        let info = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/authorize/request?request_id={request_id}"))
+                    .header(
+                        header::COOKIE,
+                        format!(
+                            "hanko_session={}; hanko_csrf={}; hanko_preauth={preauth}",
+                            session.raw_token, session.raw_csrf
+                        ),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(info.into_body(), 4096).await.unwrap();
+        let info: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(info["requires_fresh_authentication"], true);
+    }
+
+    #[tokio::test]
+    async fn prompt_none_returns_an_interaction_error_without_creating_a_pending_request() {
+        let (state, user_id, client_id) = oidc_test_state().await;
+        let app = http_router(state.clone());
+        let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+        let mut authorization_url = Url::parse("http://localhost:3000/authorize").unwrap();
+        authorization_url
+            .query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &client_id)
+            .append_pair(
+                "redirect_uri",
+                "https://client.example/callback?from=provider",
+            )
+            .append_pair("scope", "openid")
+            .append_pair("state", "silent-state")
+            .append_pair("code_challenge", &s256_challenge(verifier))
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("prompt", "none");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(authorization_url.as_str())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let location = Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        assert_eq!(
+            location
+                .query_pairs()
+                .find(|(key, _)| key == "error")
+                .unwrap()
+                .1,
+            "login_required"
+        );
+        assert_eq!(
+            location
+                .query_pairs()
+                .find(|(key, _)| key == "state")
+                .unwrap()
+                .1,
+            "silent-state"
+        );
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM authorization_requests")
+            .fetch_one(&state.database.pool)
+            .await
+            .unwrap();
+        assert_eq!(pending, 0);
+
+        let session = create_session(&state.database, &user_id, false, unix_now())
+            .await
+            .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(authorization_url.as_str())
+                    .header(
+                        header::COOKIE,
+                        format!(
+                            "hanko_session={}; hanko_csrf={}",
+                            session.raw_token, session.raw_csrf
+                        ),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let location = Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        assert_eq!(
+            location
+                .query_pairs()
+                .find(|(key, _)| key == "error")
+                .unwrap()
+                .1,
+            "consent_required"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_only_clears_cookies_for_a_matching_id_token_subject() {
+        let (state, victim_id, client_id) = oidc_test_state().await;
+        let app = http_router(state.clone());
+        let other_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users (id, username, email, display_name, attributes, created_at, updated_at) VALUES (?, 'bob', 'bob@example.test', 'Bob Example', '{}', 1, 1)")
+            .bind(&other_id)
+            .execute(&state.database.pool)
+            .await
+            .unwrap();
+        let victim_session = create_session(&state.database, &victim_id, false, unix_now())
+            .await
+            .unwrap();
+        let other_tokens = issue_tokens(
+            &state,
+            &client_id,
+            &other_id,
+            &["openid".to_owned()],
+            unix_now(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let logout_uri = |hint: &str| {
+            let mut url = Url::parse("http://localhost:3000/logout").unwrap();
+            url.query_pairs_mut().append_pair("id_token_hint", hint);
+            url.to_string()
+        };
+        let victim_cookie = format!(
+            "hanko_session={}; hanko_csrf={}",
+            victim_session.raw_token, victim_session.raw_csrf
+        );
+        let mismatched = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(logout_uri(&other_tokens.id_token))
+                    .header(header::COOKIE, &victim_cookie)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatched.status(), StatusCode::OK);
+        assert!(
+            mismatched
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .next()
+                .is_none()
+        );
+        let victim_still_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ?)")
+                .bind(&victim_session.session_hash)
+                .fetch_one(&state.database.pool)
+                .await
+                .unwrap();
+        assert!(victim_still_exists);
+
+        let absent = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/logout")
+                    .header(header::COOKIE, &victim_cookie)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(absent.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            absent
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .next()
+                .is_none()
+        );
+
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/logout?id_token_hint=invalid")
+                    .header(header::COOKIE, &victim_cookie)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            invalid
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .next()
+                .is_none()
+        );
+
+        let matching_tokens = issue_tokens(
+            &state,
+            &client_id,
+            &victim_id,
+            &["openid".to_owned()],
+            unix_now(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let matching = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(logout_uri(&matching_tokens.id_token))
+                    .header(header::COOKIE, &victim_cookie)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matching.status(), StatusCode::OK);
+        let cleared: Vec<String> = matching
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(cleared.len(), 3);
+        assert!(
+            cleared
+                .iter()
+                .any(|cookie| cookie.starts_with("hanko_session="))
+        );
+        let victim_still_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ?)")
+                .bind(&victim_session.session_hash)
+                .fetch_one(&state.database.pool)
+                .await
+                .unwrap();
+        assert!(!victim_still_exists);
+
+        let expired_session = create_session(&state.database, &other_id, false, unix_now())
+            .await
+            .unwrap();
+        let expired_at = unix_now() - 600;
+        let expired_hint = state
+            .signing_keys
+            .sign(&serde_json::json!({
+                "iss": state.config.issuer(),
+                "sub": other_id,
+                "aud": client_id,
+                "token_use": "id",
+                "iat": expired_at - 300,
+                "exp": expired_at,
+            }))
+            .await
+            .unwrap();
+        let expired_logout = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(logout_uri(&expired_hint))
+                    .header(
+                        header::COOKIE,
+                        format!(
+                            "hanko_session={}; hanko_csrf={}",
+                            expired_session.raw_token, expired_session.raw_csrf
+                        ),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(expired_logout.status(), StatusCode::OK);
+        assert_eq!(
+            expired_logout
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .count(),
+            3
+        );
+        let expired_session_remains: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ?)")
+                .bind(expired_session.session_hash)
+                .fetch_one(&state.database.pool)
+                .await
+                .unwrap();
+        assert!(!expired_session_remains);
+
+        let no_session = app
+            .oneshot(
+                Request::builder()
+                    .uri(logout_uri(&matching_tokens.id_token))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            no_session
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .next()
+                .is_none()
+        );
     }
 
     #[tokio::test]

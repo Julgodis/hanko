@@ -1,8 +1,9 @@
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{OriginalUri, Path, State},
+    extract::{ConnectInfo, Extension, OriginalUri, Path, State},
     http::{HeaderMap, HeaderValue, Request, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
     routing::{get, get_service, post},
@@ -22,9 +23,10 @@ use crate::{
     db::Database,
     keys::SigningKeys,
     security::{
-        BrowserSession, PREAUTH_COOKIE, clear_session_cookies, cookie_header, cookie_value,
-        create_session, csrf_header_matches, digest, load_identity, load_session, origin_is_valid,
-        set_session_cookies, unix_now,
+        AnonymousRequestLimiter, BrowserSession, PREAUTH_COOKIE, anonymous_request_allowed,
+        clear_session_cookies, cookie_header, cookie_value, create_passkey_session, create_session,
+        csrf_header_matches, digest, load_identity, load_session, origin_is_valid,
+        set_session_cookies, source_ip, try_anonymous_state_slot, unix_now,
     },
     webauthn::WebauthnService,
 };
@@ -35,6 +37,32 @@ pub struct AppState {
     pub database: Database,
     pub signing_keys: SigningKeys,
     pub webauthn: WebauthnService,
+    pub anonymous_request_limiter: AnonymousRequestLimiter,
+}
+
+pub(crate) async fn allow_anonymous_state_creation(
+    state: &AppState,
+    endpoint: &str,
+    source: IpAddr,
+    source_limit: i64,
+    global_limit: i64,
+) -> Result<bool, sqlx::Error> {
+    let now = unix_now();
+    if !state
+        .anonymous_request_limiter
+        .allow(endpoint, source, now, source_limit, global_limit)
+    {
+        return Ok(false);
+    }
+    anonymous_request_allowed(
+        &state.database,
+        endpoint,
+        source,
+        now,
+        source_limit,
+        global_limit,
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -298,9 +326,28 @@ async fn jwks(State(state): State<AppState>) -> Result<Json<serde_json::Value>, 
 async fn bootstrap(
     State(state): State<AppState>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(input): Json<BootstrapInput>,
 ) -> Result<Response, ApiError> {
     require_origin(&headers, &state.config)?;
+    let _slot = try_anonymous_state_slot().ok_or(ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        message: "too many setup requests; try again shortly",
+    })?;
+    let source = source_ip(
+        peer.map(|Extension(ConnectInfo(address))| address),
+        &headers,
+        &state.config,
+    );
+    if !allow_anonymous_state_creation(&state, "bootstrap", source, 5, 100)
+        .await
+        .map_err(|_| ApiError::internal())?
+    {
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "too many setup requests; try again shortly",
+        });
+    }
     let expected_token = state.config.bootstrap_token.as_deref().ok_or(ApiError {
         status: StatusCode::NOT_FOUND,
         message: "bootstrap is disabled",
@@ -550,31 +597,65 @@ async fn setup_status(State(state): State<AppState>) -> Result<Json<serde_json::
 async fn login_options(
     State(state): State<AppState>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Result<Response, ApiError> {
     require_origin(&headers, &state.config)?;
-    let preauth =
-        cookie_value(&headers, PREAUTH_COOKIE).unwrap_or_else(crate::security::random_secret);
-    let browser_hash = digest(&preauth);
-    let now = unix_now();
-    let attempts: i64 = sqlx::query_scalar("INSERT INTO login_rate_limits (username_hash, window_started_at, attempts) VALUES (?, ?, 1) ON CONFLICT(username_hash) DO UPDATE SET attempts = CASE WHEN login_rate_limits.window_started_at <= ? THEN 1 ELSE login_rate_limits.attempts + 1 END, window_started_at = CASE WHEN login_rate_limits.window_started_at <= ? THEN excluded.window_started_at ELSE login_rate_limits.window_started_at END RETURNING attempts")
-        .bind(&browser_hash)
-        .bind(now)
-        .bind(now - 60)
-        .bind(now - 60)
-        .fetch_one(&state.database.pool)
+    let _slot = try_anonymous_state_slot().ok_or(ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        message: "too many sign-in requests; try again shortly",
+    })?;
+    let source = source_ip(
+        peer.map(|Extension(ConnectInfo(address))| address),
+        &headers,
+        &state.config,
+    );
+    if !allow_anonymous_state_creation(&state, "login_options", source, 12, 600)
         .await
-        .map_err(|_| ApiError::internal())?;
-    if attempts > 12 {
+        .map_err(|_| ApiError::internal())?
+    {
         return Err(ApiError {
             status: StatusCode::TOO_MANY_REQUESTS,
-            message: "too many sign-in attempts; try again shortly",
+            message: "too many sign-in requests; try again shortly",
         });
+    }
+    let supplied_preauth = cookie_value(&headers, PREAUTH_COOKIE);
+    let preauth = supplied_preauth
+        .clone()
+        .unwrap_or_else(crate::security::random_secret);
+    let browser_hash = digest(&preauth);
+    let now = unix_now();
+    if supplied_preauth.is_some() {
+        sqlx::query("DELETE FROM login_rate_limits WHERE window_started_at <= ?")
+            .bind(now - 60)
+            .execute(&state.database.pool)
+            .await
+            .map_err(|_| ApiError::internal())?;
+        let attempts: i64 = sqlx::query_scalar("INSERT INTO login_rate_limits (username_hash, window_started_at, attempts) VALUES (?, ?, 1) ON CONFLICT(username_hash) DO UPDATE SET attempts = CASE WHEN login_rate_limits.window_started_at <= ? THEN 1 ELSE login_rate_limits.attempts + 1 END, window_started_at = CASE WHEN login_rate_limits.window_started_at <= ? THEN excluded.window_started_at ELSE login_rate_limits.window_started_at END RETURNING attempts")
+            .bind(&browser_hash)
+            .bind(now)
+            .bind(now - 60)
+            .bind(now - 60)
+            .fetch_one(&state.database.pool)
+            .await
+            .map_err(|_| ApiError::internal())?;
+        if attempts > 12 {
+            return Err(ApiError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                message: "too many sign-in attempts; try again shortly",
+            });
+        }
     }
     let (ceremony_id, public_key) = state
         .webauthn
         .start_authentication(&browser_hash)
         .await
-        .map_err(|_| ApiError::unauthorized())?;
+        .map_err(|error| match error {
+            crate::webauthn::WebauthnError::Capacity => ApiError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                message: "too many active sign-in requests; try again shortly",
+            },
+            _ => ApiError::unauthorized(),
+        })?;
     let mut response =
         Json(serde_json::json!({ "ceremony_id": ceremony_id, "publicKey": public_key }))
             .into_response();
@@ -600,7 +681,7 @@ async fn login_verify(
         .finish_authentication(&input.ceremony_id, &browser_hash, input.credential)
         .await
         .map_err(|_| ApiError::unauthorized())?;
-    let session = create_session(&state.database, &user_id, false, unix_now())
+    let session = create_passkey_session(&state.database, &user_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to create browser session");
@@ -641,7 +722,14 @@ async fn register_options(
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to start passkey registration");
-            ApiError::bad_request("could not start passkey registration")
+            if matches!(error, crate::webauthn::WebauthnError::Capacity) {
+                ApiError {
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    message: "too many active authentication requests; try again shortly",
+                }
+            } else {
+                ApiError::bad_request("could not start passkey registration")
+            }
         })?;
     Ok(Json(
         serde_json::json!({ "ceremony_id": ceremony_id, "publicKey": public_key }),
@@ -860,6 +948,7 @@ mod tests {
             database,
             signing_keys,
             webauthn,
+            anonymous_request_limiter: crate::security::AnonymousRequestLimiter::default(),
         })
     }
 
@@ -1207,6 +1296,39 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn login_options_remain_limited_when_preauth_cookies_are_omitted_or_rotated() {
+        for rotate_cookie in [false, true] {
+            let config = Config::new(
+                "http://localhost:3000",
+                "sqlite::memory:".into(),
+                "127.0.0.1:0".into(),
+            )
+            .unwrap();
+            let app = test_app(config).await;
+            for attempt in 0..20 {
+                let mut request = axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/passkeys/login/options")
+                    .header(header::ORIGIN, "http://localhost:3000");
+                if rotate_cookie {
+                    request =
+                        request.header(header::COOKIE, format!("hanko_preauth=rotated-{attempt}"));
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                if attempt < 12 {
+                    assert_eq!(response.status(), StatusCode::OK);
+                } else {
+                    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                }
+            }
+        }
     }
 
     #[tokio::test]

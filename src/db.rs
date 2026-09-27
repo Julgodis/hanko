@@ -43,7 +43,7 @@ mod tests {
                 .fetch_all(&database.pool)
                 .await
                 .unwrap();
-        assert_eq!(migration_versions, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(migration_versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 
         let tables: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'passkeys', 'groups', 'oidc_clients', 'authorization_codes', 'refresh_tokens', 'webauthn_ceremonies', 'signing_keys')",
@@ -52,6 +52,22 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(tables, 8);
+
+        let security_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('refresh_token_families', 'anonymous_rate_limits')",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(security_tables, 2);
+
+        let freshness_columns: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'authenticated_at_ms') + (SELECT COUNT(*) FROM pragma_table_info('authorization_requests') WHERE name = 'created_at_ms')",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(freshness_columns, 2);
 
         let foreign_keys: Vec<(i64, i64, String, String, String, String, String, String)> =
             sqlx::query_as("PRAGMA foreign_key_list(user_groups)")

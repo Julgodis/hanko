@@ -38,12 +38,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         database,
         signing_keys,
         webauthn,
+        anonymous_request_limiter: security::AnonymousRequestLimiter::default(),
     });
 
     let address: SocketAddr = config.bind_address.parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!(%address, issuer = %config.public_origin, "identity provider listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -62,12 +67,20 @@ fn spawn_cleanup(database: Database, signing_keys: keys::SigningKeys) {
                 ("DELETE FROM webauthn_ceremonies WHERE expires_at <= ?", now),
                 ("DELETE FROM sessions WHERE expires_at <= ?", now),
                 (
+                    "DELETE FROM refresh_token_families WHERE expires_at <= ?",
+                    now,
+                ),
+                (
                     "DELETE FROM enrollment_invitations WHERE expires_at <= ? OR consumed_at IS NOT NULL",
                     now,
                 ),
                 (
                     "DELETE FROM login_rate_limits WHERE window_started_at <= ?",
                     now - 3600,
+                ),
+                (
+                    "DELETE FROM anonymous_rate_limits WHERE window_started_at <= ?",
+                    now - 60,
                 ),
             ] {
                 if let Err(error) = sqlx::query(query)
