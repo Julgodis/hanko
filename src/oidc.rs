@@ -334,6 +334,11 @@ async fn authorize_request_info(
         .await
         .map_err(|_| OAuthError::server_error())?;
     let (row, client_name) = pending_authorization(&state, &headers, &input.request_id).await?;
+    let scopes_json: String = row
+        .try_get("scopes")
+        .map_err(|_| OAuthError::server_error())?;
+    let scopes: Vec<String> =
+        serde_json::from_str(&scopes_json).map_err(|_| OAuthError::server_error())?;
     let max_age: Option<i64> = row
         .try_get("max_age")
         .map_err(|_| OAuthError::server_error())?;
@@ -347,7 +352,7 @@ async fn authorize_request_info(
         .try_get("created_at_ms")
         .map_err(|_| OAuthError::server_error())?;
     let mut requires_fresh_authentication = false;
-    if let Some(session) = session {
+    let claims = if let Some(session) = session.as_ref() {
         if session.setup_only {
             return Err(OAuthError::invalid_grant());
         }
@@ -359,6 +364,7 @@ async fn authorize_request_info(
                 "user is not allowed to access this client",
             ));
         }
+        let claims = preview_user_claims(&state, &client_id, &session.user_id, &scopes).await?;
         let authenticated_at_ms = sqlx::query_scalar::<_, i64>(
             "SELECT authenticated_at_ms FROM sessions WHERE session_hash = ?",
         )
@@ -377,15 +383,16 @@ async fn authorize_request_info(
         let authenticated_after_request = authenticated_at_ms > request_created_at_ms;
         requires_fresh_authentication = stale_by_max_age
             || (force_reauthentication && (same_prior_session || !authenticated_after_request));
+        Some(claims)
+    } else {
+        None
     }
-    let scopes_json: String = row
-        .try_get("scopes")
-        .map_err(|_| OAuthError::server_error())?;
     Ok(Json(serde_json::json!({
         "client_name": client_name,
         "redirect_uri": row.try_get::<String, _>("redirect_uri").map_err(|_| OAuthError::server_error())?,
-        "scopes": serde_json::from_str::<Vec<String>>(&scopes_json).map_err(|_| OAuthError::server_error())?,
+        "scopes": scopes,
         "requires_fresh_authentication": requires_fresh_authentication,
+        "claims": claims,
     })))
 }
 
@@ -1476,6 +1483,57 @@ async fn user_groups(state: &AppState, user_id: &str) -> Result<Vec<String>, OAu
         .fetch_all(&state.database.pool)
         .await
         .map_err(|_| OAuthError::server_error())
+}
+
+async fn preview_user_claims(
+    state: &AppState,
+    client_id: &str,
+    user_id: &str,
+    scopes: &[String],
+) -> Result<Map<String, Value>, OAuthError> {
+    let user = sqlx::query(
+        "SELECT username, display_name, expose_preferred_username, expose_name, email, attributes FROM users WHERE id = ? AND disabled_at IS NULL",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.database.pool)
+    .await
+    .map_err(|_| OAuthError::server_error())?
+    .ok_or_else(OAuthError::invalid_grant)?;
+    let username: String = user
+        .try_get("username")
+        .map_err(|_| OAuthError::server_error())?;
+    let display_name: String = user
+        .try_get("display_name")
+        .map_err(|_| OAuthError::server_error())?;
+    let expose_preferred_username: bool = user
+        .try_get("expose_preferred_username")
+        .map_err(|_| OAuthError::server_error())?;
+    let expose_name: bool = user
+        .try_get("expose_name")
+        .map_err(|_| OAuthError::server_error())?;
+    let email: Option<String> = user
+        .try_get("email")
+        .map_err(|_| OAuthError::server_error())?;
+    let attributes: String = user
+        .try_get("attributes")
+        .map_err(|_| OAuthError::server_error())?;
+    let attributes: Value =
+        serde_json::from_str(&attributes).map_err(|_| OAuthError::server_error())?;
+    let groups = user_groups(state, user_id).await?;
+
+    let mut claims = Map::new();
+    add_user_claims(
+        &mut claims,
+        scopes,
+        expose_preferred_username.then_some(username.as_str()),
+        expose_name.then_some(display_name.as_str()),
+        email.as_deref(),
+        &groups,
+    );
+    for (claim, value) in custom_claims(state, client_id, &attributes, scopes).await? {
+        claims.insert(claim, value);
+    }
+    Ok(claims)
 }
 
 async fn custom_claims(

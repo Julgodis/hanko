@@ -1,9 +1,10 @@
 import { startAuthentication } from "@simplewebauthn/browser";
 import { ArrowRight, Check, Clock3, Fingerprint, LockKeyhole, Mail, ShieldCheck, UserRound, Users } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import ClientAdmin from "./ClientAdmin";
 import FirstRun from "./FirstRun";
 import { HankoSeal, type HankoState } from "./components/HankoSeal";
+import { PrivateValue } from "./components/PrivacyMode";
 import { api, appPath, json } from "./lib/utils";
 
 type Phase = "idle" | "preparing" | "authenticating" | "success" | "error";
@@ -21,6 +22,7 @@ type AuthorizationRequest = {
   client_name: string;
   scopes: string[];
   requires_fresh_authentication: boolean;
+  claims?: Record<string, unknown> | null;
 };
 type PasskeyStart = {
   ceremony_id: string;
@@ -79,22 +81,27 @@ function App() {
   }, [enrollmentToken, requestId]);
 
   async function refreshSession() {
-    const identity = await api<Session>("/api/session");
+    const [identity, authorizationRequest] = await Promise.all([
+      api<Session>("/api/session"),
+      requestId
+        ? api<AuthorizationRequest>(`/api/authorize/request?request_id=${encodeURIComponent(requestId)}`)
+        : Promise.resolve(null),
+    ]);
     setSession(identity);
-    if (requestId) {
-      setRequest(await api<AuthorizationRequest>(
-        `/api/authorize/request?request_id=${encodeURIComponent(requestId)}`,
-      ));
-    }
+    if (requestId) setRequest(authorizationRequest);
   }
 
   async function completeSetup() {
-    const [identity, setup] = await Promise.all([
+    const [identity, setup, authorizationRequest] = await Promise.all([
       api<Session>("/api/session"),
       api<SetupStatus>("/api/setup-status"),
+      requestId
+        ? api<AuthorizationRequest>(`/api/authorize/request?request_id=${encodeURIComponent(requestId)}`)
+        : Promise.resolve(null),
     ]);
     setSession(identity);
     setSetupStatus(setup);
+    if (requestId) setRequest(authorizationRequest);
   }
 
   function requireFreshAuthorizationAuthentication() {
@@ -248,6 +255,11 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
   const [decision, setDecision] = useState<"idle" | "allowing" | "denying">("idle");
   const [error, setError] = useState("");
   const name = request.client_name || "This application";
+  const stampStyle = useMemo(() => ({
+    "--stamp-angle": `${(Math.random() * 8 - 4).toFixed(1)}deg`,
+    "--stamp-offset-x": `${(Math.random() * 10 - 5).toFixed(1)}px`,
+    "--stamp-offset-y": `${(Math.random() * 6 - 3).toFixed(1)}px`,
+  }) as CSSProperties, []);
 
   async function decide(allow: boolean) {
     setDecision(allow ? "allowing" : "denying");
@@ -278,28 +290,36 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
   }
 
   return <Scene phase="idle" className={`consent-scene consent-is-${decision}`}>
-    <div className="application-mark" role="img" aria-label={`${name} application`}>
+    <div className="application-mark" role="img" aria-label={`${name} application`} style={stampStyle}>
       <span className="application-initial" aria-hidden="true">{name.trim().charAt(0).toLocaleUpperCase() || "·"}</span>
-      <span className="approval-stamp" aria-hidden="true">
-        <HankoSeal state={decision === "allowing" ? "stamping" : "idle"} size={58} variant="clean" color={hankoColor ?? undefined} seed={hankoSeed ?? undefined} title="" />
+      <span className="approval-stamp private-value" aria-hidden="true">
+        <HankoSeal state={decision === "allowing" ? "stamping" : "idle"} size={152} color={hankoColor ?? undefined} seed={hankoSeed ?? undefined} title="" />
       </span>
     </div>
-    <Copy title={`${name} is requesting access`} text="Review what will be shared with this application." />
+    <Copy title={`${name} is requesting access`} />
     <ul className="claim-list">
       {(request.scopes ?? []).filter(scope => scope !== "openid").map(scope => {
         const claim = claimForScope(scope, name);
         const ClaimIcon = claim.icon;
+        const scopeValues = valuesForScope(scope, request.claims);
         return <li key={scope}>
           <ClaimIcon aria-hidden="true" />
           <span className="claim-copy">
             <span className="claim-label">{claim.label}</span>
+            {scopeValues.length > 0 && <span className="claim-values">{scopeValues.map(([label, value]) => <span className="claim-value" key={label}><span>{label}</span><PrivateValue>{value}</PrivateValue></span>)}</span>}
             {claim.detail && <span className="claim-detail">{claim.detail}</span>}
           </span>
         </li>;
       })}
       {(request.scopes ?? []).every(scope => scope === "openid") && <li><ShieldCheck aria-hidden="true" /><span>Confirm your identity</span></li>}
+      {customClaimValues(request.claims).length > 0 && <li>
+        <ShieldCheck aria-hidden="true" />
+        <span className="claim-copy">
+          <span className="claim-label">Additional details</span>
+          <span className="claim-values">{customClaimValues(request.claims).map(([label, value]) => <span className="claim-value" key={label}><span>{label}</span><PrivateValue>{value}</PrivateValue></span>)}</span>
+        </span>
+      </li>}
     </ul>
-    <p className="trust-note"><LockKeyhole aria-hidden="true" /> Hanko will not share your passkey with {name}.</p>
     {error && <p className="inline-error" role="alert">{error}</p>}
     <div className="consent-actions">
       <button className="secondary-action" onClick={() => decide(false)} disabled={decision !== "idle"}>
@@ -312,14 +332,46 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
   </Scene>;
 }
 
+function valuesForScope(scope: string, claims: Record<string, unknown> | null = {}): [string, string][] {
+  const claimData = claims ?? {};
+  const keys = scope === "profile"
+    ? [["name", "Name"], ["preferred_username", "Username"]] as const
+    : scope === "email"
+      ? [["email", "Email"]] as const
+      : scope === "groups"
+        ? [["groups", "Groups"]] as const
+        : [];
+  const values = keys.flatMap(([key, label]) => {
+    const value = claimData[key];
+    if (value === undefined || value === null || value === "") return [];
+    const display = Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : String(value);
+    return display ? [[label, display] as [string, string]] : [];
+  });
+  if (values.length > 0) return values;
+  if (scope === "profile") return [["Details", "No profile details are shared"]];
+  if (scope === "email") return [["Email", "No email address on file"]];
+  if (scope === "groups") return [["Groups", "No group memberships"]];
+  return [];
+}
+
+function customClaimValues(claims: Record<string, unknown> | null = {}): [string, string][] {
+  const claimData = claims ?? {};
+  const standardClaims = new Set(["name", "preferred_username", "email", "groups"]);
+  return Object.entries(claimData).flatMap(([label, value]) => {
+    if (standardClaims.has(label) || value === undefined || value === null || value === "") return [];
+    const display = Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : String(value);
+    return display ? [[label, display] as [string, string]] : [];
+  });
+}
+
 function claimForScope(scope: string, clientName: string): { label: string; icon: typeof UserRound; detail?: string } {
   switch (scope) {
     case "profile": return { label: "Your profile", icon: UserRound };
     case "email": return { label: "Your email address", icon: Mail };
     case "groups": return { label: "Your group memberships", icon: Users };
     case "offline_access": return {
-      label: "Stay signed in",
-      detail: `${clientName} can renew your access between visits without asking for your passkey each time.`,
+      label: "Keep access between visits",
+      detail: `Lets ${clientName} renew your sign-in in the background without asking for your passkey each time.`,
       icon: Clock3,
     };
     default: return { label: scope.replace(/[_-]+/g, " "), icon: ShieldCheck };
@@ -351,19 +403,19 @@ function Scene({
   </main>;
 }
 
-function Copy({ title, text }: { title: string; text: string }) {
+function Copy({ title, text }: { title: string; text?: string }) {
   return <div className="auth-copy">
     <h1>{title}</h1>
-    <p>{text}</p>
+    {text && <p>{text}</p>}
   </div>;
 }
 
 function Seal({ phase, size = "large", color, seed }: { phase: Phase; size?: "large" | "small"; color?: string | null; seed?: string | null }) {
   return <div className={`seal-stage seal-stage-${size} seal-state-${phase}`}>
     {size === "large" && <span className="seal-shadow" aria-hidden="true">
-      <HankoSeal variant="clean" size={112} title="" />
+      <HankoSeal size={112} title="" />
     </span>}
-    <HankoSeal className="hanko-seal" state={sealState(phase)} size={112} color={color ?? undefined} seed={seed ?? undefined} title={seed ? "Your personal Hanko seal" : "Hanko seal"} />
+    <HankoSeal className={`hanko-seal${seed ? " private-value" : ""}`} state={sealState(phase)} size={112} color={color ?? undefined} seed={seed ?? undefined} title={seed ? "Your personal Hanko seal" : "Hanko seal"} />
     <span className="seal-impression" aria-hidden="true" />
     <span className="ink-particle particle-one" aria-hidden="true" />
     <span className="ink-particle particle-two" aria-hidden="true" />

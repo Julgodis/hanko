@@ -2,6 +2,7 @@ import { Check, Copy, Fingerprint, KeyRound, Mail, Pencil, Plus, Shield, Users, 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
+import { PrivateValue } from "./components/PrivacyMode";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
 import { api, json } from "./lib/utils";
@@ -320,7 +321,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   }
 
   async function removeClient(client: Client) {
-    if (!window.confirm(`Remove “${client.name}”? Its settings and sign-in count will be deleted.`)) return;
+    if (!window.confirm("Remove this application? Its settings and sign-in count will be deleted.")) return;
     setDeletingClientId(client.client_id);
     setError("");
     try {
@@ -440,7 +441,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         body: json({ ceremony_id: start.ceremony_id, credential, label: passkeyLabel.trim() }),
       });
       await refreshPasskeys();
-      setPasskeyMessage(`Passkey added${passkeyLabel.trim() ? ` as “${passkeyLabel.trim()}”` : " to this account"}.`);
+      setPasskeyMessage("Passkey added to this account.");
       setPasskeyLabel("");
     } catch {
       setPasskeyError("Passkey registration wasn’t completed. You can try again.");
@@ -461,7 +462,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         body: json({ label }),
       });
       await refreshPasskeys();
-      setPasskeyMessage(`Passkey renamed to “${label}”.`);
+      setPasskeyMessage("Passkey name updated.");
     } catch (renameError) {
       setPasskeyError(errorMessage(renameError));
     } finally {
@@ -492,7 +493,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       await refreshPasskeys();
       setRemoveTarget(null);
       setRemovalConfirmation("");
-      setPasskeyMessage(`Passkey “${removeTarget.label}” removed.`);
+      setPasskeyMessage("Passkey removed.");
     } catch (removeError) {
       setPasskeyError(errorMessage(removeError));
       try { await refreshPasskeys(); } catch { /* Keep the original action error visible. */ }
@@ -604,14 +605,14 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         : <div className="admin-table-scroll"><table className="admin-table client-table">
           <thead><tr><th scope="col">Application</th><th scope="col">Client ID</th><th scope="col">Type</th><th scope="col">Users</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
           <tbody>{clients.map((client) => <tr key={client.client_id}>
-            <td><strong>{client.name}</strong><details className="table-details"><summary>Settings</summary>
-              <p>Scopes: {client.scopes.join(", ")}</p>
-              <p>{client.allowed_groups.length ? `Allowed groups: ${client.allowed_groups.join(", ")}` : "Available to all users"}</p>
-              <strong>Callback URLs</strong><ul>{client.redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul>
-              {client.post_logout_redirect_uris.length > 0 && <><strong>Post-logout URLs</strong><ul>{client.post_logout_redirect_uris.map((uri) => <li key={uri}><code>{uri}</code></li>)}</ul></>}
-              {client.claims.length > 0 && <><strong>Custom claims</strong><ul>{client.claims.map((claim) => <li key={claim.claim_name}><code>{claim.claim_name}</code> from <code>{claim.user_attribute_path}</code>{claim.required_scope ? ` · ${claim.required_scope}` : ""}</li>)}</ul></>}
+            <td><strong><PrivateValue>{client.name}</PrivateValue></strong><details className="table-details"><summary>Settings</summary>
+              <p>Scopes: <PrivateValue>{client.scopes.join(", ")}</PrivateValue></p>
+              <p><PrivateValue>{client.allowed_groups.length ? `Allowed groups: ${client.allowed_groups.join(", ")}` : "Available to all users"}</PrivateValue></p>
+              <strong>Callback URLs</strong><ul>{client.redirect_uris.map((uri) => <li key={uri}><code><PrivateValue>{uri}</PrivateValue></code></li>)}</ul>
+              {client.post_logout_redirect_uris.length > 0 && <><strong>Post-logout URLs</strong><ul>{client.post_logout_redirect_uris.map((uri) => <li key={uri}><code><PrivateValue>{uri}</PrivateValue></code></li>)}</ul></>}
+              {client.claims.length > 0 && <><strong>Custom claims</strong><ul>{client.claims.map((claim) => <li key={claim.claim_name}><code><PrivateValue>{claim.claim_name}</PrivateValue></code> from <code><PrivateValue>{claim.user_attribute_path}</PrivateValue></code>{claim.required_scope ? ` · ${claim.required_scope}` : ""}</li>)}</ul></>}
             </details></td>
-            <td><code className="table-id">{client.client_id}</code></td>
+            <td><code className="table-id"><PrivateValue>{client.client_id}</PrivateValue></code></td>
             <td>{client.client_type === "public" ? "Public" : "Confidential"}<small>{client.token_endpoint_auth_method}</small></td>
             <td>{client.user_count ?? 0}</td>
             <td><span className={client.enabled ? "client-status" : "client-status disabled"}>{client.enabled ? "Enabled" : "Disabled"}</span></td>
@@ -655,7 +656,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
         </fieldset>
         <fieldset className="admin-options">
           <legend>Allowed groups <em>Optional</em></legend>
-          {groups.length === 0 ? <p className="admin-hint">No groups exist yet. This client can be used by any user.</p> : <><p className="admin-hint">Leave all unchecked to allow any user.</p><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check admin-check-compact" key={group.id}><input type="checkbox" checked={allowedGroups.includes(group.name)} onChange={() => toggleGroup(group.name)} /><span><strong>{group.display_name}</strong><small>{group.name} · {group.member_count} {group.member_count === 1 ? "member" : "members"}</small></span></label>)}</div></>}
+          {groups.length === 0 ? <p className="admin-hint">No groups exist yet. This client can be used by any user.</p> : <><p className="admin-hint">Leave all unchecked to allow any user.</p><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check admin-check-compact" key={group.id}><input type="checkbox" checked={allowedGroups.includes(group.name)} onChange={() => toggleGroup(group.name)} /><span><strong><PrivateValue>{group.display_name}</PrivateValue></strong><small><PrivateValue>{group.name} · {group.member_count} {group.member_count === 1 ? "member" : "members"}</PrivateValue></small></span></label>)}</div></>}
         </fieldset>
         <fieldset className="admin-options admin-claims">
           <legend>Custom claims <em>Optional</em></legend><p className="admin-hint">Map a user attribute to an additional token claim.</p>
@@ -679,7 +680,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
               {users.length === 0 ? <p className="admin-hint">No accounts found.</p> : <div className="admin-table-scroll"><table className="admin-table user-table">
                 <thead><tr><th scope="col">User</th><th scope="col">Username</th><th scope="col">Email</th><th scope="col">Groups</th><th scope="col">Invite label</th><th scope="col">Status</th></tr></thead>
                 <tbody>{users.map((user) => <tr key={user.id}>
-                  <td><strong>{user.display_name || user.username}</strong></td><td><code className="table-id">{user.username}</code></td><td>{user.email || <span className="table-muted">No email</span>}</td><td>{user.groups.length ? user.groups.join(", ") : <span className="table-muted">—</span>}</td><td>{user.invitation_label || <span className="table-muted">—</span>}</td>
+                  <td><strong><PrivateValue>{user.display_name || user.username}</PrivateValue></strong></td><td><code className="table-id"><PrivateValue>{user.username}</PrivateValue></code></td><td>{user.email ? <PrivateValue>{user.email}</PrivateValue> : <span className="table-muted">No email</span>}</td><td>{user.groups.length ? <PrivateValue>{user.groups.join(", ")}</PrivateValue> : <span className="table-muted">—</span>}</td><td>{user.invitation_label ? <PrivateValue>{user.invitation_label}</PrivateValue> : <span className="table-muted">—</span>}</td>
                   <td><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></td>
                 </tr>)}</tbody>
               </table></div>}
@@ -687,20 +688,20 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
             <section className="registered-clients admin-records"><h2>Invite links <span>{invitations.length}</span></h2>
               {invitations.length === 0 ? <p className="admin-hint">No invite links yet.</p> : invitations.map((invitation) => {
                 const status = invitationStatus(invitation);
-                return <article className="registered-client" key={invitation.id}><div className="registered-client-title"><h3>{invitation.label}</h3><span className={`client-status${status === "Active" ? "" : " disabled"}`}>{status}</span></div><p>{invitation.use_count} of {invitation.max_uses} users · Expires {new Date(invitation.expires_at * 1000).toLocaleString()}{invitation.email ? ` · ${invitation.email}` : ""}</p>{status === "Active" && <button className="invitation-revoke" type="button" onClick={() => revokeInvitation(invitation.id)} disabled={adminActionBusy}>Revoke link</button>}</article>;
+                return <article className="registered-client" key={invitation.id}><div className="registered-client-title"><h3><PrivateValue>{invitation.label}</PrivateValue></h3><span className={`client-status${status === "Active" ? "" : " disabled"}`}>{status}</span></div><p><PrivateValue>{invitation.use_count} of {invitation.max_uses} users · Expires {new Date(invitation.expires_at * 1000).toLocaleString()}{invitation.email ? ` · ${invitation.email}` : ""}</PrivateValue></p>{status === "Active" && <button className="invitation-revoke" type="button" onClick={() => revokeInvitation(invitation.id)} disabled={adminActionBusy}>Revoke link</button>}</article>;
               })}
             </section>
           </>}
 
           {activeTab === "users" && isAdmin && userFormOpen && <>
-            {createdInvitation ? <section className="created-client" role="status"><div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Invite link ready</h2><p>Anyone with this link can join until it expires or reaches its user limit.</p></div></div><Credential label={`Invite link · ${createdInvitation.label}`} value={createdInvitation.enrollment_url} copied={copied === "invitation"} onCopy={() => copyValue("invitation", createdInvitation.enrollment_url)} />{createdInvitation.email && <a className="secondary-action invitation-email-action" href={invitationEmailHref(createdInvitation)}><Mail aria-hidden="true" />Email this invite</a>}<p className="created-footnote">Expires {new Date(createdInvitation.expires_at * 1000).toLocaleString()}. The link is shown only now, so copy it before leaving this page.</p><button className="client-list-action create-another-invite" type="button" onClick={openCreateUser}><Plus aria-hidden="true" /> Create another invite</button></section> : <form className="client-form admin-create-form user-create-page" onSubmit={createInvitation}>
+      {createdInvitation ? <section className="created-client" role="status"><div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Invite link ready</h2><p>Anyone with this link can join until it expires or reaches its user limit.</p></div></div><Credential label={<>Invite link · <PrivateValue>{createdInvitation.label}</PrivateValue></>} value={createdInvitation.enrollment_url} copied={copied === "invitation"} onCopy={() => copyValue("invitation", createdInvitation.enrollment_url)} />{createdInvitation.email && <a className="secondary-action invitation-email-action" href={invitationEmailHref(createdInvitation)}><Mail aria-hidden="true" />Email this invite</a>}<p className="created-footnote">Expires {new Date(createdInvitation.expires_at * 1000).toLocaleString()}. The link is shown only now, so copy it before leaving this page.</p><button className="client-list-action create-another-invite" type="button" onClick={openCreateUser}><Plus aria-hidden="true" /> Create another invite</button></section> : <form className="client-form admin-create-form user-create-page" onSubmit={createInvitation}>
               <label className="admin-field"><span>Admin-only user label</span><input autoComplete="off" maxLength={80} value={invitationLabel} onChange={(event) => setInvitationLabel(event.target.value)} placeholder="Community event" required /><small>This label appears only in the administrator’s user list.</small></label>
               <label className="admin-field"><span>Email recipient <em>Optional</em></span><input type="email" autoComplete="email" maxLength={320} value={invitationEmail} onChange={(event) => { setInvitationEmail(event.target.value); if (event.target.value.trim()) setInvitationMaxUses("1"); else setInvitationMaxUses("10"); }} placeholder="person@example.com" /><small>Add an address to make this a one-use email invitation. You can open a prefilled email after creating it.</small></label>
               <div className="invitation-settings">
                 <label className="admin-field"><span>User limit</span><input type="number" min={1} max={500} value={invitationMaxUses} onChange={(event) => setInvitationMaxUses(event.target.value)} disabled={Boolean(invitationEmail.trim())} required /><small>{invitationEmail.trim() ? "Email invitations are limited to one user." : "How many accounts can use this link?"}</small></label>
                 <div className="invitation-expiry-fields"><label className="admin-field"><span>Link expires in</span><input type="number" min={1} max={Math.floor((10 * 365 * 24 * 60 * 60) / EXPIRY_UNIT_SECONDS[invitationExpiryUnit])} value={invitationExpiry} onChange={(event) => setInvitationExpiry(event.target.value)} required /></label><label className="admin-field"><span>Unit</span><select value={invitationExpiryUnit} onChange={(event) => setInvitationExpiryUnit(event.target.value as ExpiryUnit)}><option value="seconds">Seconds</option><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select><small>Up to 10 years.</small></label></div>
               </div>
-              {groups.length > 0 && <fieldset className="admin-options"><legend>Groups <em>Optional</em></legend><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check" key={group.id}><input type="checkbox" checked={userGroups.includes(group.name)} onChange={() => setUserGroups((current) => current.includes(group.name) ? current.filter((name) => name !== group.name) : [...current, group.name])} /><span><strong>{group.display_name}</strong></span></label>)}</div></fieldset>}
+              {groups.length > 0 && <fieldset className="admin-options"><legend>Groups <em>Optional</em></legend><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check" key={group.id}><input type="checkbox" checked={userGroups.includes(group.name)} onChange={() => setUserGroups((current) => current.includes(group.name) ? current.filter((name) => name !== group.name) : [...current, group.name])} /><span><strong><PrivateValue>{group.display_name}</PrivateValue></strong></span></label>)}</div></fieldset>}
               {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
               <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !invitationLabel.trim() || (!invitationEmail.trim() && (!Number(invitationMaxUses) || Number(invitationMaxUses) > 500))}>{adminActionBusy ? "Creating link…" : "Create invite link"}</button><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={closeUserForm}>Cancel</button></div>
             </form>}
@@ -713,17 +714,17 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
               {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
               <button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !groupName.trim() || !groupDisplayName.trim()}>{adminActionBusy ? "Creating…" : "Create group"}</button>
             </form>
-            <section className="registered-clients admin-records"><h2>Groups <span>{groups.length}</span></h2>{groups.length === 0 ? <p className="admin-hint">No groups have been created.</p> : groups.map((group) => <article className="registered-client" key={group.id}><div className="registered-client-title"><h3>{group.display_name}</h3><span className="client-status">{group.member_count} {group.member_count === 1 ? "member" : "members"}</span></div><code className="registered-client-id">{group.name}</code></article>)}</section>
+            <section className="registered-clients admin-records"><h2>Groups <span>{groups.length}</span></h2>{groups.length === 0 ? <p className="admin-hint">No groups have been created.</p> : groups.map((group) => <article className="registered-client" key={group.id}><div className="registered-client-title"><h3><PrivateValue>{group.display_name}</PrivateValue></h3><span className="client-status"><PrivateValue>{group.member_count} {group.member_count === 1 ? "member" : "members"}</PrivateValue></span></div><code className="registered-client-id"><PrivateValue>{group.name}</PrivateValue></code></article>)}</section>
           </>}
 
           {activeTab === "keys" && isAdmin && <>
             <div className="key-management"><p className="admin-hint">New tokens use the active key. Previous public keys remain available to verify tokens already issued.</p><button className="secondary-action" type="button" onClick={rotateSigningKey} disabled={adminActionBusy}><Shield aria-hidden="true" />{adminActionBusy ? "Rotating…" : "Rotate signing key"}</button></div>
             {adminActionMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{adminActionMessage}</p>}
-            <section className="registered-clients admin-records"><h2>Keys <span>{signingKeys.length}</span></h2>{signingKeys.length === 0 ? <p className="admin-hint">No signing keys found.</p> : signingKeys.map((key) => <article className="registered-client" key={key.kid}><div className="registered-client-title"><h3>{key.algorithm}</h3><span className={`client-status${key.status === "active" ? "" : " disabled"}`}>{key.status}</span></div><code className="registered-client-id">{key.kid}</code><p>Created {new Date(key.created_at * 1000).toLocaleString()}{key.retire_after ? ` · Retires ${new Date(key.retire_after * 1000).toLocaleString()}` : ""}</p></article>)}</section>
+            <section className="registered-clients admin-records"><h2>Keys <span>{signingKeys.length}</span></h2>{signingKeys.length === 0 ? <p className="admin-hint">No signing keys found.</p> : signingKeys.map((key) => <article className="registered-client" key={key.kid}><div className="registered-client-title"><h3>{key.algorithm}</h3><span className={`client-status${key.status === "active" ? "" : " disabled"}`}>{key.status}</span></div><code className="registered-client-id"><PrivateValue>{key.kid}</PrivateValue></code><p><PrivateValue>Created {new Date(key.created_at * 1000).toLocaleString()}{key.retire_after ? ` · Retires ${new Date(key.retire_after * 1000).toLocaleString()}` : ""}</PrivateValue></p></article>)}</section>
           </>}
 
           {activeTab === "hanko" && <section className="account-hanko">
-            <div className="account-hanko-preview"><HankoSeal size={192} color={hankoColor} seed={hankoSeed} title="Your personal Hanko preview" /></div>
+            <div className="account-hanko-preview private-value"><HankoSeal size={192} color={hankoColor} seed={hankoSeed} title="Your personal Hanko preview" /></div>
             <SealCustomizer color={hankoColor} seed={hankoSeed} onColorChange={setHankoColor} onSeedChange={setHankoSeed} />
             <div className="account-hanko-save"><button className="secondary-action" type="button" onClick={saveHanko} disabled={savingHanko}>{savingHanko ? "Saving…" : "Save your Hanko"}</button>{hankoMessage && <p role="status">{hankoMessage}</p>}</div>
           </section>}
@@ -735,7 +736,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
             <section className="passkey-list" aria-labelledby="passkey-list-title">
               <h3 id="passkey-list-title">Registered devices <span>{passkeys.length}</span></h3>
               {passkeysLoading ? <p className="admin-hint">Loading passkeys…</p> : passkeys.length === 0 ? <p className="admin-hint">No passkeys are registered.</p> : passkeys.map((passkey) => <article className="passkey-record" key={passkey.id}>
-                <div className="passkey-record-heading"><h4>{passkey.label}</h4><p>Added {new Date(passkey.created_at * 1000).toLocaleDateString()}{passkey.last_used_at ? ` · Last used ${new Date(passkey.last_used_at * 1000).toLocaleDateString()}` : " · Not used yet"}</p></div>
+                <div className="passkey-record-heading"><h4><PrivateValue>{passkey.label}</PrivateValue></h4><p><PrivateValue>Added {new Date(passkey.created_at * 1000).toLocaleDateString()}{passkey.last_used_at ? ` · Last used ${new Date(passkey.last_used_at * 1000).toLocaleDateString()}` : " · Not used yet"}</PrivateValue></p></div>
                 <form className="passkey-rename-form" onSubmit={(event) => renamePasskey(event, passkey)}>
                   <label className="admin-field"><span>Device name</span><input value={passkeyDrafts[passkey.id] ?? passkey.label} onChange={(event) => setPasskeyDrafts((current) => ({ ...current, [passkey.id]: event.target.value }))} maxLength={100} required /></label>
                   <button className="secondary-action passkey-row-action" type="submit" disabled={Boolean(passkeyActionId) || (passkeyDrafts[passkey.id] ?? passkey.label).trim() === passkey.label}>{passkeyActionId === passkey.id ? "Saving…" : "Rename"}</button>
@@ -745,7 +746,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
               </article>)}
             </section>
             {removeTarget && <form className="passkey-remove-confirmation" onSubmit={removePasskey}>
-              <div><h3>Remove “{removeTarget.label}”?</h3><p>This permanently removes the passkey from your account. Type <strong>REMOVE</strong> to confirm.</p></div>
+              <div><h3>Remove “<PrivateValue>{removeTarget.label}</PrivateValue>”?</h3><p>This permanently removes the passkey from your account. Type <strong>REMOVE</strong> to confirm.</p></div>
               <label className="admin-field"><span>Confirmation</span><input autoComplete="off" autoFocus value={removalConfirmation} onChange={(event) => setRemovalConfirmation(event.target.value)} placeholder="Type REMOVE" /></label>
               <div className="passkey-remove-actions"><button className="passkey-remove-button" type="submit" disabled={passkeys.length <= 1 || removalConfirmation !== "REMOVE" || Boolean(passkeyActionId)}>{passkeyActionId === removeTarget.id ? "Removing…" : "Remove passkey"}</button><button className="secondary-action passkey-row-action" type="button" disabled={Boolean(passkeyActionId)} onClick={() => { setRemoveTarget(null); setRemovalConfirmation(""); }}>Cancel</button></div>
             </form>}
@@ -765,7 +766,7 @@ function scopeDescription(scope: (typeof AVAILABLE_SCOPES)[number]) {
   }
 }
 
-function Credential({ label, value, copied, onCopy }: { label: string; value: string; copied: boolean; onCopy: () => void }) {
+function Credential({ label, value, copied, onCopy }: { label: ReactNode; value: string; copied: boolean; onCopy: () => void }) {
   return <div className="credential-row">
     <label><span>{label}</span><input readOnly type="text" value={value} onFocus={(event) => event.currentTarget.select()} /></label>
     <button type="button" className="credential-copy" onClick={onCopy} aria-label={`Copy ${label}`}>{copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}</button>

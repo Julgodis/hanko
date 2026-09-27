@@ -10,11 +10,8 @@ export type HankoState =
   | "success"
   | "error";
 
-export type HankoVariant = "clean" | "inked";
-
 type Props = {
   state?: HankoState;
-  variant?: HankoVariant;
   size?: number;
   color?: string;
   seed?: string;
@@ -22,33 +19,8 @@ type Props = {
   title?: string;
 };
 
-const wear = [
-  [206, 155, 14, 5, -8],
-  [346, 129, 9, 4, 0],
-  [692, 132, 12, 4, 7],
-  [858, 211, 5, 14, -12],
-  [892, 452, 5, 9, 0],
-  [874, 722, 8, 4, 18],
-  [721, 889, 13, 5, 0],
-  [490, 900, 8, 3, 0],
-  [251, 881, 12, 5, -15],
-  [132, 677, 4, 11, 0],
-  [139, 365, 5, 8, 0],
-  [304, 307, 8, 3, 0],
-  [405, 437, 5, 10, 0],
-  [616, 488, 6, 4, 0],
-  [741, 322, 7, 3, 0],
-  [287, 545, 4, 9, 0],
-  [735, 590, 4, 11, 0],
-  [407, 734, 9, 3, 0],
-  [616, 667, 5, 8, 0],
-  [505, 382, 5, 3, 0],
-  [524, 704, 4, 3, 0],
-] as const;
-
 export function HankoSeal({
   state = "idle",
-  variant = "inked",
   size = 112,
   color,
   seed,
@@ -59,7 +31,6 @@ export function HankoSeal({
   const gradient = color?.match(/^linear\((#[\da-f]{6}),(#[\da-f]{6})\)$/i);
   const inkColor = gradient?.[1] ?? color ?? "#d64135";
 
-  const maskId = `${id}-mask`;
   const gradientId = `${id}-ink-gradient`;
   const formId = `${id}-form`;
   const pillarId = `${id}-pillar`;
@@ -114,38 +85,9 @@ export function HankoSeal({
             rx="24"
           />
 
-          {variant === "inked" && (
-            <mask id={maskId}>
-              <rect width="1024" height="1024" fill="white" />
-
-              <g fill="black">
-                {wear.map(([cx, cy, rx, ry, rotate], i) => (
-                  <ellipse
-                    key={i}
-                    cx={cx}
-                    cy={cy}
-                    rx={rx}
-                    ry={ry}
-                    transform={
-                      rotate
-                        ? `rotate(${rotate} ${cx} ${cy})`
-                        : undefined
-                    }
-                  />
-                ))}
-              </g>
-            </mask>
-          )}
         </defs>
 
-        <g
-          className="hanko-ink"
-          mask={
-            variant === "inked"
-              ? `url(#${maskId})`
-              : undefined
-          }
-        >
+        <g className="hanko-ink">
           <g
             fill="none"
             stroke={gradient ? `url(#${gradientId})` : "currentColor"}
