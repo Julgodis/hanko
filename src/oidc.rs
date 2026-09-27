@@ -386,7 +386,7 @@ async fn authorize_request_info(
         Some(claims)
     } else {
         None
-    }
+    };
     Ok(Json(serde_json::json!({
         "client_name": client_name,
         "redirect_uri": row.try_get::<String, _>("redirect_uri").map_err(|_| OAuthError::server_error())?,

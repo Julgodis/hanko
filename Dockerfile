@@ -12,7 +12,7 @@ RUN npm run build
 
 # This stage follows the requested target platform. The publishing workflow
 # builds for the native architecture of its GitHub-hosted runner.
-FROM rust:1.88-bookworm AS rust-build
+FROM rust:1.98.1-bookworm AS rust-build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential pkg-config libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
