@@ -49,6 +49,8 @@ Sign in with an administrator passkey and open `{PUBLIC_ORIGIN}/admin/clients` t
 
 Authorization requires `response_type=code`, `scope` containing `openid`, nonempty `state`, and a `S256` challenge. The OIDC `nonce` parameter is optional. Users review an authorization request before Hanko redirects to the application.
 
+Clients can enable the `offline_access` scope to receive a rotating refresh token. Refresh tokens are stored only as hashes, are bound to their client and user, and expire after 30 days of inactivity.
+
 ## Checks
 
 ```sh

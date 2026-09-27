@@ -6,7 +6,7 @@ import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
 import { api, json } from "./lib/utils";
 
-const AVAILABLE_SCOPES = ["profile", "email", "groups"] as const;
+const AVAILABLE_SCOPES = ["profile", "email", "groups", "offline_access"] as const;
 const EXPIRY_UNIT_SECONDS = { seconds: 1, minutes: 60, hours: 60 * 60, days: 24 * 60 * 60, years: 365 * 24 * 60 * 60 } as const;
 type ExpiryUnit = keyof typeof EXPIRY_UNIT_SECONDS;
 
@@ -698,6 +698,7 @@ function scopeDescription(scope: (typeof AVAILABLE_SCOPES)[number]) {
     case "profile": return "Name and profile details";
     case "email": return "Email address";
     case "groups": return "Group memberships";
+    case "offline_access": return "Issue a refresh token for ongoing access";
   }
 }
 
