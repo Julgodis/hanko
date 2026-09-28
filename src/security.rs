@@ -233,6 +233,9 @@ pub struct SessionIdentity {
     pub display_name: String,
     pub oidc_username: Option<String>,
     pub oidc_name: Option<String>,
+    pub oidc_picture: Option<String>,
+    pub oidc_phone: Option<String>,
+    pub oidc_address: Option<serde_json::Value>,
     pub hanko_color: String,
     pub hanko_seed: String,
     pub is_admin: bool,
@@ -441,16 +444,41 @@ pub async fn load_identity(
         return Ok(None);
     };
     let row = sqlx::query(
-        "SELECT username, display_name, CASE WHEN expose_preferred_username = 1 THEN username ELSE NULL END AS oidc_username, CASE WHEN expose_name = 1 THEN display_name ELSE NULL END AS oidc_name, hanko_color, hanko_seed FROM users WHERE id = ?",
+        "SELECT username, display_name, CASE WHEN expose_preferred_username = 1 THEN username ELSE NULL END AS oidc_username, CASE WHEN expose_name = 1 THEN display_name ELSE NULL END AS oidc_name, attributes, hanko_color, hanko_seed FROM users WHERE id = ?",
     )
     .bind(&session.user_id)
     .fetch_one(&database.pool)
     .await?;
+    let attributes: String = row.try_get("attributes")?;
+    let attributes = serde_json::from_str::<serde_json::Value>(&attributes).ok();
+    let oidc_picture = attributes
+        .as_ref()
+        .and_then(|attributes| attributes.get("picture"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let oidc_phone = attributes
+        .as_ref()
+        .and_then(|attributes| attributes.get("phone_number"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let oidc_address = attributes
+        .as_ref()
+        .and_then(|attributes| attributes.get("address"))
+        .filter(|address| {
+            address.is_object()
+                && !address
+                    .as_object()
+                    .is_some_and(|address| address.is_empty())
+        })
+        .cloned();
     Ok(Some(SessionIdentity {
         username: row.try_get("username")?,
         display_name: row.try_get("display_name")?,
         oidc_username: row.try_get("oidc_username")?,
         oidc_name: row.try_get("oidc_name")?,
+        oidc_picture,
+        oidc_phone,
+        oidc_address,
         hanko_color: row.try_get("hanko_color")?,
         hanko_seed: row.try_get("hanko_seed")?,
         is_admin: session.is_admin,

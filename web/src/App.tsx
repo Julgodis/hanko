@@ -1,5 +1,5 @@
 import { startAuthentication } from "@simplewebauthn/browser";
-import { ArrowRight, Check, Clock3, Fingerprint, LockKeyhole, Mail, ShieldCheck, UserRound, Users } from "lucide-react";
+import { ArrowRight, Check, Clock3, Fingerprint, LockKeyhole, Mail, MapPin, Phone, ShieldCheck, UserRound, Users, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import ClientAdmin from "./ClientAdmin";
 import FirstRun from "./FirstRun";
@@ -16,6 +16,9 @@ type Session = {
   hanko_seed?: string | null;
   oidc_username?: string | null;
   oidc_name?: string | null;
+  oidc_picture?: string | null;
+  oidc_phone?: string | null;
+  oidc_address?: { street_address?: string; locality?: string; region?: string; postal_code?: string; country?: string } | null;
 };
 type SetupStatus = { initialized: boolean; bootstrap_enabled: boolean };
 type AuthorizationRequest = {
@@ -188,7 +191,7 @@ function App() {
       invitationToken={enrollmentToken}
       initialColor={session?.hanko_color ?? undefined}
       initialSeed={session?.hanko_seed ?? undefined}
-      initialProfile={{ username: session?.oidc_username ?? "", displayName: session?.oidc_name ?? "" }}
+      initialProfile={{ username: session?.oidc_username ?? "", displayName: session?.oidc_name ?? "", pictureUrl: session?.oidc_picture ?? "", phoneNumber: session?.oidc_phone ?? "", address: session?.oidc_address ?? undefined }}
       onComplete={completeSetup}
     />;
   }
@@ -423,13 +426,33 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
 
 function valuesForScope(scope: string, claims: Record<string, unknown> | null = {}): [string, string][] {
   const claimData = claims ?? {};
+  if (scope === "address") {
+    const address = claimData.address;
+    if (address && typeof address === "object" && !Array.isArray(address)) {
+      const fields = address as Record<string, unknown>;
+      if (typeof fields.formatted === "string" && fields.formatted) return [["Address", fields.formatted]];
+      const labels: [string, string][] = [
+        ["Street address", "street_address"],
+        ["City / locality", "locality"],
+        ["Region / state", "region"],
+        ["Postal code", "postal_code"],
+        ["Country", "country"],
+      ].flatMap(([label, key]) => typeof fields[key] === "string" && fields[key] ? [[label, fields[key] as string] as [string, string]] : []);
+      if (labels.length) return labels;
+    }
+    return [["Address", "No postal address is set"]];
+  }
   const keys = scope === "profile"
-    ? [["name", "Name"], ["preferred_username", "Username"]] as const
-    : scope === "email"
-      ? [["email", "Email"]] as const
-      : scope === "groups"
-        ? [["groups", "Groups"]] as const
-        : [];
+    ? [["name", "Name"], ["preferred_username", "Username"], ["picture", "Picture"]] as const
+      : scope === "email"
+        ? [["email", "Email"]] as const
+        : scope === "phone"
+          ? [["phone_number", "Phone number"]] as const
+      : scope === "picture"
+        ? [["picture", "Picture"]] as const
+        : scope === "groups"
+          ? [["groups", "Groups"]] as const
+          : [];
   const values = keys.flatMap(([key, label]) => {
     const value = claimData[key];
     if (value === undefined || value === null || value === "") return [];
@@ -439,13 +462,15 @@ function valuesForScope(scope: string, claims: Record<string, unknown> | null = 
   if (values.length > 0) return values;
   if (scope === "profile") return [["Details", "No profile details are shared"]];
   if (scope === "email") return [["Email", "No email address on file"]];
+  if (scope === "phone") return [["Phone number", "No phone number is set"]];
+  if (scope === "picture") return [["Picture", "No profile picture is set"]];
   if (scope === "groups") return [["Groups", "No group memberships"]];
   return [];
 }
 
 function customClaimValues(claims: Record<string, unknown> | null = {}): [string, string][] {
   const claimData = claims ?? {};
-  const standardClaims = new Set(["name", "preferred_username", "email", "groups"]);
+  const standardClaims = new Set(["name", "preferred_username", "email", "email_verified", "picture", "groups", "address", "phone_number", "phone_number_verified"]);
   return Object.entries(claimData).flatMap(([label, value]) => {
     if (standardClaims.has(label) || value === undefined || value === null || value === "") return [];
     const display = Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : String(value);
@@ -453,10 +478,13 @@ function customClaimValues(claims: Record<string, unknown> | null = {}): [string
   });
 }
 
-function claimForScope(scope: string, clientName: string): { label: string; icon: typeof UserRound; detail?: string } {
+function claimForScope(scope: string, clientName: string): { label: string; icon: LucideIcon; detail?: string } {
   switch (scope) {
     case "profile": return { label: "Your profile", icon: UserRound };
+    case "picture": return { label: "Your profile picture", detail: `Shares your custom picture or generated Hanko image with ${clientName}.`, icon: UserRound };
     case "email": return { label: "Your email address", icon: Mail };
+    case "address": return { label: "Your postal address", detail: `Shares your saved address with ${clientName}.`, icon: MapPin };
+    case "phone": return { label: "Your phone number", detail: `Shares your saved phone number with ${clientName}. Hanko has not verified it.`, icon: Phone };
     case "groups": return { label: "Your group memberships", icon: Users };
     case "offline_access": return {
       label: "Keep access between visits",

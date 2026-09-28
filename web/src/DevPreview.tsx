@@ -119,15 +119,21 @@ function installPreviewApi() {
       hanko_seed: "hanko",
       oidc_username: screen === "join-invite" ? null : "sana.lee",
       oidc_name: screen === "join-invite" ? null : "Sana Lee",
+      oidc_picture: screen === "join-invite" ? null : "https://images.example.com/sana-lee.jpg",
+      oidc_phone: screen === "join-invite" ? null : "+1 555 123 4567",
+      oidc_address: screen === "join-invite" ? null : { street_address: "42 Cedar Lane, Apartment 5", locality: "Portland", region: "Oregon", postal_code: "97205", country: "United States" },
     });
     if (url.pathname === "/api/setup-status") return jsonResponse({ initialized: screen !== "setup", bootstrap_enabled: true });
     if (url.pathname === "/api/authorize/request") return jsonResponse({
       client_name: "Test 2",
-      scopes: ["openid", "profile", "email", "groups", "offline_access"],
+      scopes: ["openid", "profile", "email", "address", "phone", "groups", "offline_access"],
       claims: {
         name: "Sana Lee",
         preferred_username: "sana.lee",
         email: "sana.lee@example.com",
+        picture: "https://images.example.com/sana-lee.jpg",
+        address: { street_address: "42 Cedar Lane, Apartment 5", locality: "Portland", region: "Oregon", postal_code: "97205", country: "United States" },
+        phone_number: "+1 555 123 4567",
         groups: ["media-users", "staff"],
         role: ["media-user"],
         department: "Product design",
@@ -208,6 +214,10 @@ function installPreviewApi() {
     }
     if (url.pathname === "/api/admin/signing-keys" && method === "GET") return jsonResponse(signingKeys);
     if (url.pathname === "/api/admin/signing-keys" && method === "POST") return jsonResponse({});
+    if (url.pathname === "/api/account/profile" && method === "PUT") {
+      const payload = JSON.parse(String(init?.body ?? "{}"));
+      return jsonResponse({ username: payload.username, display_name: payload.display_name, picture: payload.picture || null, phone_number: payload.phone_number || null, address: payload.address });
+    }
     if (url.pathname === "/api/passkeys") return jsonResponse(previewPasskeys);
     return jsonResponse({});
   };

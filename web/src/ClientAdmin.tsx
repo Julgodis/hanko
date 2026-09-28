@@ -7,7 +7,7 @@ import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
 import { api, defaultPasskeyLabel, json } from "./lib/utils";
 
-const AVAILABLE_SCOPES = ["profile", "email", "groups", "offline_access"] as const;
+const AVAILABLE_SCOPES = ["profile", "email", "address", "phone", "picture", "groups", "offline_access"] as const;
 const EXPIRY_UNIT_SECONDS = { seconds: 1, minutes: 60, hours: 60 * 60, days: 24 * 60 * 60, years: 365 * 24 * 60 * 60 } as const;
 type ExpiryUnit = keyof typeof EXPIRY_UNIT_SECONDS;
 
@@ -33,6 +33,8 @@ type Invitation = { id: string; label: string; email: string | null; max_uses: n
 type CreatedInvitation = { id: string; label: string; email: string | null; enrollment_url: string; expires_at: number };
 type SigningKey = { kid: string; algorithm: string; status: string; created_at: number; retire_after: number | null };
 type AccountPasskey = { id: string; label: string; created_at: number; last_used_at: number | null };
+type OidcAddress = { street_address: string; locality: string; region: string; postal_code: string; country: string };
+const EMPTY_OIDC_ADDRESS: OidcAddress = { street_address: "", locality: "", region: "", postal_code: "", country: "" };
 type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys";
 type ClaimDraft = { claim_name: string; user_attribute_path: string; required_scope: string };
 type GroupClaimDraft = { claim_name: string; claim_value: string; required_scope: Scope };
@@ -126,6 +128,13 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [hankoSeed, setHankoSeed] = useState("hanko");
   const [savingHanko, setSavingHanko] = useState(false);
   const [hankoMessage, setHankoMessage] = useState("");
+  const [oidcUsername, setOidcUsername] = useState("");
+  const [oidcName, setOidcName] = useState("");
+  const [oidcPicture, setOidcPicture] = useState("");
+  const [oidcPhone, setOidcPhone] = useState("");
+  const [oidcAddress, setOidcAddress] = useState<OidcAddress>(EMPTY_OIDC_ADDRESS);
+  const [savingOidcProfile, setSavingOidcProfile] = useState(false);
+  const [oidcProfileMessage, setOidcProfileMessage] = useState("");
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [invitationLabel, setInvitationLabel] = useState("");
   const [invitationEmail, setInvitationEmail] = useState("");
@@ -166,7 +175,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     let active = true;
     async function load() {
       try {
-        const sessionPromise = api<{ hanko_color?: string; hanko_seed?: string }>("/api/session");
+        const sessionPromise = api<{ hanko_color?: string; hanko_seed?: string; oidc_username?: string | null; oidc_name?: string | null; oidc_picture?: string | null; oidc_phone?: string | null; oidc_address?: Partial<OidcAddress> | null }>("/api/session");
         const [session, clientList, groupList] = isAdmin
           ? await Promise.all([sessionPromise, api<Client[]>("/api/admin/clients"), api<Group[]>("/api/admin/groups")])
           : [await sessionPromise, [], []];
@@ -175,6 +184,11 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           setGroups(groupList);
           if (session.hanko_color) setHankoColor(session.hanko_color === "#d64135" ? ORIGINAL_HANKO_GRADIENT : session.hanko_color);
           if (session.hanko_seed) setHankoSeed(session.hanko_seed);
+          setOidcUsername(session.oidc_username ?? "");
+          setOidcName(session.oidc_name ?? "");
+          setOidcPicture(session.oidc_picture ?? "");
+          setOidcPhone(session.oidc_phone ?? "");
+          setOidcAddress({ ...EMPTY_OIDC_ADDRESS, ...(session.oidc_address ?? {}) });
         }
       } catch (loadError) {
         if (active) setLoadError(errorMessage(loadError));
@@ -677,6 +691,34 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     }
   }
 
+  async function saveOidcProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSavingOidcProfile(true);
+    setOidcProfileMessage("");
+    try {
+      const profile = await api<{ username: string | null; display_name: string | null; picture: string | null; phone_number: string | null; address: Partial<OidcAddress> | null }>("/api/account/profile", {
+        method: "PUT",
+        body: json({
+          username: oidcUsername.trim() || null,
+          display_name: oidcName.trim() || null,
+          picture: oidcPicture.trim(),
+          phone_number: oidcPhone.trim(),
+          address: oidcAddress,
+        }),
+      });
+      setOidcUsername(profile.username ?? "");
+      setOidcName(profile.display_name ?? "");
+      setOidcPicture(profile.picture ?? "");
+      setOidcPhone(profile.phone_number ?? "");
+      setOidcAddress({ ...EMPTY_OIDC_ADDRESS, ...(profile.address ?? {}) });
+      setOidcProfileMessage("Your OIDC profile is saved.");
+    } catch (saveError) {
+      setOidcProfileMessage(errorMessage(saveError));
+    } finally {
+      setSavingOidcProfile(false);
+    }
+  }
+
   async function copyValue(label: string, value: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -701,7 +743,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       { id: "groups" as const, label: "Groups", icon: <UserRound aria-hidden="true" /> },
       { id: "keys" as const, label: "Signing keys", icon: <Shield aria-hidden="true" /> },
     ] : []),
-    { id: "hanko", label: "Your Hanko", icon: <Stamp aria-hidden="true" /> },
+    { id: "hanko", label: "Profile", icon: <Stamp aria-hidden="true" /> },
     { id: "passkeys", label: "Passkeys", icon: <Fingerprint aria-hidden="true" /> },
   ];
   const tabTitles: Record<Tab, [string, string]> = {
@@ -709,7 +751,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     users: ["Users", "Create invite links, review accounts, and manage group memberships."],
     groups: ["Groups", "Manage memberships, scoped claims, and OIDC client access."],
     keys: ["Signing keys", "Manage the keys used to sign tokens."],
-    hanko: ["Your Hanko", "Your personal seal."],
+    hanko: ["Your profile", "Manage the details shared with apps and your personal Hanko."],
     passkeys: ["Passkeys", "Manage the devices that can sign in to your account."],
   };
   const [tabTitle, tabDescription] = tabTitles[activeTab];
@@ -947,6 +989,20 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
             <div className="account-hanko-preview"><HankoSeal size={192} color={hankoColor} seed={hankoSeed} title="Your personal Hanko preview" /></div>
             <SealCustomizer color={hankoColor} seed={hankoSeed} onColorChange={setHankoColor} onSeedChange={setHankoSeed} />
             <div className="account-hanko-save"><button className="secondary-action" type="button" onClick={saveHanko} disabled={savingHanko}>{savingHanko ? "Saving…" : "Save your Hanko"}</button>{hankoMessage && <p role="status">{hankoMessage}</p>}</div>
+            <form className="client-form account-oidc-profile" onSubmit={saveOidcProfile}>
+              <div><h2>OIDC profile</h2><p className="admin-hint">Choose the details shared when apps request the matching scopes.</p></div>
+              <label className="admin-field"><span>Username <em>Optional</em></span><input autoComplete="username" autoCapitalize="none" maxLength={64} pattern={"[A-Za-z0-9._\\-]+"} value={oidcUsername} onChange={(event) => setOidcUsername(event.target.value.toLowerCase())} placeholder="Used as preferred_username" /><small>Leave blank to keep your username private.</small></label>
+              <label className="admin-field"><span>Name <em>Optional</em></span><input autoComplete="name" maxLength={120} value={oidcName} onChange={(event) => setOidcName(event.target.value)} placeholder="How apps should know you" /><small>Leave blank to keep your name private.</small></label>
+              <label className="admin-field"><span>Picture URL <em>Optional</em></span><input type="url" maxLength={2048} value={oidcPicture} onChange={(event) => setOidcPicture(event.target.value)} placeholder="Generated from your Hanko stamp" /><small>Leave blank to use a generated image matching your Hanko stamp. A custom HTTPS image URL overrides it.</small></label>
+              <label className="admin-field"><span>Phone number <em>Optional</em></span><input type="tel" autoComplete="tel" maxLength={64} value={oidcPhone} onChange={(event) => setOidcPhone(event.target.value)} placeholder="+1 555 123 4567" /><small>Shared with apps that request the phone scope. Hanko does not verify phone ownership.</small></label>
+              <label className="admin-field"><span>Street address <em>Optional</em></span><textarea autoComplete="street-address" maxLength={500} rows={2} value={oidcAddress.street_address} onChange={(event) => setOidcAddress((address) => ({ ...address, street_address: event.target.value }))} placeholder="Street, apartment or floor" /><small>Apartment and floor details can be included here. Shared with apps that request the address scope.</small></label>
+              <label className="admin-field"><span>City or locality <em>Optional</em></span><input autoComplete="address-level2" maxLength={500} value={oidcAddress.locality} onChange={(event) => setOidcAddress((address) => ({ ...address, locality: event.target.value }))} /></label>
+              <label className="admin-field"><span>Region or state <em>Optional</em></span><input autoComplete="address-level1" maxLength={500} value={oidcAddress.region} onChange={(event) => setOidcAddress((address) => ({ ...address, region: event.target.value }))} /></label>
+              <label className="admin-field"><span>Postal code <em>Optional</em></span><input autoComplete="postal-code" maxLength={500} value={oidcAddress.postal_code} onChange={(event) => setOidcAddress((address) => ({ ...address, postal_code: event.target.value }))} /></label>
+              <label className="admin-field"><span>Country <em>Optional</em></span><input autoComplete="country-name" maxLength={500} value={oidcAddress.country} onChange={(event) => setOidcAddress((address) => ({ ...address, country: event.target.value }))} /></label>
+              {oidcProfileMessage && <p className={`admin-message${oidcProfileMessage.includes("saved") ? "" : " admin-message-error"}`} role={oidcProfileMessage.includes("saved") ? "status" : "alert"}>{oidcProfileMessage}</p>}
+              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={savingOidcProfile}>{savingOidcProfile ? "Saving profile…" : "Save OIDC profile"}</button></div>
+            </form>
           </section>}
 
           {activeTab === "passkeys" && <section className="account-passkeys">
@@ -982,6 +1038,9 @@ function scopeDescription(scope: (typeof AVAILABLE_SCOPES)[number]) {
   switch (scope) {
     case "profile": return "Name and profile details";
     case "email": return "Email address";
+    case "address": return "Postal address";
+    case "phone": return "Phone number";
+    case "picture": return "Profile picture URL";
     case "groups": return "Group memberships";
     case "offline_access": return "Issue a refresh token for ongoing access";
   }

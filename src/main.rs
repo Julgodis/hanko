@@ -5,6 +5,7 @@ mod http;
 mod keys;
 mod oidc;
 mod security;
+mod stamp;
 mod webauthn;
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
