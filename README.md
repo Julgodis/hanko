@@ -63,14 +63,18 @@ cargo build --release --locked
 
 Build a local container from the repository root with `docker build -t hanko:local .`. The image listens on port `38013` and stores SQLite data under `/data`; mount persistent storage there. The default UI path is `/`. For a path prefix, pass `--build-arg VITE_BASE_PATH=/hanko/` to `docker build`.
 
-The [CI and publish workflow](.github/workflows/docker-publish.yml) runs quick checks on pull requests and pushes to `main` or `master`: Rust formatting and compilation, plus web tests and type checks. Version tags such as `v0.1.0` run the full Rust tests at the declared Rust 1.88 minimum, repeat the web checks, and build and publish a `linux/amd64` image to GHCR tagged with the version. The Docker build compiles the release binary and builds the web UI once. The workflow does not publish standalone binaries. To publish a version:
+To hide fields from user profile forms in a Compose build, set `VITE_HIDDEN_USER_CLAIMS` in `.env` and pass it as a build argument:
 
-```sh
-git tag -a v0.1.0 -m "Hanko v0.1.0"
-git push origin v0.1.0
+```yaml
+services:
+  hanko:
+    build:
+      context: .
+      args:
+        VITE_HIDDEN_USER_CLAIMS: ${VITE_HIDDEN_USER_CLAIMS:-}
 ```
 
-Set the GitHub repository's visibility to public if you want public source. The first GHCR package is private by default; make it public in package settings for public image pulls. Images use `ghcr.io/<owner>/<repo>:0.1.0`. See [GitHub's container publishing guide](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images).
+Use comma-separated claim names such as `app_roles,given_name,family_name,address,phone_number`. This is a UI setting only: it hides form fields but does not enforce claim permissions in the API or revoke values already stored.
 
 ## Scope
 

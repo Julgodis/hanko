@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -79,7 +80,7 @@ struct DiscoveryDocument {
     token_endpoint_auth_methods_supported: [&'static str; 2],
     code_challenge_methods_supported: [&'static str; 1],
     grant_types_supported: [&'static str; 2],
-    scopes_supported: [&'static str; 5],
+    scopes_supported: [&'static str; 8],
 }
 
 #[derive(Deserialize)]
@@ -103,6 +104,31 @@ struct HankoStyleInput {
 struct OidcProfileInput {
     username: Option<String>,
     display_name: Option<String>,
+    picture: Option<String>,
+    phone_number: Option<String>,
+    address: Option<AddressInput>,
+    profile_claims: Option<OidcProfileClaimsInput>,
+}
+
+#[derive(Deserialize)]
+struct AddressInput {
+    street_address: Option<String>,
+    locality: Option<String>,
+    region: Option<String>,
+    postal_code: Option<String>,
+    country: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OidcProfileClaimsInput {
+    profile: Option<String>,
+    given_name: Option<String>,
+    family_name: Option<String>,
+    nickname: Option<String>,
+    website: Option<String>,
+    locale: Option<String>,
+    zoneinfo: Option<String>,
+    app_roles: Option<BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +146,10 @@ struct SessionResponse {
     display_name: Option<String>,
     oidc_username: Option<String>,
     oidc_name: Option<String>,
+    oidc_picture: Option<String>,
+    oidc_phone: Option<String>,
+    oidc_address: Option<serde_json::Value>,
+    oidc_profile_claims: serde_json::Value,
     hanko_color: Option<String>,
     hanko_seed: Option<String>,
     is_admin: bool,
@@ -236,6 +266,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(health))
         .route("/.well-known/openid-configuration", get(discovery))
         .route("/jwks", get(jwks))
+        .route("/api/users/{user_id}/picture.svg", get(generated_user_picture))
         .route("/api/session", get(session_info))
         .route("/api/account/profile", axum::routing::put(update_profile))
         .route("/api/account/hanko", axum::routing::put(update_hanko))
@@ -331,7 +362,16 @@ async fn discovery(State(state): State<AppState>) -> Json<DiscoveryDocument> {
         token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
         code_challenge_methods_supported: ["S256"],
         grant_types_supported: ["authorization_code", "refresh_token"],
-        scopes_supported: ["openid", "profile", "email", "groups", "offline_access"],
+        scopes_supported: [
+            "openid",
+            "profile",
+            "email",
+            "groups",
+            "offline_access",
+            "picture",
+            "address",
+            "phone",
+        ],
     })
 }
 
@@ -341,6 +381,43 @@ async fn jwks(State(state): State<AppState>) -> Result<Json<serde_json::Value>, 
         ApiError::internal()
     })?;
     Ok(Json(serde_json::json!({ "keys": keys })))
+}
+
+async fn generated_user_picture(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let user = sqlx::query(
+        "SELECT hanko_color, hanko_seed FROM users WHERE id = ? AND disabled_at IS NULL",
+    )
+    .bind(&user_id)
+    .fetch_optional(&state.database.pool)
+    .await
+    .map_err(|_| ApiError::internal())?
+    .ok_or(ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: "user not found",
+    })?;
+    let color: String = user
+        .try_get("hanko_color")
+        .map_err(|_| ApiError::internal())?;
+    let seed: String = user
+        .try_get("hanko_seed")
+        .map_err(|_| ApiError::internal())?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("image/svg+xml; charset=utf-8"),
+        )
+        .header(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=300"),
+        )
+        .body(axum::body::Body::from(crate::stamp::render_picture(
+            &color, &seed,
+        )))
+        .map_err(|_| ApiError::internal())
 }
 
 async fn bootstrap(
@@ -454,6 +531,10 @@ async fn session_info(
             display_name: Some(identity.display_name),
             oidc_username: identity.oidc_username,
             oidc_name: identity.oidc_name,
+            oidc_picture: identity.oidc_picture,
+            oidc_phone: identity.oidc_phone,
+            oidc_address: identity.oidc_address,
+            oidc_profile_claims: identity.oidc_profile_claims,
             hanko_color: Some(identity.hanko_color),
             hanko_seed: Some(identity.hanko_seed),
             is_admin: identity.is_admin,
@@ -465,6 +546,10 @@ async fn session_info(
             display_name: None,
             oidc_username: None,
             oidc_name: None,
+            oidc_picture: None,
+            oidc_phone: None,
+            oidc_address: None,
+            oidc_profile_claims: serde_json::json!({}),
             hanko_color: None,
             hanko_seed: None,
             is_admin: false,
@@ -483,7 +568,7 @@ async fn update_profile(
     require_csrf(&headers, &session)?;
 
     let current = sqlx::query(
-        "SELECT username, display_name FROM users WHERE id = ? AND disabled_at IS NULL",
+        "SELECT username, display_name, attributes FROM users WHERE id = ? AND disabled_at IS NULL",
     )
     .bind(&session.user_id)
     .fetch_optional(&state.database.pool)
@@ -496,6 +581,11 @@ async fn update_profile(
     let current_display_name: String = current
         .try_get("display_name")
         .map_err(|_| ApiError::internal())?;
+    let attributes_json: String = current
+        .try_get("attributes")
+        .map_err(|_| ApiError::internal())?;
+    let mut attributes: serde_json::Value =
+        serde_json::from_str(&attributes_json).map_err(|_| ApiError::internal())?;
 
     let raw_username = input
         .username
@@ -519,9 +609,81 @@ async fn update_profile(
         return Err(ApiError::bad_request("invalid name"));
     }
     let display_name = raw_name.unwrap_or(&current_display_name);
-    let updated = sqlx::query("UPDATE users SET username = ?, display_name = ?, expose_preferred_username = ?, expose_name = ?, updated_at = ? WHERE id = ? AND disabled_at IS NULL")
+    if let Some(raw_picture) = input.picture.as_deref() {
+        let raw_picture = raw_picture.trim();
+        if raw_picture.is_empty() {
+            attributes
+                .as_object_mut()
+                .ok_or_else(ApiError::internal)?
+                .remove("picture");
+        } else {
+            if !valid_picture_url(raw_picture) {
+                return Err(ApiError::bad_request(
+                    "picture must be a valid HTTPS image URL (HTTP is allowed for localhost)",
+                ));
+            }
+            attributes
+                .as_object_mut()
+                .ok_or_else(ApiError::internal)?
+                .insert(
+                    "picture".to_owned(),
+                    serde_json::Value::String(raw_picture.to_owned()),
+                );
+        }
+    }
+    if let Some(raw_phone) = input.phone_number.as_deref() {
+        let phone = raw_phone.trim();
+        let digits = phone.bytes().filter(|byte| byte.is_ascii_digit()).count();
+        if !phone.is_empty()
+            && (phone.len() > 64
+                || !(3..=20).contains(&digits)
+                || !phone.bytes().all(|byte| {
+                    byte.is_ascii_digit() || matches!(byte, b'+' | b'(' | b')' | b'-' | b'.' | b' ')
+                }))
+        {
+            return Err(ApiError::bad_request(
+                "phone number must contain 3 to 20 digits and use common phone number characters",
+            ));
+        }
+        let attributes = attributes.as_object_mut().ok_or_else(ApiError::internal)?;
+        if phone.is_empty() {
+            attributes.remove("phone_number");
+        } else {
+            attributes.insert(
+                "phone_number".to_owned(),
+                serde_json::Value::String(phone.to_owned()),
+            );
+        }
+    }
+    if let Some(address) = input.address {
+        update_address(&mut attributes, address)?;
+    }
+    if let Some(profile_claims) = input.profile_claims {
+        for (claim, value, max_len, is_url) in [
+            ("profile", profile_claims.profile, 2048, true),
+            ("given_name", profile_claims.given_name, 120, false),
+            ("family_name", profile_claims.family_name, 120, false),
+            ("nickname", profile_claims.nickname, 120, false),
+            ("website", profile_claims.website, 2048, true),
+            ("locale", profile_claims.locale, 128, false),
+            ("zoneinfo", profile_claims.zoneinfo, 128, false),
+        ] {
+            update_profile_attribute(&mut attributes, claim, value, max_len, is_url)?;
+        }
+        if let Some(app_roles) = profile_claims.app_roles {
+            let app_roles = normalize_app_roles(app_roles)?;
+            let attributes = attributes.as_object_mut().ok_or_else(ApiError::internal)?;
+            if app_roles.is_empty() {
+                attributes.remove("app_roles");
+            } else {
+                attributes.insert("app_roles".to_owned(), serde_json::json!(app_roles));
+            }
+        }
+    }
+    let updated = sqlx::query("UPDATE users SET username = ?, display_name = ?, attributes = ?, expose_preferred_username = ?, expose_name = ?, updated_at = ? WHERE id = ? AND disabled_at IS NULL")
         .bind(username)
         .bind(display_name)
+        .bind(serde_json::to_string(&attributes).map_err(|_| ApiError::internal())?)
         .bind(oidc_username.is_some())
         .bind(raw_name.is_some())
         .bind(unix_now())
@@ -544,7 +706,146 @@ async fn update_profile(
     Ok(Json(serde_json::json!({
         "username": oidc_username,
         "display_name": raw_name,
+        "picture": attributes.get("picture").and_then(serde_json::Value::as_str),
+        "phone_number": attributes.get("phone_number").and_then(serde_json::Value::as_str),
+        "address": attributes.get("address"),
+        "profile_claims": crate::security::oidc_profile_claims(&attributes),
     })))
+}
+
+fn update_profile_attribute(
+    attributes: &mut serde_json::Value,
+    claim: &str,
+    value: Option<String>,
+    max_len: usize,
+    is_url: bool,
+) -> Result<(), ApiError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let value = value.trim();
+    if value.len() > max_len || value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request("profile claim has an invalid value"));
+    }
+    if is_url && !value.is_empty() && !valid_picture_url(value) {
+        return Err(ApiError::bad_request(
+            "profile and website URLs must be HTTPS (HTTP is allowed for localhost)",
+        ));
+    }
+    let attributes = attributes.as_object_mut().ok_or_else(ApiError::internal)?;
+    if value.is_empty() {
+        attributes.remove(claim);
+    } else {
+        attributes.insert(
+            claim.to_owned(),
+            serde_json::Value::String(value.to_owned()),
+        );
+    }
+    Ok(())
+}
+
+fn normalize_app_roles(
+    app_roles: BTreeMap<String, Vec<String>>,
+) -> Result<BTreeMap<String, Vec<String>>, ApiError> {
+    if app_roles.len() > 50 {
+        return Err(ApiError::bad_request(
+            "at most 50 applications can have roles",
+        ));
+    }
+    let mut normalized = BTreeMap::new();
+    for (client_id, roles) in app_roles {
+        if client_id.is_empty()
+            || client_id.len() > 100
+            || !client_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(ApiError::bad_request("invalid app role client ID"));
+        }
+        if roles.len() > 50 {
+            return Err(ApiError::bad_request(
+                "at most 50 roles can be added per app",
+            ));
+        }
+        let mut normalized_roles = Vec::new();
+        for role in roles {
+            let role = role.trim();
+            if role.is_empty() {
+                continue;
+            }
+            if role.len() > 100 || role.chars().any(char::is_control) {
+                return Err(ApiError::bad_request(
+                    "role names must be 100 characters or fewer",
+                ));
+            }
+            if !normalized_roles.iter().any(|existing| existing == role) {
+                normalized_roles.push(role.to_owned());
+            }
+        }
+        if !normalized_roles.is_empty() {
+            normalized.insert(client_id, normalized_roles);
+        }
+    }
+    Ok(normalized)
+}
+
+fn update_address(attributes: &mut serde_json::Value, input: AddressInput) -> Result<(), ApiError> {
+    let mut address = attributes
+        .get("address")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in [
+        ("street_address", input.street_address),
+        ("locality", input.locality),
+        ("region", input.region),
+        ("postal_code", input.postal_code),
+        ("country", input.country),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        let value = value.trim();
+        if value.len() > 500
+            || value.chars().any(|character| {
+                character.is_control()
+                    && !(key == "street_address" && matches!(character, '\n' | '\r'))
+            })
+        {
+            return Err(ApiError::bad_request(
+                "address fields must be 500 characters or fewer",
+            ));
+        }
+        if value.is_empty() {
+            address.remove(key);
+        } else {
+            address.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
+        }
+    }
+    let attributes = attributes.as_object_mut().ok_or_else(ApiError::internal)?;
+    if address.is_empty() {
+        attributes.remove("address");
+    } else {
+        attributes.insert("address".to_owned(), serde_json::Value::Object(address));
+    }
+    Ok(())
+}
+
+fn valid_picture_url(value: &str) -> bool {
+    if value.len() > 2048 {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return false;
+    }
+    match url.scheme() {
+        "https" => url.host_str().is_some(),
+        "http" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
+        _ => false,
+    }
 }
 
 async fn update_hanko(
