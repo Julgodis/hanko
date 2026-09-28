@@ -69,7 +69,15 @@ impl AuthorizeParameters {
         (values.len() == 1).then(|| values[0].as_str())
     }
 
-    fn into_request(self, client_id: String, redirect_uri: String) -> Result<AuthorizeRequest, ()> {
+    fn count(&self, key: &str) -> usize {
+        self.values.get(key).map_or(0, Vec::len)
+    }
+
+    fn into_request(
+        self,
+        client_id: String,
+        redirect_uri: String,
+    ) -> Result<AuthorizeRequest, String> {
         const REQUEST_PARAMETERS: &[&str] = &[
             "response_type",
             "scope",
@@ -80,18 +88,18 @@ impl AuthorizeParameters {
             "prompt",
             "max_age",
         ];
-        if REQUEST_PARAMETERS.iter().any(|key| {
+        if let Some(key) = REQUEST_PARAMETERS.iter().find(|key| {
             self.values
-                .get(*key)
+                .get(**key)
                 .is_some_and(|values| values.len() != 1)
         }) {
-            return Err(());
+            return Err(format!("authorization parameter `{key}` is repeated"));
         }
         let max_age = self
             .single("max_age")
             .map(|value| value.parse::<i64>())
             .transpose()
-            .map_err(|_| ())?;
+            .map_err(|_| "max_age must be an integer".to_owned())?;
         let state = self.single("state").map(str::to_owned);
         Ok(AuthorizeRequest {
             response_type: self.single("response_type").unwrap_or_default().to_owned(),
@@ -331,6 +339,7 @@ async fn authorize_request(
     let Some(client_id) = parameters.single("client_id").map(str::to_owned) else {
         tracing::warn!(
             endpoint = "/authorize",
+            client_id_count = parameters.count("client_id"),
             "OIDC request rejected: client_id is missing or repeated"
         );
         return authorization_page_error(&state, "invalid_client");
@@ -366,6 +375,7 @@ async fn authorize_request(
         tracing::warn!(
             endpoint = "/authorize",
             client_id = %client_id,
+            redirect_uri_count = parameters.count("redirect_uri"),
             "OIDC request rejected: redirect_uri is missing or repeated"
         );
         return authorization_page_error(&state, "invalid_redirect_uri");
@@ -376,6 +386,8 @@ async fn authorize_request(
             tracing::warn!(
                 endpoint = "/authorize",
                 client_id = %client_id,
+                redirect_uri = %redirect_uri,
+                reason = %error.description,
                 "OIDC request rejected: redirect_uri is invalid or not registered"
             );
             return authorization_page_error(&state, "invalid_redirect_uri");
@@ -394,7 +406,7 @@ async fn authorize_request(
     let state_value = parameters.single("state").map(str::to_owned);
     let input = match parameters.into_request(client_id.clone(), redirect_uri.clone()) {
         Ok(input) => input,
-        Err(()) => {
+        Err(reason) => {
             let input = AuthorizeRequest {
                 response_type: String::new(),
                 client_id,
@@ -408,14 +420,14 @@ async fn authorize_request(
                 prompt: None,
                 max_age: None,
             };
-            return authorization_protocol_error(&input, "invalid_request");
+            return authorization_protocol_error(&input, "invalid_request", &reason);
         }
     };
     let scopes = match validate_authorize_request(&state, &input, &client_type, &pkce_policy).await
     {
         Ok(scopes) => scopes,
         Err(error) if error.status.is_client_error() => {
-            return authorization_protocol_error(&input, error.error);
+            return authorization_protocol_error(&input, error.error, &error.description);
         }
         Err(error) => {
             tracing::error!(
@@ -428,10 +440,16 @@ async fn authorize_request(
     };
     let prompts = match authorize_prompts(&input) {
         Ok(prompts) => prompts,
-        Err(error) => return authorization_protocol_error(&input, error.error),
+        Err(error) => {
+            return authorization_protocol_error(&input, error.error, &error.description);
+        }
     };
     if prompts.iter().any(|prompt| *prompt == "select_account") {
-        return authorization_protocol_error(&input, "account_selection_required");
+        return authorization_protocol_error(
+            &input,
+            "account_selection_required",
+            "prompt=select_account is unsupported",
+        );
     }
     let now_ms = crate::security::unix_now_millis();
     let now = now_ms / 1000;
@@ -462,14 +480,26 @@ async fn authorize_request(
             .as_ref()
             .filter(|session| !session.setup_only)
         else {
-            return authorization_protocol_error(&input, "login_required");
+            return authorization_protocol_error(
+                &input,
+                "login_required",
+                "prompt=none requires an active session",
+            );
         };
         if !user_allowed_for_client(&state, &input.client_id, &session.user_id).await? {
             log_group_access_denial(&input.client_id, &session.user_id);
-            return authorization_protocol_error(&input, "access_denied");
+            return authorization_protocol_error(
+                &input,
+                "access_denied",
+                "user is not permitted by the client group policy",
+            );
         }
         if force_reauthentication {
-            return authorization_protocol_error(&input, "login_required");
+            return authorization_protocol_error(
+                &input,
+                "login_required",
+                "prompt=login or max_age requires reauthentication",
+            );
         }
         if !consent_covers(
             &state.database.pool,
@@ -480,7 +510,11 @@ async fn authorize_request(
         )
         .await?
         {
-            return authorization_protocol_error(&input, "consent_required");
+            return authorization_protocol_error(
+                &input,
+                "consent_required",
+                "prompt=none requires prior consent for the requested scopes",
+            );
         }
         let auth_time =
             sqlx::query_scalar::<_, i64>("SELECT created_at FROM sessions WHERE session_hash = ?")
@@ -1768,11 +1802,14 @@ fn authorize_prompts(input: &AuthorizeRequest) -> Result<Vec<&str>, OAuthError> 
 fn authorization_protocol_error(
     input: &AuthorizeRequest,
     error: &str,
+    reason: &str,
 ) -> Result<Response, OAuthError> {
     tracing::warn!(
         endpoint = "/authorize",
         client_id = %input.client_id,
+        redirect_uri = %input.redirect_uri,
         error_code = error,
+        reason = reason,
         "OIDC authorization could not continue"
     );
     let mut url = Url::parse(&input.redirect_uri)
