@@ -158,6 +158,7 @@ struct SessionResponse {
     is_admin: bool,
     setup_only: bool,
     required_user_claims: Vec<String>,
+    allow_multiple_passkeys_per_authenticator: bool,
 }
 
 #[derive(Serialize)]
@@ -601,6 +602,9 @@ async fn session_info(
             is_admin: identity.is_admin,
             setup_only: identity.setup_only,
             required_user_claims: state.config.required_user_claims.clone(),
+            allow_multiple_passkeys_per_authenticator: state
+                .config
+                .allow_multiple_passkeys_per_authenticator,
         }),
         None => Json(SessionResponse {
             authenticated: false,
@@ -617,6 +621,9 @@ async fn session_info(
             is_admin: false,
             setup_only: false,
             required_user_claims: state.config.required_user_claims.clone(),
+            allow_multiple_passkeys_per_authenticator: state
+                .config
+                .allow_multiple_passkeys_per_authenticator,
         }),
     }
     .into_response();
@@ -1702,6 +1709,7 @@ mod tests {
             &config.webauthn_rp_id,
             &config.webauthn_origin(),
             database.clone(),
+            config.allow_multiple_passkeys_per_authenticator,
         )
         .unwrap();
         let app = router(AppState {
@@ -2135,7 +2143,8 @@ mod tests {
             WebauthnService::new(
                 &config.webauthn_rp_id,
                 &origin,
-                Database::connect("sqlite::memory:").await.unwrap()
+                Database::connect("sqlite::memory:").await.unwrap(),
+                config.allow_multiple_passkeys_per_authenticator,
             )
             .is_ok()
         );

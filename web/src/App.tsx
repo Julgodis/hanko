@@ -24,6 +24,7 @@ type Session = {
   oidc_address?: { street_address?: string; locality?: string; region?: string; postal_code?: string; country?: string } | null;
   oidc_profile_claims?: OidcProfileClaims | null;
   required_user_claims?: string[];
+  allow_multiple_passkeys_per_authenticator?: boolean;
 };
 type SetupStatus = { initialized: boolean; bootstrap_enabled: boolean };
 type AuthorizationRequest = {

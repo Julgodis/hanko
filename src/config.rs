@@ -7,6 +7,7 @@ use url::Url;
 pub struct Config {
     pub public_origin: Url,
     pub webauthn_rp_id: String,
+    pub allow_multiple_passkeys_per_authenticator: bool,
     pub database_url: String,
     pub bind_address: String,
     pub master_key: Option<[u8; 32]>,
@@ -35,6 +36,11 @@ impl Config {
         {
             config.webauthn_rp_id = rp_id;
         }
+        config.allow_multiple_passkeys_per_authenticator = parse_bool_setting(
+            "WEBAUTHN_ALLOW_MULTIPLE_PASSKEYS_PER_AUTHENTICATOR",
+            &std::env::var("WEBAUTHN_ALLOW_MULTIPLE_PASSKEYS_PER_AUTHENTICATOR")
+                .unwrap_or_else(|_| "true".to_owned()),
+        )?;
         let encoded_key = std::env::var("IDENTITY_MASTER_KEY")
             .map_err(|_| ConfigError::Missing("IDENTITY_MASTER_KEY"))?;
         config.master_key = Some(parse_master_key(&encoded_key)?);
@@ -115,6 +121,7 @@ impl Config {
         Ok(Self {
             public_origin,
             webauthn_rp_id,
+            allow_multiple_passkeys_per_authenticator: true,
             database_url,
             bind_address,
             master_key: None,
