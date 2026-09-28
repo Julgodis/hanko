@@ -1083,6 +1083,7 @@ async fn issue_tokens(
         .unwrap_or_else(|| crate::stamp::picture_url(&state.config.issuer(), user_id));
     let phone_number = attributes.get("phone_number").and_then(Value::as_str);
     let address = attributes.get("address");
+    let profile_claims = crate::security::oidc_profile_claims(&attributes);
     let groups = user_groups(state, user_id).await?;
     let group_custom_claims = group_custom_claims(state, user_id, scopes).await?;
     let custom_claims = custom_claims(state, client_id, &attributes, scopes).await?;
@@ -1107,6 +1108,7 @@ async fn issue_tokens(
         scopes,
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
+        &profile_claims,
         email.as_deref(),
         Some(picture.as_str()),
         phone_number,
@@ -1149,6 +1151,7 @@ async fn issue_tokens(
         scopes,
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
+        &profile_claims,
         email.as_deref(),
         Some(picture.as_str()),
         phone_number,
@@ -1337,6 +1340,19 @@ async fn userinfo(
         if expose_preferred_username {
             result.insert("preferred_username".into(), Value::String(username));
         }
+        for claim in [
+            "profile",
+            "given_name",
+            "family_name",
+            "nickname",
+            "website",
+            "locale",
+            "zoneinfo",
+        ] {
+            if let Some(value) = claims.additional.get(claim) {
+                result.insert(claim.to_owned(), value.clone());
+            }
+        }
     }
     if scopes
         .iter()
@@ -1349,6 +1365,7 @@ async fn userinfo(
     if scopes.contains(&"email") {
         if let Some(email) = email {
             result.insert("email".into(), Value::String(email));
+            result.insert("email_verified".into(), Value::Bool(false));
         }
     }
     if scopes.contains(&"address") {
@@ -1387,6 +1404,13 @@ async fn userinfo(
                 | "scope"
                 | "name"
                 | "preferred_username"
+                | "profile"
+                | "given_name"
+                | "family_name"
+                | "nickname"
+                | "website"
+                | "locale"
+                | "zoneinfo"
                 | "email"
                 | "email_verified"
                 | "picture"
@@ -1773,6 +1797,7 @@ async fn preview_user_claims(
         .unwrap_or_else(|| crate::stamp::picture_url(&state.config.issuer(), user_id));
     let phone_number = attributes.get("phone_number").and_then(Value::as_str);
     let address = attributes.get("address");
+    let profile_claims = crate::security::oidc_profile_claims(&attributes);
     let groups = user_groups(state, user_id).await?;
     let group_custom_claims = group_custom_claims(state, user_id, scopes).await?;
 
@@ -1782,6 +1807,7 @@ async fn preview_user_claims(
         scopes,
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
+        &profile_claims,
         email.as_deref(),
         Some(picture.as_str()),
         phone_number,
@@ -1815,7 +1841,20 @@ async fn custom_claims(
             .map_err(|_| OAuthError::server_error())?;
         if matches!(
             name.as_str(),
-            "picture" | "address" | "email_verified" | "phone_number" | "phone_number_verified"
+            "name"
+                | "preferred_username"
+                | "profile"
+                | "given_name"
+                | "family_name"
+                | "nickname"
+                | "website"
+                | "locale"
+                | "zoneinfo"
+                | "picture"
+                | "address"
+                | "email_verified"
+                | "phone_number"
+                | "phone_number_verified"
         ) {
             continue;
         }
@@ -1920,6 +1959,7 @@ fn add_user_claims(
     scopes: &[String],
     username: Option<&str>,
     display_name: Option<&str>,
+    profile_claims: &Value,
     email: Option<&str>,
     picture: Option<&str>,
     phone_number: Option<&str>,
@@ -1936,10 +1976,24 @@ fn add_user_claims(
                 Value::String(username.to_owned()),
             );
         }
+        for claim in [
+            "profile",
+            "given_name",
+            "family_name",
+            "nickname",
+            "website",
+            "locale",
+            "zoneinfo",
+        ] {
+            if let Some(value) = profile_claims.get(claim) {
+                claims.insert(claim.to_owned(), value.clone());
+            }
+        }
     }
     if scopes.iter().any(|scope| scope == "email") {
         if let Some(email) = email {
             claims.insert("email".into(), Value::String(email.to_owned()));
+            claims.insert("email_verified".into(), Value::Bool(false));
         }
     }
     if scopes
@@ -2148,6 +2202,7 @@ mod tests {
             &scopes,
             None,
             None,
+            &Value::Null,
             None,
             None,
             None,
@@ -2162,6 +2217,7 @@ mod tests {
             &scopes,
             Some("alice"),
             None,
+            &Value::Null,
             None,
             None,
             None,

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -106,6 +107,7 @@ struct OidcProfileInput {
     picture: Option<String>,
     phone_number: Option<String>,
     address: Option<AddressInput>,
+    profile_claims: Option<OidcProfileClaimsInput>,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +117,18 @@ struct AddressInput {
     region: Option<String>,
     postal_code: Option<String>,
     country: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OidcProfileClaimsInput {
+    profile: Option<String>,
+    given_name: Option<String>,
+    family_name: Option<String>,
+    nickname: Option<String>,
+    website: Option<String>,
+    locale: Option<String>,
+    zoneinfo: Option<String>,
+    app_roles: Option<BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +149,7 @@ struct SessionResponse {
     oidc_picture: Option<String>,
     oidc_phone: Option<String>,
     oidc_address: Option<serde_json::Value>,
+    oidc_profile_claims: serde_json::Value,
     hanko_color: Option<String>,
     hanko_seed: Option<String>,
     is_admin: bool,
@@ -519,6 +534,7 @@ async fn session_info(
             oidc_picture: identity.oidc_picture,
             oidc_phone: identity.oidc_phone,
             oidc_address: identity.oidc_address,
+            oidc_profile_claims: identity.oidc_profile_claims,
             hanko_color: Some(identity.hanko_color),
             hanko_seed: Some(identity.hanko_seed),
             is_admin: identity.is_admin,
@@ -533,6 +549,7 @@ async fn session_info(
             oidc_picture: None,
             oidc_phone: None,
             oidc_address: None,
+            oidc_profile_claims: serde_json::json!({}),
             hanko_color: None,
             hanko_seed: None,
             is_admin: false,
@@ -639,12 +656,28 @@ async fn update_profile(
         }
     }
     if let Some(address) = input.address {
-        let address = address_value(address)?;
-        let attributes = attributes.as_object_mut().ok_or_else(ApiError::internal)?;
-        if address.as_object().is_some_and(|object| object.is_empty()) {
-            attributes.remove("address");
-        } else {
-            attributes.insert("address".to_owned(), address);
+        update_address(&mut attributes, address)?;
+    }
+    if let Some(profile_claims) = input.profile_claims {
+        for (claim, value, max_len, is_url) in [
+            ("profile", profile_claims.profile, 2048, true),
+            ("given_name", profile_claims.given_name, 120, false),
+            ("family_name", profile_claims.family_name, 120, false),
+            ("nickname", profile_claims.nickname, 120, false),
+            ("website", profile_claims.website, 2048, true),
+            ("locale", profile_claims.locale, 128, false),
+            ("zoneinfo", profile_claims.zoneinfo, 128, false),
+        ] {
+            update_profile_attribute(&mut attributes, claim, value, max_len, is_url)?;
+        }
+        if let Some(app_roles) = profile_claims.app_roles {
+            let app_roles = normalize_app_roles(app_roles)?;
+            let attributes = attributes.as_object_mut().ok_or_else(ApiError::internal)?;
+            if app_roles.is_empty() {
+                attributes.remove("app_roles");
+            } else {
+                attributes.insert("app_roles".to_owned(), serde_json::json!(app_roles));
+            }
         }
     }
     let updated = sqlx::query("UPDATE users SET username = ?, display_name = ?, attributes = ?, expose_preferred_username = ?, expose_name = ?, updated_at = ? WHERE id = ? AND disabled_at IS NULL")
@@ -676,11 +709,89 @@ async fn update_profile(
         "picture": attributes.get("picture").and_then(serde_json::Value::as_str),
         "phone_number": attributes.get("phone_number").and_then(serde_json::Value::as_str),
         "address": attributes.get("address"),
+        "profile_claims": crate::security::oidc_profile_claims(&attributes),
     })))
 }
 
-fn address_value(input: AddressInput) -> Result<serde_json::Value, ApiError> {
-    let mut address = serde_json::Map::new();
+fn update_profile_attribute(
+    attributes: &mut serde_json::Value,
+    claim: &str,
+    value: Option<String>,
+    max_len: usize,
+    is_url: bool,
+) -> Result<(), ApiError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let value = value.trim();
+    if value.len() > max_len || value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request("profile claim has an invalid value"));
+    }
+    if is_url && !value.is_empty() && !valid_picture_url(value) {
+        return Err(ApiError::bad_request(
+            "profile and website URLs must be HTTPS (HTTP is allowed for localhost)",
+        ));
+    }
+    let attributes = attributes.as_object_mut().ok_or_else(ApiError::internal)?;
+    if value.is_empty() {
+        attributes.remove(claim);
+    } else {
+        attributes.insert(
+            claim.to_owned(),
+            serde_json::Value::String(value.to_owned()),
+        );
+    }
+    Ok(())
+}
+
+fn normalize_app_roles(
+    app_roles: BTreeMap<String, Vec<String>>,
+) -> Result<BTreeMap<String, Vec<String>>, ApiError> {
+    if app_roles.len() > 50 {
+        return Err(ApiError::bad_request("at most 50 applications can have roles"));
+    }
+    let mut normalized = BTreeMap::new();
+    for (client_id, roles) in app_roles {
+        if client_id.is_empty()
+            || client_id.len() > 100
+            || !client_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(ApiError::bad_request("invalid app role client ID"));
+        }
+        if roles.len() > 50 {
+            return Err(ApiError::bad_request("at most 50 roles can be added per app"));
+        }
+        let mut normalized_roles = Vec::new();
+        for role in roles {
+            let role = role.trim();
+            if role.is_empty() {
+                continue;
+            }
+            if role.len() > 100 || role.chars().any(char::is_control) {
+                return Err(ApiError::bad_request("role names must be 100 characters or fewer"));
+            }
+            if !normalized_roles.iter().any(|existing| existing == role) {
+                normalized_roles.push(role.to_owned());
+            }
+        }
+        if !normalized_roles.is_empty() {
+            normalized.insert(client_id, normalized_roles);
+        }
+    }
+    Ok(normalized)
+}
+
+fn update_address(
+    attributes: &mut serde_json::Value,
+    input: AddressInput,
+) -> Result<(), ApiError> {
+    let mut address = attributes
+        .get("address")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
     for (key, value) in [
         ("street_address", input.street_address),
         ("locality", input.locality),
@@ -688,12 +799,10 @@ fn address_value(input: AddressInput) -> Result<serde_json::Value, ApiError> {
         ("postal_code", input.postal_code),
         ("country", input.country),
     ] {
-        let Some(value) = value
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-        else {
+        let Some(value) = value else {
             continue;
         };
+        let value = value.trim();
         if value.len() > 500
             || value.chars().any(|character| {
                 character.is_control()
@@ -704,9 +813,22 @@ fn address_value(input: AddressInput) -> Result<serde_json::Value, ApiError> {
                 "address fields must be 500 characters or fewer",
             ));
         }
-        address.insert(key.to_owned(), serde_json::Value::String(value));
+        if value.is_empty() {
+            address.remove(key);
+        } else {
+            address.insert(
+                key.to_owned(),
+                serde_json::Value::String(value.to_owned()),
+            );
+        }
     }
-    Ok(serde_json::Value::Object(address))
+    let attributes = attributes.as_object_mut().ok_or_else(ApiError::internal)?;
+    if address.is_empty() {
+        attributes.remove("address");
+    } else {
+        attributes.insert("address".to_owned(), serde_json::Value::Object(address));
+    }
+    Ok(())
 }
 
 fn valid_picture_url(value: &str) -> bool {
