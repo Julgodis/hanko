@@ -34,6 +34,7 @@ const clients = [
     name: "Jellyfin",
     client_type: "public",
     token_endpoint_auth_method: "none",
+    pkce_policy: "required",
     enabled: true,
     redirect_uris: ["https://media.example.com/sso/OID/redirect/hanko"],
     post_logout_redirect_uris: ["https://media.example.com/"],
@@ -47,6 +48,7 @@ const clients = [
     name: "Paperless-ngx",
     client_type: "confidential",
     token_endpoint_auth_method: "client_secret_post",
+    pkce_policy: "optional",
     enabled: true,
     redirect_uris: ["https://docs.example.com/accounts/oidc/hanko/login/callback/"],
     post_logout_redirect_uris: [],
@@ -60,6 +62,7 @@ const clients = [
     name: "Immich",
     client_type: "public",
     token_endpoint_auth_method: "none",
+    pkce_policy: "required",
     enabled: false,
     redirect_uris: ["https://photos.example.com/auth/login"],
     post_logout_redirect_uris: [],
@@ -160,7 +163,8 @@ function installPreviewApi() {
         ...payload,
         client_id: "hnk_new_sample_client",
         client_secret: payload.client_type === "confidential" ? "sample-secret-shown-once" : null,
-        token_endpoint_auth_method: payload.client_type === "public" ? "none" : "client_secret_post",
+        token_endpoint_auth_method: payload.token_endpoint_auth_method,
+        pkce_policy: payload.pkce_policy,
         user_count: 0,
       };
       previewClients.push({ ...createdClient, enabled: true });
@@ -169,8 +173,29 @@ function installPreviewApi() {
     if (url.pathname.startsWith("/api/admin/clients/") && method === "PUT") {
       const clientIndex = previewClients.findIndex((item) => item.client_id === decodeURIComponent(url.pathname.split("/").at(-1) ?? ""));
       if (clientIndex < 0) return jsonResponse({}, 404);
-      previewClients[clientIndex] = { ...previewClients[clientIndex], ...JSON.parse(String(init?.body ?? "{}")) };
-      return jsonResponse(previewClients[clientIndex]);
+      const payload = JSON.parse(String(init?.body ?? "{}"));
+      const existing = previewClients[clientIndex];
+      const tokenMethod = payload.token_endpoint_auth_method ?? existing.token_endpoint_auth_method;
+      const clientType = tokenMethod === "none" ? "public" : "confidential";
+      const secret = existing.client_type === "public" && clientType === "confidential"
+        ? "sample-secret-shown-once"
+        : clientType === "confidential" ? null : null;
+      previewClients[clientIndex] = {
+        ...existing,
+        ...payload,
+        client_type: clientType,
+        token_endpoint_auth_method: tokenMethod,
+        client_secret: secret,
+      };
+      return jsonResponse({
+        client_id: existing.client_id,
+        client_secret: secret,
+        name: payload.name ?? existing.name,
+        client_type: clientType,
+        token_endpoint_auth_method: tokenMethod,
+        pkce_policy: payload.pkce_policy ?? existing.pkce_policy,
+        scopes: payload.scopes ?? existing.scopes,
+      });
     }
     if (url.pathname.startsWith("/api/admin/clients/") && method === "DELETE") {
       previewClients = previewClients.filter((item) => item.client_id !== decodeURIComponent(url.pathname.split("/").at(-1) ?? ""));

@@ -77,7 +77,7 @@ struct DiscoveryDocument {
     response_types_supported: [&'static str; 1],
     subject_types_supported: [&'static str; 1],
     id_token_signing_alg_values_supported: [&'static str; 1],
-    token_endpoint_auth_methods_supported: [&'static str; 2],
+    token_endpoint_auth_methods_supported: [&'static str; 3],
     code_challenge_methods_supported: [&'static str; 1],
     grant_types_supported: [&'static str; 2],
     scopes_supported: [&'static str; 8],
@@ -359,7 +359,11 @@ async fn discovery(State(state): State<AppState>) -> Json<DiscoveryDocument> {
         response_types_supported: ["code"],
         subject_types_supported: ["public"],
         id_token_signing_alg_values_supported: ["ES256"],
-        token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
+        token_endpoint_auth_methods_supported: [
+            "none",
+            "client_secret_basic",
+            "client_secret_post",
+        ],
         code_challenge_methods_supported: ["S256"],
         grant_types_supported: ["authorization_code", "refresh_token"],
         scopes_supported: [
@@ -1449,6 +1453,10 @@ mod tests {
         assert_eq!(document["token_endpoint_auth_methods_supported"][0], "none");
         assert_eq!(
             document["token_endpoint_auth_methods_supported"][1],
+            "client_secret_basic"
+        );
+        assert_eq!(
+            document["token_endpoint_auth_methods_supported"][2],
             "client_secret_post"
         );
         assert_eq!(

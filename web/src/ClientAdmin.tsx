@@ -13,11 +13,14 @@ const EXPIRY_UNIT_SECONDS = { seconds: 1, minutes: 60, hours: 60 * 60, days: 24 
 type ExpiryUnit = keyof typeof EXPIRY_UNIT_SECONDS;
 
 type Scope = "openid" | (typeof AVAILABLE_SCOPES)[number];
+type TokenEndpointAuthMethod = "none" | "client_secret_basic" | "client_secret_post";
+type PkcePolicy = "required" | "optional";
 type Client = {
   client_id: string;
   name: string;
   client_type: "public" | "confidential";
-  token_endpoint_auth_method: "none" | "client_secret_post";
+  token_endpoint_auth_method: TokenEndpointAuthMethod;
+  pkce_policy: PkcePolicy;
   enabled: boolean;
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
@@ -46,7 +49,8 @@ type CreatedClient = {
   client_secret: string | null;
   name: string;
   client_type: "public" | "confidential";
-  token_endpoint_auth_method: "none" | "client_secret_post";
+  token_endpoint_auth_method: TokenEndpointAuthMethod;
+  pkce_policy: PkcePolicy;
   scopes: Scope[];
 };
 type RegistrationStart = {
@@ -101,7 +105,8 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [name, setName] = useState("");
-  const [clientType, setClientType] = useState<"public" | "confidential">("public");
+  const [tokenAuthMethod, setTokenAuthMethod] = useState<TokenEndpointAuthMethod>("none");
+  const [pkcePolicy, setPkcePolicy] = useState<PkcePolicy>("required");
   const [clientEnabled, setClientEnabled] = useState(true);
   const [redirectUris, setRedirectUris] = useState("");
   const [logoutUris, setLogoutUris] = useState("");
@@ -111,6 +116,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [clientFormMode, setClientFormMode] = useState<"create" | "edit" | null>(previewScreen === "client-form" ? "create" : null);
+  const [credentialsUpdated, setCredentialsUpdated] = useState(false);
   const [userFormOpen, setUserFormOpen] = useState(previewScreen === "invite" || previewScreen === "invite-ready");
   const [groupFormOpen, setGroupFormOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState("");
@@ -275,7 +281,8 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
 
   function openCreateClient() {
     setName("");
-    setClientType("public");
+    setTokenAuthMethod("none");
+    setPkcePolicy("required");
     setClientEnabled(true);
     setRedirectUris("");
     setLogoutUris("");
@@ -284,13 +291,15 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     setClaims([]);
     setEditingClientId("");
     setCreated(null);
+    setCredentialsUpdated(false);
     setError("");
     setClientFormMode("create");
   }
 
   function openEditClient(client: Client) {
     setName(client.name);
-    setClientType(client.client_type);
+    setTokenAuthMethod(client.token_endpoint_auth_method);
+    setPkcePolicy(client.pkce_policy);
     setClientEnabled(client.enabled);
     setRedirectUris(client.redirect_uris.join("\n"));
     setLogoutUris(client.post_logout_redirect_uris.join("\n"));
@@ -303,6 +312,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     })));
     setEditingClientId(client.client_id);
     setCreated(null);
+    setCredentialsUpdated(false);
     setError("");
     setClientFormMode("edit");
   }
@@ -446,10 +456,11 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     try {
       const payload = {
         name: name.trim(),
+        token_endpoint_auth_method: tokenAuthMethod,
+        pkce_policy: pkcePolicy,
         ...(clientFormMode === "create"
           ? {
-              client_type: clientType,
-              token_endpoint_auth_method: clientType === "public" ? "none" : "client_secret_post",
+              client_type: tokenAuthMethod === "none" ? "public" : "confidential",
             }
           : { enabled: clientEnabled }),
         redirect_uris: redirects,
@@ -466,7 +477,10 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           ...payload,
         }),
       });
-      if (clientFormMode === "create") setCreated(client);
+      if (clientFormMode === "create" || client.client_secret) {
+        setCreated(client);
+        setCredentialsUpdated(clientFormMode === "edit");
+      }
       setClientFormMode(null);
       setEditingClientId("");
       await refreshClients();
@@ -834,7 +848,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
             <td><strong><PrivateValue>{client.name}</PrivateValue></strong></td>
             <td><div className="client-scope-list" aria-label={`Enabled scopes: ${client.scopes.join(", ")}`}>{client.scopes.map((scope) => <span className="client-scope-chip" key={scope}>{scope}</span>)}</div></td>
             <td><code className="table-id"><PrivateValue>{client.client_id}</PrivateValue></code></td>
-            <td>{client.client_type === "public" ? "Public" : "Confidential"}<small>{client.token_endpoint_auth_method}</small></td>
+            <td>{client.client_type === "public" ? "Public" : "Confidential"}<small>{client.token_endpoint_auth_method} · PKCE {client.pkce_policy}</small></td>
             <td>{client.user_count ?? 0}</td>
             <td><span className={client.enabled ? "client-status" : "client-status disabled"}>{client.enabled ? "Enabled" : "Disabled"}</span></td>
             <td><div className="table-actions">
@@ -845,7 +859,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     </section>
 
     {created && <section className="created-client" role="status">
-      <div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Client created</h2><p>Save these credentials in the application.</p></div></div>
+      <div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>{credentialsUpdated ? "Client credentials updated" : "Client created"}</h2><p>Save these credentials in the application.</p></div></div>
       <Credential label="Client ID" value={created.client_id} copied={copied === "id"} onCopy={() => copyValue("id", created.client_id)} />
       {created.client_secret && <Credential label="Client secret · shown once" value={created.client_secret} copied={copied === "secret"} onCopy={() => copyValue("secret", created.client_secret!)} />}
       <p className="created-footnote">{created.client_secret
@@ -858,14 +872,41 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           {activeTab === "clients" && isAdmin && clientFormMode !== null && <section className="client-editor-panel client-form-page" aria-labelledby="admin-page-title">
       <form className="client-form" onSubmit={saveClient}>
         <label className="admin-field"><span>Application name</span><input autoComplete="off" maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="Jellyfin" required /></label>
-        {clientFormMode === "create" && <label className="admin-field">
-          <span>Client type</span>
-          <select value={clientType} onChange={(event) => setClientType(event.target.value as "public" | "confidential")}>
-            <option value="public">Public · PKCE</option>
-            <option value="confidential">Confidential · client secret</option>
+        <label className="admin-field">
+          <span>Token endpoint authentication</span>
+          <select
+            value={tokenAuthMethod}
+            onChange={(event) => {
+              const method = event.target.value as TokenEndpointAuthMethod;
+              if (method === "none") setPkcePolicy("required");
+              else if (tokenAuthMethod === "none") setPkcePolicy("optional");
+              setTokenAuthMethod(method);
+            }}
+          >
+            <option value="none">None · public client</option>
+            <option value="client_secret_basic">Client secret Basic</option>
+            <option value="client_secret_post">Client secret POST</option>
           </select>
-          <small>{clientType === "public" ? "Uses no client secret. PKCE S256 is required." : "Uses client_secret_post at the token endpoint. PKCE is optional, and may be used with the secret."}</small>
-        </label>}
+          <small>{tokenAuthMethod === "none"
+            ? "No secret is used; public clients always require PKCE S256."
+            : "Confidential credentials use HTTP Basic or the form body. Switching a public client here generates a new secret shown once after saving."}</small>
+        </label>
+        <label className="admin-field">
+          <span>PKCE policy</span>
+          <select
+            value={tokenAuthMethod === "none" ? "required" : pkcePolicy}
+            disabled={tokenAuthMethod === "none"}
+            onChange={(event) => setPkcePolicy(event.target.value as PkcePolicy)}
+          >
+            <option value="required">Required · S256</option>
+            <option value="optional">Optional · S256 when used</option>
+          </select>
+          <small>{tokenAuthMethod === "none"
+            ? "Public clients always require PKCE S256."
+            : pkcePolicy === "required"
+              ? "Every authorization must include a PKCE S256 challenge."
+              : "The client may omit PKCE; any supplied challenge must use S256."}</small>
+        </label>
         {clientFormMode === "edit" && <label className="admin-check client-enabled-check"><input type="checkbox" checked={clientEnabled} onChange={(event) => setClientEnabled(event.target.checked)} /><span><strong>Client enabled</strong><small>Disabled clients can no longer sign users in.</small></span></label>}
         <label className="admin-field"><span>Callback URLs</span><textarea value={redirectUris} onChange={(event) => setRedirectUris(event.target.value)} placeholder="https://app.example.com/oidc/callback" rows={2} required /><small>One exact URL per line. HTTPS is required except for localhost development.</small></label>
         <label className="admin-field"><span>Post-logout URLs <em>Optional</em></span><textarea value={logoutUris} onChange={(event) => setLogoutUris(event.target.value)} placeholder="https://app.example.com/" rows={2} /><small>One exact URL per line.</small></label>

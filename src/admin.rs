@@ -81,6 +81,8 @@ struct CreateClient {
     client_type: String,
     #[serde(default)]
     token_endpoint_auth_method: Option<String>,
+    #[serde(default)]
+    pkce_policy: Option<String>,
     redirect_uris: Vec<String>,
     #[serde(default)]
     post_logout_redirect_uris: Vec<String>,
@@ -96,6 +98,10 @@ struct CreateClient {
 struct UpdateClient {
     name: String,
     enabled: bool,
+    #[serde(default)]
+    token_endpoint_auth_method: Option<String>,
+    #[serde(default)]
+    pkce_policy: Option<String>,
     redirect_uris: Vec<String>,
     #[serde(default)]
     post_logout_redirect_uris: Vec<String>,
@@ -677,7 +683,7 @@ async fn list_clients(
 ) -> Result<Json<Value>, AdminError> {
     let _admin = require_admin(&state, &headers, false).await?;
     let rows =
-        sqlx::query("SELECT client_id, name, client_type, token_endpoint_auth_method, enabled FROM oidc_clients ORDER BY name")
+        sqlx::query("SELECT client_id, name, client_type, token_endpoint_auth_method, pkce_policy, enabled FROM oidc_clients ORDER BY name")
             .fetch_all(&state.database.pool)
             .await
             .map_err(|_| AdminError::internal())?;
@@ -735,6 +741,7 @@ async fn list_clients(
             "name": row.try_get::<String, _>("name").map_err(|_| AdminError::internal())?,
             "client_type": row.try_get::<String, _>("client_type").map_err(|_| AdminError::internal())?,
             "token_endpoint_auth_method": row.try_get::<String, _>("token_endpoint_auth_method").map_err(|_| AdminError::internal())?,
+            "pkce_policy": row.try_get::<String, _>("pkce_policy").map_err(|_| AdminError::internal())?,
             "enabled": row.try_get::<bool, _>("enabled").map_err(|_| AdminError::internal())?,
             "redirect_uris": redirects,
             "post_logout_redirect_uris": post_logout_redirect_uris,
@@ -760,7 +767,7 @@ async fn create_client(
     if !matches!(input.client_type.as_str(), "public" | "confidential") {
         return Err(AdminError::bad_request("invalid client type"));
     }
-    let expected_auth_method = match input.client_type.as_str() {
+    let default_auth_method = match input.client_type.as_str() {
         "public" => "none",
         "confidential" => "client_secret_post",
         _ => unreachable!(),
@@ -768,10 +775,32 @@ async fn create_client(
     let auth_method = input
         .token_endpoint_auth_method
         .as_deref()
-        .unwrap_or(expected_auth_method);
-    if auth_method != expected_auth_method {
+        .unwrap_or(default_auth_method);
+    let expected_client_type = match auth_method {
+        "none" => "public",
+        "client_secret_basic" | "client_secret_post" => "confidential",
+        _ => {
+            return Err(AdminError::bad_request(
+                "invalid token endpoint authentication method",
+            ));
+        }
+    };
+    if input.client_type != expected_client_type {
         return Err(AdminError::bad_request(
             "client authentication method does not match client type",
+        ));
+    }
+    let default_pkce_policy = if input.client_type == "public" {
+        "required"
+    } else {
+        "optional"
+    };
+    let pkce_policy = input.pkce_policy.as_deref().unwrap_or(default_pkce_policy);
+    if !matches!(pkce_policy, "required" | "optional")
+        || (input.client_type == "public" && pkce_policy != "required")
+    {
+        return Err(AdminError::bad_request(
+            "public clients require PKCE; confidential clients support required or optional PKCE",
         ));
     }
     if input.redirect_uris.is_empty() || input.redirect_uris.len() > 50 {
@@ -828,11 +857,12 @@ async fn create_client(
     let secret_hash = secret
         .as_deref()
         .map(|value| URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes())));
-    sqlx::query("INSERT INTO oidc_clients (client_id, client_secret_hash, client_type, token_endpoint_auth_method, name, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)")
+    sqlx::query("INSERT INTO oidc_clients (client_id, client_secret_hash, client_type, token_endpoint_auth_method, pkce_policy, name, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)")
         .bind(&client_id)
         .bind(secret_hash)
         .bind(&input.client_type)
         .bind(auth_method)
+        .bind(pkce_policy)
         .bind(name)
         .bind(unix_now())
         .execute(&mut *transaction)
@@ -911,6 +941,7 @@ async fn create_client(
         "name": name,
         "client_type": input.client_type,
         "token_endpoint_auth_method": auth_method,
+        "pkce_policy": pkce_policy,
         "scopes": scopes,
     })))
 }
@@ -920,7 +951,7 @@ async fn update_client(
     Path(client_id): Path<String>,
     headers: HeaderMap,
     Json(input): Json<UpdateClient>,
-) -> Result<StatusCode, AdminError> {
+) -> Result<Json<Value>, AdminError> {
     let _admin = require_admin(&state, &headers, true).await?;
     let name = input.name.trim();
     if name.is_empty() || name.len() > 120 {
@@ -993,18 +1024,66 @@ async fn update_client(
         .begin()
         .await
         .map_err(|_| AdminError::internal())?;
-    let existing_client: Option<String> =
-        sqlx::query_scalar("SELECT client_id FROM oidc_clients WHERE client_id = ?")
-            .bind(&client_id)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(|_| AdminError::internal())?;
-    if existing_client.is_none() {
-        return Err(AdminError::not_found());
+    let existing_client = sqlx::query(
+        "SELECT client_type, token_endpoint_auth_method, pkce_policy, client_secret_hash FROM oidc_clients WHERE client_id = ?",
+    )
+    .bind(&client_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|_| AdminError::internal())?
+    .ok_or_else(AdminError::not_found)?;
+    let client_type: String = existing_client
+        .try_get("client_type")
+        .map_err(|_| AdminError::internal())?;
+    let current_auth_method: String = existing_client
+        .try_get("token_endpoint_auth_method")
+        .map_err(|_| AdminError::internal())?;
+    let current_pkce_policy: String = existing_client
+        .try_get("pkce_policy")
+        .map_err(|_| AdminError::internal())?;
+    let current_secret_hash: Option<String> = existing_client
+        .try_get("client_secret_hash")
+        .map_err(|_| AdminError::internal())?;
+    let auth_method = input
+        .token_endpoint_auth_method
+        .as_deref()
+        .unwrap_or(&current_auth_method);
+    let expected_client_type = match auth_method {
+        "none" => "public",
+        "client_secret_basic" | "client_secret_post" => "confidential",
+        _ => {
+            return Err(AdminError::bad_request(
+                "invalid token endpoint authentication method",
+            ));
+        }
+    };
+    let pkce_policy = input.pkce_policy.as_deref().unwrap_or(&current_pkce_policy);
+    if !matches!(pkce_policy, "required" | "optional")
+        || (expected_client_type == "public" && pkce_policy != "required")
+    {
+        return Err(AdminError::bad_request(
+            "public clients require PKCE; confidential clients support required or optional PKCE",
+        ));
     }
-    sqlx::query("UPDATE oidc_clients SET name = ?, enabled = ? WHERE client_id = ?")
+    let new_secret = if client_type == "public" && expected_client_type == "confidential" {
+        Some(random_secret())
+    } else {
+        None
+    };
+    let new_secret_hash = if expected_client_type == "public" {
+        None
+    } else if let Some(secret) = new_secret.as_deref() {
+        Some(URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes())))
+    } else {
+        current_secret_hash
+    };
+    sqlx::query("UPDATE oidc_clients SET name = ?, enabled = ?, client_type = ?, client_secret_hash = ?, token_endpoint_auth_method = ?, pkce_policy = ? WHERE client_id = ?")
         .bind(name)
         .bind(input.enabled)
+        .bind(expected_client_type)
+        .bind(new_secret_hash)
+        .bind(auth_method)
+        .bind(pkce_policy)
         .bind(&client_id)
         .execute(&mut *transaction)
         .await
@@ -1078,7 +1157,15 @@ async fn update_client(
         .commit()
         .await
         .map_err(|_| AdminError::internal())?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(serde_json::json!({
+        "client_id": client_id,
+        "client_secret": new_secret,
+        "name": name,
+        "client_type": expected_client_type,
+        "token_endpoint_auth_method": auth_method,
+        "pkce_policy": pkce_policy,
+        "scopes": scopes,
+    })))
 }
 
 async fn delete_client(
