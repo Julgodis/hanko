@@ -260,19 +260,6 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible { outline: 
 
 .success-check svg { width: 16px; height: 16px; stroke-width: 1.8; }
 
-.device-note {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  margin: 23px 0 0;
-  color: var(--ink-faint);
-  font-size: 14px;
-  letter-spacing: .01em;
-}
-
-.device-note svg { width: 15px; height: 15px; stroke-width: 1.7; }
-
 .privacy-toggle {
   position: fixed;
   z-index: 30;
@@ -1009,6 +996,8 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 }
 
 @media (max-width: 600px) {
+  body { min-height: 100svh; min-height: 100dvh; }
+  .auth-scene { min-height: 100svh; min-height: 100dvh; }
   .privacy-toggle { top: max(12px, env(safe-area-inset-top)); bottom: auto; }
   .auth-scene, .admin-scene { padding-top: max(72px, calc(env(safe-area-inset-top) + 56px)); }
   .setup-scene { padding-top: max(72px, calc(env(safe-area-inset-top) + 56px)); }
