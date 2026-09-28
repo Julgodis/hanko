@@ -276,7 +276,10 @@ pub(crate) fn oidc_profile_claims(attributes: &serde_json::Value) -> serde_json:
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.is_empty())
         {
-            claims.insert(claim.to_owned(), serde_json::Value::String(value.to_owned()));
+            claims.insert(
+                claim.to_owned(),
+                serde_json::Value::String(value.to_owned()),
+            );
         }
     }
     if let Some(app_roles) = attributes
@@ -293,9 +296,7 @@ pub(crate) fn oidc_profile_claims(attributes: &serde_json::Value) -> serde_json:
                     .filter(|role| !role.is_empty())
                     .map(|role| serde_json::Value::String(role.to_owned()))
                     .collect();
-                (!roles.is_empty()).then(|| {
-                    (client_id.clone(), serde_json::Value::Array(roles))
-                })
+                (!roles.is_empty()).then(|| (client_id.clone(), serde_json::Value::Array(roles)))
             })
             .collect();
         if !app_roles.is_empty() {
