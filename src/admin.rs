@@ -693,21 +693,19 @@ async fn delete_group(
         .await
         .map_err(|_| AdminError::internal())?;
 
-    let group_name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM groups WHERE id = ?")
-            .bind(&group_id)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(|_| AdminError::internal())?;
+    let group_name: Option<String> = sqlx::query_scalar("SELECT name FROM groups WHERE id = ?")
+        .bind(&group_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
     let group_name = group_name.ok_or_else(AdminError::group_not_found)?;
 
-    let used_by_client: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM client_allowed_groups WHERE group_id = ?)",
-    )
-    .bind(&group_id)
-    .fetch_one(&mut *transaction)
-    .await
-    .map_err(|_| AdminError::internal())?;
+    let used_by_client: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM client_allowed_groups WHERE group_id = ?)")
+            .bind(&group_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
     if used_by_client {
         return Err(AdminError::conflict(
             "group is assigned to a client; remove it from client access policies first",

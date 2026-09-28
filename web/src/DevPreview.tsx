@@ -6,6 +6,7 @@ import "./styles.css";
 type PreviewScreen = "signin" | "consent" | "welcome" | "setup" | "join-invite" | "clients" | "users" | "invite" | "invite-ready" | "groups" | "keys" | "passkeys" | "hanko" | "client-form";
 type PreviewUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
 type PreviewGroup = { id: string; name: string; display_name: string; member_count: number; claims: { claim_name: string; claim_value: string; required_scope: string }[] };
+type PreviewClient = { client_id: string; name: string; client_type: string; token_endpoint_auth_method: string; pkce_policy: string; enabled: boolean; redirect_uris: string[]; post_logout_redirect_uris: string[]; scopes: string[]; allowed_groups: string[]; claims: { claim_name: string; user_attribute_path: string; required_scope: string | null }[]; user_count: number };
 
 const previewScreens: { id: PreviewScreen; label: string }[] = [
   { id: "signin", label: "Sign in" },
@@ -28,7 +29,7 @@ const screenParam = new URLSearchParams(window.location.search).get("screen") as
 const screen: PreviewScreen = previewScreens.some((item) => item.id === screenParam) ? screenParam! : "signin";
 const adminScreens = ["clients", "client-form", "users", "invite", "invite-ready", "groups", "keys"];
 
-const clients = [
+const clients: PreviewClient[] = [
   {
     client_id: "hnk_7f83d20a1c5e4a",
     name: "Jellyfin",

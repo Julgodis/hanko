@@ -46,12 +46,13 @@ Public clients must use PKCE S256. Authorization requests require `openid`, a no
 
 ## Build and publish
 
-Run the project checks:
+Before every push or pull request update, run the CI checks locally:
 
 ```sh
 cargo fmt --all --check
-cargo test
-cd web && npm test && npm run typecheck && npm run build
+cargo check --locked
+cargo test --locked
+(cd web && npm ci && npm test && npm run typecheck && npm run build)
 ```
 
 For a local release build, build the UI first, then the server:
