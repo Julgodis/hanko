@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.webauthn_rp_id,
         &config.webauthn_origin(),
         database.clone(),
+        config.allow_multiple_passkeys_per_authenticator,
     )?;
     let master_key = config.master_key.ok_or("missing identity master key")?;
     database.bind_webauthn_rp_id(&config.webauthn_rp_id).await?;

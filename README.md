@@ -101,6 +101,8 @@ OIDC consent is stored per user and application. Grants persist until the user r
 
 The optional `OIDC_REVOKE_CONSENTS_ON_IDENTITY_CHANGE` and `OIDC_REVOKE_SESSIONS_ON_IDENTITY_CHANGE` settings default to `false`. When enabled, changes to the account's OIDC profile (name, exposed username, picture, phone, address, or profile claims) revoke the user's consent grants and/or sessions. Email is currently set by the invitation and cannot be changed in the self-service account page, so there is no email-change action to trigger these policies.
 
+`WEBAUTHN_ALLOW_MULTIPLE_PASSKEYS_PER_AUTHENTICATOR` defaults to `true` and allows registering more than one passkey for the same Hanko account through one authenticator or passkey provider. Set it to `false` to send existing account credentials in WebAuthn's `excludeCredentials` list and block registration through an authenticator that already stores one of them. The passkeys page displays a warning when this restriction is enabled.
+
 ## Scope
 
 Hanko focuses on passkey-first OIDC. It does not implement password sign-in, SAML, LDAP, or workflow automation. Recovery methods and SCIM are not implemented.

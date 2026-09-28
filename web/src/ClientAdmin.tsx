@@ -227,6 +227,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [passkeyError, setPasskeyError] = useState("");
   const [passkeyMessage, setPasskeyMessage] = useState("");
   const [passkeys, setPasskeys] = useState<AccountPasskey[]>([]);
+  const [allowMultiplePasskeysPerAuthenticator, setAllowMultiplePasskeysPerAuthenticator] = useState(true);
   const [consents, setConsents] = useState<ConsentGrant[]>([]);
   const [consentsLoading, setConsentsLoading] = useState(false);
   const [consentActionId, setConsentActionId] = useState("");
@@ -312,7 +313,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     let active = true;
     async function load() {
       try {
-        const sessionPromise = api<{ hanko_color?: string; hanko_seed?: string; oidc_username?: string | null; oidc_name?: string | null; oidc_picture?: string | null; oidc_phone?: string | null; oidc_address?: Partial<OidcAddress> | null; oidc_profile_claims?: OidcProfileClaims | null }>("/api/session");
+        const sessionPromise = api<{ hanko_color?: string; hanko_seed?: string; oidc_username?: string | null; oidc_name?: string | null; oidc_picture?: string | null; oidc_phone?: string | null; oidc_address?: Partial<OidcAddress> | null; oidc_profile_claims?: OidcProfileClaims | null; allow_multiple_passkeys_per_authenticator?: boolean }>("/api/session");
         const [session, clientList, groupList] = isAdmin
           ? await Promise.all([sessionPromise, api<Client[]>("/api/admin/clients"), api<Group[]>("/api/admin/groups")])
           : [await sessionPromise, [], []];
@@ -330,6 +331,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             ...EMPTY_OIDC_PROFILE,
             ...(session.oidc_profile_claims ?? {}),
           });
+          setAllowMultiplePasskeysPerAuthenticator(session.allow_multiple_passkeys_per_authenticator ?? true);
         }
       } catch (loadError) {
         if (active) setLoadError(errorMessage(loadError, "load admin dashboard"));
@@ -1546,6 +1548,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             <section className="passkey-list" aria-labelledby="passkey-list-title">
               <div className="client-list-heading"><h2 id="passkey-list-title">Registered devices <span>{passkeys.length}</span></h2><button className="client-add-action" type="button" onClick={() => void addPasskey()} disabled={addingPasskey}><Plus aria-hidden="true" /> {addingPasskey ? passkeyAddStage === "confirming" ? "Confirm with an existing passkey…" : "Create a new passkey…" : "Add passkey"}</button></div>
               <p className="admin-hint">Adding a passkey takes two prompts: first, use an existing passkey to confirm it’s you. Then register the new passkey when your device prompts again.</p>
+              {!allowMultiplePasskeysPerAuthenticator && <p className="passkey-policy-warning" role="status">This Hanko server prevents registering another passkey with an authenticator that already has one for this account. Use a different authenticator, or enable WEBAUTHN_ALLOW_MULTIPLE_PASSKEYS_PER_AUTHENTICATOR and restart Hanko.</p>}
               {accountName && <p className="admin-hint">Sign-in account name: <PrivateValue>{accountName}</PrivateValue>. Save this name in case an older passkey needs account-specific sign-in.</p>}
               {passkeys.length < 2 && !passkeysLoading && <p className="admin-hint">Add a second passkey stored independently, then test signing in with it in a separate browser session.</p>}
               {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}

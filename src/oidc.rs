@@ -2590,6 +2590,7 @@ mod tests {
             "localhost",
             &config.public_origin,
             database.clone(),
+            config.allow_multiple_passkeys_per_authenticator,
         )
         .unwrap();
         let state = AppState {

@@ -597,6 +597,7 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .passkey-feedback { margin: 10px 0 0; font-size: 14px; line-height: 1.5; }
 .passkey-feedback-success { color: var(--success); }
 .passkey-feedback-error { color: var(--error); }
+.passkey-policy-warning { margin: 12px 0; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--error), transparent 55%); border-radius: 8px; color: var(--ink); background: color-mix(in srgb, var(--error), transparent 96%); font-size: 14px; line-height: 1.5; }
 .passkey-list { margin-top: 0; }
 .passkey-table-input { width: min(100%, 235px); min-height: 40px; padding: 8px 9px; border: 1px solid var(--rule); border-radius: 6px; color: var(--ink); background: var(--paper-raised); font: inherit; }
 .passkey-table form { margin: 0; }

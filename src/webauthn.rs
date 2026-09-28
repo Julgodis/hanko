@@ -33,6 +33,7 @@ fn credential_options(value: Value) -> Result<Value, WebauthnError> {
 pub struct WebauthnService {
     webauthn: Webauthn,
     database: Database,
+    allow_multiple_passkeys_per_authenticator: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,13 +76,22 @@ pub enum WebauthnError {
 }
 
 impl WebauthnService {
-    pub fn new(rp_id: &str, origin: &Url, database: Database) -> Result<Self, WebauthnError> {
+    pub fn new(
+        rp_id: &str,
+        origin: &Url,
+        database: Database,
+        allow_multiple_passkeys_per_authenticator: bool,
+    ) -> Result<Self, WebauthnError> {
         let webauthn = WebauthnBuilder::new(rp_id, origin)
             .map_err(|_| WebauthnError::Configuration)?
             .rp_name("Hanko")
             .build()
             .map_err(|_| WebauthnError::Configuration)?;
-        Ok(Self { webauthn, database })
+        Ok(Self {
+            webauthn,
+            database,
+            allow_multiple_passkeys_per_authenticator,
+        })
     }
 
     pub async fn start_registration(
@@ -129,14 +139,20 @@ impl WebauthnService {
             }
             (Some(approval_hash), false)
         };
-        let excluded = passkeys
-            .iter()
-            .map(|passkey| passkey.cred_id().clone())
-            .collect();
+        let excluded = if self.allow_multiple_passkeys_per_authenticator {
+            None
+        } else {
+            Some(
+                passkeys
+                    .iter()
+                    .map(|passkey| passkey.cred_id().clone())
+                    .collect(),
+            )
+        };
         let user_uuid = Uuid::parse_str(user_id).map_err(|_| WebauthnError::User)?;
         let (options, state) = self
             .webauthn
-            .start_passkey_registration(user_uuid, username, display_name, Some(excluded))
+            .start_passkey_registration(user_uuid, username, display_name, excluded)
             .map_err(|_| WebauthnError::Protocol)?;
         let state = CeremonyState::Registration {
             state,
@@ -778,6 +794,7 @@ mod tests {
             "localhost",
             &Url::parse("http://localhost:3000").unwrap(),
             database.clone(),
+            true,
         )
         .unwrap();
         let browser_hash = digest("browser");
@@ -822,6 +839,7 @@ mod tests {
             "localhost",
             &Url::parse("http://localhost:3000").unwrap(),
             database.clone(),
+            true,
         )
         .unwrap();
         let user_id = "00000000-0000-4000-8000-000000000004";
@@ -890,6 +908,7 @@ mod tests {
             "localhost",
             &Url::parse("http://localhost:3000").unwrap(),
             database.clone(),
+            true,
         )
         .unwrap();
         let user_id = "00000000-0000-4000-8000-000000000003";

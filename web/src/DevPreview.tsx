@@ -129,6 +129,7 @@ function installPreviewApi() {
       oidc_phone: screen === "join-invite" ? null : "+1 555 123 4567",
       oidc_address: screen === "join-invite" ? null : { street_address: "42 Cedar Lane, Apartment 5", locality: "Portland", region: "Oregon", postal_code: "97205", country: "United States" },
       oidc_profile_claims: screen === "join-invite" ? {} : { profile: "https://sana.example.com", given_name: "Sana", family_name: "Lee", nickname: "Sana", website: "https://sana.example.com", locale: "en-US", zoneinfo: "America/Los_Angeles", app_roles: { hnk_catalog: ["reader", "publisher"] } },
+      allow_multiple_passkeys_per_authenticator: true,
     });
     if (url.pathname === "/api/setup-status") return jsonResponse({ initialized: screen !== "setup", bootstrap_enabled: true });
     if (url.pathname === "/api/authorize/request") return jsonResponse({
