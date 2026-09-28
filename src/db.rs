@@ -43,7 +43,10 @@ mod tests {
                 .fetch_all(&database.pool)
                 .await
                 .unwrap();
-        assert_eq!(migration_versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(
+            migration_versions,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        );
 
         let tables: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'passkeys', 'groups', 'group_claim_mappings', 'oidc_clients', 'authorization_codes', 'refresh_tokens', 'webauthn_ceremonies', 'signing_keys')",
@@ -107,6 +110,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(auth_method_column, 1);
+
+        let client_auth_policy_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('oidc_clients') WHERE name IN ('token_endpoint_auth_method', 'pkce_policy')",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(client_auth_policy_columns, 2);
 
         for table in ["authorization_requests", "authorization_codes"] {
             let challenge_required: i64 = sqlx::query_scalar(&format!(

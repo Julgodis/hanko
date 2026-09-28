@@ -124,7 +124,7 @@ struct TokenRequest {
     grant_type: String,
     code: Option<String>,
     redirect_uri: Option<String>,
-    client_id: String,
+    client_id: Option<String>,
     refresh_token: Option<String>,
     code_verifier: Option<String>,
     client_secret: Option<String>,
@@ -307,14 +307,14 @@ async fn authorize_request(
         );
         return authorization_page_error(&state, "invalid_client");
     };
-    let client_type = match sqlx::query_scalar::<_, String>(
-        "SELECT client_type FROM oidc_clients WHERE client_id = ? AND enabled = 1",
+    let client = match sqlx::query(
+        "SELECT client_type, pkce_policy FROM oidc_clients WHERE client_id = ? AND enabled = 1",
     )
     .bind(&client_id)
     .fetch_optional(&state.database.pool)
     .await
     {
-        Ok(Some(client_type)) => client_type,
+        Ok(Some(client)) => client,
         Ok(None) => {
             tracing::warn!(
                 endpoint = "/authorize",
@@ -328,6 +328,12 @@ async fn authorize_request(
             return authorization_page_error(&state, "temporarily_unavailable");
         }
     };
+    let client_type: String = client
+        .try_get("client_type")
+        .map_err(|_| OAuthError::server_error())?;
+    let pkce_policy: String = client
+        .try_get("pkce_policy")
+        .map_err(|_| OAuthError::server_error())?;
     let Some(redirect_uri) = parameters.single("redirect_uri").map(str::to_owned) else {
         tracing::warn!(
             endpoint = "/authorize",
@@ -377,7 +383,8 @@ async fn authorize_request(
             return authorization_protocol_error(&input, "invalid_request");
         }
     };
-    let scopes = match validate_authorize_request(&state, &input, &client_type).await {
+    let scopes = match validate_authorize_request(&state, &input, &client_type, &pkce_policy).await
+    {
         Ok(scopes) => scopes,
         Err(error) if error.status.is_client_error() => {
             return authorization_protocol_error(&input, error.error);
@@ -772,10 +779,20 @@ async fn token(
     {
         return Err(OAuthError::rate_limited());
     }
+    let authorization_header_present = headers.contains_key(header::AUTHORIZATION);
+    let basic_credentials = parse_basic_client_credentials(&headers)?;
+    let client_id = match (input.client_id.as_deref(), basic_credentials.as_ref()) {
+        (Some(form_client_id), Some((basic_client_id, _))) if form_client_id != basic_client_id => {
+            return Err(OAuthError::invalid_client());
+        }
+        (Some(form_client_id), _) => form_client_id.to_owned(),
+        (None, Some((basic_client_id, _))) => basic_client_id.clone(),
+        (None, None) => return Err(OAuthError::invalid_client()),
+    };
     let client = sqlx::query(
-        "SELECT client_type, token_endpoint_auth_method, client_secret_hash, enabled FROM oidc_clients WHERE client_id = ?",
+        "SELECT client_type, token_endpoint_auth_method, pkce_policy, client_secret_hash, enabled FROM oidc_clients WHERE client_id = ?",
     )
-    .bind(&input.client_id)
+    .bind(&client_id)
     .fetch_optional(&state.database.pool)
     .await
     .map_err(|_| OAuthError::server_error())?
@@ -792,23 +809,27 @@ async fn token(
     let auth_method: String = client
         .try_get("token_endpoint_auth_method")
         .map_err(|_| OAuthError::server_error())?;
+    let pkce_policy: String = client
+        .try_get("pkce_policy")
+        .map_err(|_| OAuthError::server_error())?;
     let stored_secret: Option<String> = client
         .try_get("client_secret_hash")
         .map_err(|_| OAuthError::server_error())?;
     match (client_type.as_str(), auth_method.as_str()) {
-        ("public", "none")
-            if input.client_secret.is_none() && !headers.contains_key(header::AUTHORIZATION) => {}
-        ("confidential", "client_secret_post") if !headers.contains_key(header::AUTHORIZATION) => {
+        ("public", "none") if input.client_secret.is_none() && !authorization_header_present => {}
+        ("confidential", "client_secret_post") if !authorization_header_present => {
             let Some(secret) = input.client_secret.as_deref() else {
                 return Err(OAuthError::invalid_client());
             };
-            let Some(stored) = stored_secret else {
+            validate_client_secret(secret, stored_secret.as_deref())?;
+        }
+        ("confidential", "client_secret_basic")
+            if authorization_header_present && input.client_secret.is_none() =>
+        {
+            let Some((_, secret)) = basic_credentials.as_ref() else {
                 return Err(OAuthError::invalid_client());
             };
-            let actual = URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes()));
-            if !constant_time_string_eq(&actual, &stored) {
-                return Err(OAuthError::invalid_client());
-            }
+            validate_client_secret(secret, stored_secret.as_deref())?;
         }
         _ => return Err(OAuthError::invalid_client()),
     }
@@ -825,8 +846,8 @@ async fn token(
                 .ok_or_else(OAuthError::invalid_grant)?;
             exchange_authorization_code(
                 &state,
-                &input.client_id,
-                &client_type,
+                &client_id,
+                &pkce_policy,
                 code,
                 redirect_uri,
                 input.code_verifier.as_deref(),
@@ -838,17 +859,74 @@ async fn token(
                 .refresh_token
                 .as_deref()
                 .ok_or_else(OAuthError::invalid_grant)?;
-            exchange_refresh_token(&state, &input.client_id, refresh_token).await
+            exchange_refresh_token(&state, &client_id, refresh_token).await
         }
         _ => Err(OAuthError::invalid_grant()),
     }
     .map(Json)
 }
 
+fn parse_basic_client_credentials(
+    headers: &HeaderMap,
+) -> Result<Option<(String, String)>, OAuthError> {
+    if headers.get_all(header::AUTHORIZATION).iter().count() > 1 {
+        return Err(OAuthError::invalid_client());
+    }
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| OAuthError::invalid_client())?;
+    let mut parts = value.split_ascii_whitespace();
+    let Some(scheme) = parts.next() else {
+        return Err(OAuthError::invalid_client());
+    };
+    if !scheme.eq_ignore_ascii_case("Basic") {
+        return Ok(None);
+    }
+    let Some(encoded) = parts.next() else {
+        return Err(OAuthError::invalid_client());
+    };
+    if parts.next().is_some() {
+        return Err(OAuthError::invalid_client());
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| OAuthError::invalid_client())?;
+    let decoded = String::from_utf8(decoded).map_err(|_| OAuthError::invalid_client())?;
+    let (raw_client_id, raw_secret) = decoded
+        .split_once(':')
+        .ok_or_else(OAuthError::invalid_client)?;
+    let decode_form_component = |component: &str| {
+        let encoded = format!("value={component}");
+        url::form_urlencoded::parse(encoded.as_bytes())
+            .next()
+            .map(|(_, value)| value.into_owned())
+            .ok_or_else(OAuthError::invalid_client)
+    };
+    let client_id = decode_form_component(raw_client_id)?;
+    let secret = decode_form_component(raw_secret)?;
+    if client_id.is_empty() || secret.is_empty() {
+        return Err(OAuthError::invalid_client());
+    }
+    Ok(Some((client_id, secret)))
+}
+
+fn validate_client_secret(secret: &str, stored_secret: Option<&str>) -> Result<(), OAuthError> {
+    let Some(stored) = stored_secret else {
+        return Err(OAuthError::invalid_client());
+    };
+    let actual = URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes()));
+    if constant_time_string_eq(&actual, stored) {
+        Ok(())
+    } else {
+        Err(OAuthError::invalid_client())
+    }
+}
+
 async fn exchange_authorization_code(
     state: &AppState,
     client_id: &str,
-    client_type: &str,
+    pkce_policy: &str,
     code_value: &str,
     requested_redirect_uri: &str,
     code_verifier: Option<&str>,
@@ -879,7 +957,7 @@ async fn exchange_authorization_code(
             valid_pkce_verifier(verifier)
                 && constant_time_string_eq(&s256_challenge(verifier), challenge)
         }
-        (None, None) if client_type == "confidential" => true,
+        (None, None) if pkce_policy == "optional" => true,
         _ => false,
     };
     if requested_redirect_uri != redirect_uri || !pkce_valid {
@@ -1499,6 +1577,7 @@ async fn validate_authorize_request(
     state: &AppState,
     input: &AuthorizeRequest,
     client_type: &str,
+    pkce_policy: &str,
 ) -> Result<Vec<String>, OAuthError> {
     if input.response_type != "code"
         || input.state.is_empty()
@@ -1523,14 +1602,14 @@ async fn validate_authorize_request(
         // omitted method alongside a challenge cannot silently downgrade it.
         _ => false,
     };
-    if (client_type == "public" && !pkce_present)
-        || (client_type == "confidential" && input.code_challenge.is_some() && !pkce_present)
-        || (client_type == "confidential"
-            && input.code_challenge.is_none()
-            && input.code_challenge_method.is_some())
+    if !matches!(pkce_policy, "required" | "optional")
+        || (client_type == "public" && pkce_policy != "required")
+        || (pkce_policy == "required" && !pkce_present)
+        || (input.code_challenge.is_some() && !pkce_present)
+        || (input.code_challenge.is_none() && input.code_challenge_method.is_some())
     {
         return Err(OAuthError::invalid_request(
-            "public clients require PKCE S256; confidential clients may omit PKCE or use S256",
+            "public clients require PKCE S256; confidential clients follow their configured PKCE policy",
         ));
     }
     let scopes = parse_scopes(&input.scope)?;
@@ -2308,7 +2387,7 @@ mod tests {
         let client_id = Uuid::new_v4().to_string();
         let secret = "test-confidential-secret".to_owned();
         let secret_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes()));
-        sqlx::query("INSERT INTO oidc_clients (client_id, client_secret_hash, client_type, token_endpoint_auth_method, name, enabled, created_at) VALUES (?, ?, 'confidential', 'client_secret_post', 'Confidential Test Client', 1, 1)")
+        sqlx::query("INSERT INTO oidc_clients (client_id, client_secret_hash, client_type, token_endpoint_auth_method, pkce_policy, name, enabled, created_at) VALUES (?, ?, 'confidential', 'client_secret_post', 'optional', 'Confidential Test Client', 1, 1)")
             .bind(&client_id)
             .bind(secret_hash)
             .execute(&state.database.pool)
