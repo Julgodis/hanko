@@ -1590,7 +1590,7 @@ async fn consume_invitation(
             .bind(&username)
             .bind(random_secret())
             .bind(label)
-            .bind(invitation_link_id)
+            .bind(&invitation_link_id)
             .bind(now + SESSION_SECONDS)
             .bind(now)
             .bind(now)
