@@ -117,6 +117,12 @@ struct ResumeRequest {
 #[derive(Deserialize)]
 struct ContinueRequest {
     request_id: String,
+    #[serde(default = "default_consent_confirmation")]
+    consent: bool,
+}
+
+fn default_consent_confirmation() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -211,6 +217,13 @@ impl OAuthError {
             status: StatusCode::BAD_REQUEST,
             error: "login_required",
             description: "a fresh user authentication is required".to_owned(),
+        }
+    }
+    fn consent_required() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: "consent_required",
+            description: "user consent is required for the requested scopes".to_owned(),
         }
     }
     fn rate_limited() -> Self {
@@ -455,16 +468,47 @@ async fn authorize_request(
             log_group_access_denial(&input.client_id, &session.user_id);
             return authorization_protocol_error(&input, "access_denied");
         }
-        return authorization_protocol_error(
-            &input,
-            if force_reauthentication {
-                "login_required"
-            } else {
-                // This provider asks for consent on every authorization and has no
-                // stored grant that could satisfy prompt=none.
-                "consent_required"
-            },
-        );
+        if force_reauthentication {
+            return authorization_protocol_error(&input, "login_required");
+        }
+        if !consent_covers(
+            &state.database.pool,
+            &session.user_id,
+            &input.client_id,
+            &scopes,
+            now,
+        )
+        .await?
+        {
+            return authorization_protocol_error(&input, "consent_required");
+        }
+        let auth_time =
+            sqlx::query_scalar::<_, i64>("SELECT created_at FROM sessions WHERE session_hash = ?")
+                .bind(&session.session_hash)
+                .fetch_optional(&state.database.pool)
+                .await
+                .map_err(|_| OAuthError::server_error())?
+                .ok_or_else(OAuthError::invalid_grant)?;
+        let code = crate::security::random_secret();
+        sqlx::query("INSERT INTO authorization_codes (code_hash, client_id, user_id, redirect_uri, scopes, nonce, code_challenge, created_at, expires_at, auth_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(digest(&code))
+            .bind(&input.client_id)
+            .bind(&session.user_id)
+            .bind(&input.redirect_uri)
+            .bind(serde_json::to_string(&scopes).map_err(|_| OAuthError::server_error())?)
+            .bind(input.nonce.as_deref().unwrap_or(""))
+            .bind(input.code_challenge.as_deref())
+            .bind(now)
+            .bind(now + CODE_SECONDS)
+            .bind(auth_time)
+            .execute(&state.database.pool)
+            .await
+            .map_err(|_| OAuthError::server_error())?;
+        return redirect(&callback_with_code(
+            &input.redirect_uri,
+            &code,
+            &input.state,
+        )?);
     }
 
     let prior_session_hash = if force_reauthentication {
@@ -481,7 +525,7 @@ async fn authorize_request(
         .execute(&state.database.pool)
         .await
         .map_err(|_| OAuthError::server_error())?;
-    let inserted = sqlx::query("INSERT INTO authorization_requests (request_hash, browser_hash, client_id, redirect_uri, state, nonce, code_challenge, scopes, created_at, expires_at, max_age, force_reauthentication, prior_session_hash, created_at_ms) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM authorization_requests WHERE expires_at > ?) < 5000")
+    let inserted = sqlx::query("INSERT INTO authorization_requests (request_hash, browser_hash, client_id, redirect_uri, state, nonce, code_challenge, scopes, created_at, expires_at, max_age, force_reauthentication, prior_session_hash, created_at_ms, force_consent) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM authorization_requests WHERE expires_at > ?) < 5000")
         .bind(digest(&request_id))
         .bind(digest(&preauth))
         .bind(&input.client_id)
@@ -497,6 +541,7 @@ async fn authorize_request(
         .bind(force_reauthentication)
         .bind(prior_session_hash)
         .bind(now_ms)
+        .bind(prompts.contains(&"consent"))
         .bind(now)
         .execute(&state.database.pool)
         .await
@@ -561,6 +606,9 @@ async fn authorize_request_info(
     let force_reauthentication: bool = row
         .try_get("force_reauthentication")
         .map_err(|_| OAuthError::server_error())?;
+    let force_consent: bool = row
+        .try_get("force_consent")
+        .map_err(|_| OAuthError::server_error())?;
     let prior_session_hash: Option<Vec<u8>> = row
         .try_get("prior_session_hash")
         .map_err(|_| OAuthError::server_error())?;
@@ -568,6 +616,7 @@ async fn authorize_request_info(
         .try_get("created_at_ms")
         .map_err(|_| OAuthError::server_error())?;
     let mut requires_fresh_authentication = false;
+    let mut consent_required = true;
     let claims = if let Some(session) = session.as_ref() {
         if session.setup_only {
             return Err(OAuthError::invalid_grant());
@@ -580,6 +629,15 @@ async fn authorize_request_info(
             return Err(OAuthError::access_denied());
         }
         let claims = preview_user_claims(&state, &client_id, &session.user_id, &scopes).await?;
+        consent_required = force_consent
+            || !consent_covers(
+                &state.database.pool,
+                &session.user_id,
+                &client_id,
+                &scopes,
+                unix_now(),
+            )
+            .await?;
         let authenticated_at_ms = sqlx::query_scalar::<_, i64>(
             "SELECT authenticated_at_ms FROM sessions WHERE session_hash = ?",
         )
@@ -607,6 +665,7 @@ async fn authorize_request_info(
         "redirect_uri": row.try_get::<String, _>("redirect_uri").map_err(|_| OAuthError::server_error())?,
         "scopes": scopes,
         "requires_fresh_authentication": requires_fresh_authentication,
+        "consent_required": consent_required,
         "claims": claims,
     })))
 }
@@ -643,6 +702,9 @@ async fn continue_authorize(
         .map_err(|_| OAuthError::server_error())?;
     let force_reauthentication: bool = row
         .try_get("force_reauthentication")
+        .map_err(|_| OAuthError::server_error())?;
+    let force_consent: bool = row
+        .try_get("force_consent")
         .map_err(|_| OAuthError::server_error())?;
     let prior_session_hash: Option<Vec<u8>> = row
         .try_get("prior_session_hash")
@@ -694,6 +756,53 @@ async fn continue_authorize(
         .begin()
         .await
         .map_err(|_| OAuthError::server_error())?;
+    let active_grant = sqlx::query_scalar::<_, String>(
+        "SELECT scopes FROM oidc_consents WHERE user_id = ? AND client_id = ? AND (expires_at IS NULL OR expires_at > ?)",
+    )
+    .bind(&session.user_id)
+    .bind(&client_id)
+    .bind(now)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|_| OAuthError::server_error())?;
+    if input.consent {
+        let mut granted_scopes = match active_grant {
+            Some(scopes_json) => serde_json::from_str::<Vec<String>>(&scopes_json)
+                .map_err(|_| OAuthError::server_error())?,
+            None => Vec::new(),
+        };
+        granted_scopes.extend(scopes.iter().cloned());
+        granted_scopes.sort();
+        granted_scopes.dedup();
+        let expires_at = state
+            .config
+            .oidc_consent_lifetime_seconds
+            .map(|lifetime| now.saturating_add(lifetime));
+        sqlx::query("INSERT INTO oidc_consents (user_id, client_id, scopes, granted_at, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, client_id) DO UPDATE SET scopes = excluded.scopes, granted_at = excluded.granted_at, expires_at = excluded.expires_at")
+            .bind(&session.user_id)
+            .bind(&client_id)
+            .bind(serde_json::to_string(&granted_scopes).map_err(|_| OAuthError::server_error())?)
+            .bind(now)
+            .bind(expires_at)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| OAuthError::server_error())?;
+    } else {
+        if force_consent {
+            return Err(OAuthError::consent_required());
+        }
+        let covered = active_grant
+            .map(|scopes_json| {
+                serde_json::from_str::<Vec<String>>(&scopes_json)
+                    .map(|granted| scopes.iter().all(|scope| granted.contains(scope)))
+            })
+            .transpose()
+            .map_err(|_| OAuthError::server_error())?
+            .unwrap_or(false);
+        if !covered {
+            return Err(OAuthError::consent_required());
+        }
+    }
     sqlx::query("INSERT INTO authorization_codes (code_hash, client_id, user_id, redirect_uri, scopes, nonce, code_challenge, created_at, expires_at, auth_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(digest(&code)).bind(&client_id).bind(&session.user_id).bind(&redirect_uri)
         .bind(serde_json::to_string(&scopes).map_err(|_| OAuthError::server_error())?)
@@ -1742,6 +1851,30 @@ async fn ensure_scopes_still_allowed(
     } else {
         Err(OAuthError::invalid_scope("requested scope is not allowed"))
     }
+}
+
+async fn consent_covers(
+    pool: &sqlx::SqlitePool,
+    user_id: &str,
+    client_id: &str,
+    requested: &[String],
+    now: i64,
+) -> Result<bool, OAuthError> {
+    let scopes_json = sqlx::query_scalar::<_, String>(
+        "SELECT scopes FROM oidc_consents WHERE user_id = ? AND client_id = ? AND (expires_at IS NULL OR expires_at > ?)",
+    )
+    .bind(user_id)
+    .bind(client_id)
+    .bind(now)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| OAuthError::server_error())?;
+    let Some(scopes_json) = scopes_json else {
+        return Ok(false);
+    };
+    let granted: Vec<String> =
+        serde_json::from_str(&scopes_json).map_err(|_| OAuthError::server_error())?;
+    Ok(requested.iter().all(|scope| granted.contains(scope)))
 }
 
 fn parse_scopes(scope: &str) -> Result<Vec<String>, OAuthError> {

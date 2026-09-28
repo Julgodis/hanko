@@ -13,6 +13,9 @@ pub struct Config {
     pub bootstrap_token: Option<String>,
     pub trusted_proxy_addresses: Vec<IpAddr>,
     pub required_user_claims: Vec<String>,
+    pub oidc_consent_lifetime_seconds: Option<i64>,
+    pub revoke_consents_on_identity_change: bool,
+    pub revoke_sessions_on_identity_change: bool,
 }
 
 impl Config {
@@ -56,6 +59,17 @@ impl Config {
             .unwrap_or_default();
         config.required_user_claims =
             parse_required_user_claims(&std::env::var("REQUIRED_USER_CLAIMS").unwrap_or_default())?;
+        config.oidc_consent_lifetime_seconds = parse_consent_lifetime(
+            &std::env::var("OIDC_CONSENT_LIFETIME_SECONDS").unwrap_or_default(),
+        )?;
+        config.revoke_consents_on_identity_change = parse_bool_setting(
+            "OIDC_REVOKE_CONSENTS_ON_IDENTITY_CHANGE",
+            &std::env::var("OIDC_REVOKE_CONSENTS_ON_IDENTITY_CHANGE").unwrap_or_default(),
+        )?;
+        config.revoke_sessions_on_identity_change = parse_bool_setting(
+            "OIDC_REVOKE_SESSIONS_ON_IDENTITY_CHANGE",
+            &std::env::var("OIDC_REVOKE_SESSIONS_ON_IDENTITY_CHANGE").unwrap_or_default(),
+        )?;
         Ok(config)
     }
 
@@ -107,6 +121,9 @@ impl Config {
             bootstrap_token: None,
             trusted_proxy_addresses: Vec::new(),
             required_user_claims: Vec::new(),
+            oidc_consent_lifetime_seconds: None,
+            revoke_consents_on_identity_change: false,
+            revoke_sessions_on_identity_change: false,
         })
     }
 
@@ -173,6 +190,28 @@ fn parse_required_user_claims(value: &str) -> Result<Vec<String>, ConfigError> {
     Ok(claims)
 }
 
+fn parse_consent_lifetime(value: &str) -> Result<Option<i64>, ConfigError> {
+    let value = value.trim();
+    if value.is_empty() || value == "0" {
+        return Ok(None);
+    }
+    let seconds = value
+        .parse::<i64>()
+        .map_err(|_| ConfigError::InvalidConsentLifetime)?;
+    if seconds < 0 {
+        return Err(ConfigError::InvalidConsentLifetime);
+    }
+    Ok(Some(seconds))
+}
+
+fn parse_bool_setting(name: &'static str, value: &str) -> Result<bool, ConfigError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "false" | "0" | "no" | "off" => Ok(false),
+        "true" | "1" | "yes" | "on" => Ok(true),
+        _ => Err(ConfigError::InvalidBooleanSetting(name)),
+    }
+}
+
 fn parse_master_key(value: &str) -> Result<[u8; 32], ConfigError> {
     let key = STANDARD
         .decode(value)
@@ -194,6 +233,10 @@ pub enum ConfigError {
     InvalidTrustedProxyAddresses,
     #[error("REQUIRED_USER_CLAIMS must contain unique supported OIDC user field names")]
     InvalidRequiredUserClaims,
+    #[error("OIDC_CONSENT_LIFETIME_SECONDS must be 0 or a positive integer")]
+    InvalidConsentLifetime,
+    #[error("{0} must be a boolean value")]
+    InvalidBooleanSetting(&'static str),
 }
 
 #[cfg(test)]

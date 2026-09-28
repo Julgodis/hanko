@@ -1,4 +1,4 @@
-import { Check, Copy, Fingerprint, KeyRound, Mail, Pencil, Plus, Shield, Users, UserRound, Stamp, Trash2 } from "lucide-react";
+import { Check, Copy, Fingerprint, KeyRound, Mail, Pencil, Plus, Shield, ShieldCheck, Users, UserRound, Stamp, Trash2 } from "lucide-react";
 import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
@@ -39,11 +39,12 @@ type Invitation = { id: string; label: string; email: string | null; max_uses: n
 type CreatedInvitation = { id: string; label: string; email: string | null; enrollment_url: string; expires_at: number };
 type SigningKey = { kid: string; algorithm: string; status: string; created_at: number; retire_after: number | null };
 type AccountPasskey = { id: string; label: string; created_at: number; last_used_at: number | null };
+type ConsentGrant = { client_id: string; client_name: string; scopes: string[]; granted_at: number; expires_at: number | null };
 type OidcAddress = { street_address: string; locality: string; region: string; postal_code: string; country: string };
 const EMPTY_OIDC_ADDRESS: OidcAddress = { street_address: "", locality: "", region: "", postal_code: "", country: "" };
 type OidcProfileDraft = Required<Omit<OidcProfileClaims, "app_roles">>;
 const EMPTY_OIDC_PROFILE: OidcProfileDraft = { profile: "", given_name: "", family_name: "", nickname: "", website: "", locale: "", zoneinfo: "" };
-type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys";
+type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys" | "consents";
 type ClaimDraft = { claim_name: string; user_attribute_path: string; required_scope: string };
 type GroupClaimDraft = { claim_name: string; claim_value: string; required_scope: Scope };
 type CreatedClient = {
@@ -99,6 +100,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
     if (previewScreen === "groups") return "groups";
     if (previewScreen === "keys") return "keys";
     if (previewScreen === "passkeys") return "passkeys";
+    if (previewScreen === "consents") return "consents";
     if (previewScreen === "hanko") return "hanko";
     return isAdmin ? "clients" : "hanko";
   };
@@ -133,6 +135,11 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
   const [passkeyError, setPasskeyError] = useState("");
   const [passkeyMessage, setPasskeyMessage] = useState("");
   const [passkeys, setPasskeys] = useState<AccountPasskey[]>([]);
+  const [consents, setConsents] = useState<ConsentGrant[]>([]);
+  const [consentsLoading, setConsentsLoading] = useState(false);
+  const [consentActionId, setConsentActionId] = useState("");
+  const [consentMessage, setConsentMessage] = useState("");
+  const [consentError, setConsentError] = useState("");
   const [passkeyDrafts, setPasskeyDrafts] = useState<Record<string, string>>({});
   const [passkeysLoading, setPasskeysLoading] = useState(false);
   const [passkeyActionId, setPasskeyActionId] = useState("");
@@ -194,6 +201,10 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
     setPasskeyDrafts(Object.fromEntries(records.map((passkey) => [passkey.id, passkey.label])));
   }
 
+  async function refreshConsents() {
+    setConsents(await api<ConsentGrant[]>("/api/account/consents"));
+  }
+
   useEffect(() => {
     let active = true;
     async function load() {
@@ -249,15 +260,36 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
             setPasskeyDrafts(Object.fromEntries(records.map((passkey) => [passkey.id, passkey.label])));
           }
         }
+        if (activeTab === "consents") {
+          setConsentsLoading(true);
+          const records = await api<ConsentGrant[]>("/api/account/consents");
+          if (active) setConsents(records);
+        }
       } catch (tabError) {
         if (active) setLoadError(errorMessage(tabError, "load admin tab"));
       } finally {
         if (active && activeTab === "passkeys") setPasskeysLoading(false);
+        if (active && activeTab === "consents") setConsentsLoading(false);
       }
     }
     void loadTabData();
     return () => { active = false; };
   }, [activeTab, isAdmin]);
+
+  async function revokeConsent(grant: ConsentGrant) {
+    setConsentActionId(grant.client_id);
+    setConsentError("");
+    setConsentMessage("");
+    try {
+      await api(`/api/account/consents/${encodeURIComponent(grant.client_id)}`, { method: "DELETE" });
+      await refreshConsents();
+      setConsentMessage(`Access for ${grant.client_name} was revoked.`);
+    } catch (cause) {
+      setConsentError(errorMessage(cause, "revoke application access"));
+    } finally {
+      setConsentActionId("");
+    }
+  }
 
   useEffect(() => {
     if (clientFormMode !== null || userFormOpen || groupFormOpen || editingUser) {
@@ -894,6 +926,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
     ] : []),
     { id: "hanko", label: "Profile", icon: <Stamp aria-hidden="true" /> },
     { id: "passkeys", label: "Passkeys", icon: <Fingerprint aria-hidden="true" /> },
+    { id: "consents", label: "Applications", icon: <ShieldCheck aria-hidden="true" /> },
   ];
   const tabTitles: Record<Tab, [string, string]> = {
     clients: ["OIDC clients", "Connect applications to Hanko."],
@@ -902,6 +935,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
     keys: ["Signing keys", "Manage the keys used to sign tokens."],
     hanko: ["Your profile", "Manage the details shared with apps and your personal Hanko."],
     passkeys: ["Passkeys", "Manage the devices that can sign in to your account."],
+    consents: ["Authorized applications", "Review the access you have granted and revoke it at any time."],
   };
   const [tabTitle, tabDescription] = tabTitles[activeTab];
   const clientBeingEdited = clients.find((client) => client.client_id === editingClientId) ?? null;
@@ -921,7 +955,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       <nav className="admin-nav" aria-label="Account and administration">
         <label className="admin-mobile-select"><span>Section</span><select value={activeTab} onChange={(event) => selectTab(event.target.value as Tab)}>
           {isAdmin && <optgroup label="Administration">{tabs.filter((tab) => ["clients", "users", "groups", "keys"].includes(tab.id)).map((tab) => <option key={tab.id} value={tab.id}>{tab.label}</option>)}</optgroup>}
-          <optgroup label="Account">{tabs.filter((tab) => tab.id === "hanko" || tab.id === "passkeys").map((tab) => <option key={tab.id} value={tab.id}>{tab.label}</option>)}</optgroup>
+          <optgroup label="Account">{tabs.filter((tab) => tab.id === "hanko" || tab.id === "passkeys" || tab.id === "consents").map((tab) => <option key={tab.id} value={tab.id}>{tab.label}</option>)}</optgroup>
         </select></label>
         {isAdmin && <div className="admin-nav-group">
           <p>Administration</p>
@@ -929,7 +963,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
         </div>}
         <div className="admin-nav-group admin-nav-account">
           <p>Account</p>
-          {tabs.filter((tab) => tab.id === "hanko" || tab.id === "passkeys").map((tab) => <button key={tab.id} type="button" className="admin-nav-tab" aria-current={activeTab === tab.id ? "page" : undefined} onClick={() => selectTab(tab.id)}>{tab.icon}<span>{tab.label}</span></button>)}
+          {tabs.filter((tab) => tab.id === "hanko" || tab.id === "passkeys" || tab.id === "consents").map((tab) => <button key={tab.id} type="button" className="admin-nav-tab" aria-current={activeTab === tab.id ? "page" : undefined} onClick={() => selectTab(tab.id)}>{tab.icon}<span>{tab.label}</span></button>)}
         </div>
       </nav>
 
@@ -1208,6 +1242,21 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
               {oidcProfileMessage && <p className={`admin-message${oidcProfileMessage.includes("saved") ? "" : " admin-message-error"}`} role={oidcProfileMessage.includes("saved") ? "status" : "alert"}>{oidcProfileMessage}</p>}
               <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={savingOidcProfile}>{savingOidcProfile ? "Saving profile…" : "Save OIDC profile"}</button></div>
             </form>
+          </section>}
+
+          {activeTab === "consents" && <section className="account-consents" aria-labelledby="consent-list-title">
+            <div className="client-list-heading"><h2 id="consent-list-title">Authorized applications <span>{consents.length}</span></h2></div>
+            <p className="admin-hint">Applications listed here can use the scopes shown until access expires or you revoke it. Revoking also disables that application’s refresh tokens.</p>
+            {consentMessage && <p className="admin-message" role="status">{consentMessage}</p>}
+            {consentError && <p className="admin-message admin-message-error" role="alert">{consentError}</p>}
+            {consentsLoading ? <p className="admin-hint">Loading authorized applications…</p> : consents.length === 0 ? <p className="admin-hint">You haven’t authorized any applications.</p> : <div className="consent-grant-list">
+              {consents.map((grant) => <article className="consent-grant-card" key={grant.client_id}>
+                <div className="consent-grant-heading"><div><h3>{grant.client_name}</h3><p>Authorized {new Date(grant.granted_at * 1000).toLocaleString()}{grant.expires_at ? ` · expires ${new Date(grant.expires_at * 1000).toLocaleString()}` : " · no expiry"}</p></div>
+                  <button className="passkey-remove-button" type="button" onClick={() => void revokeConsent(grant)} disabled={Boolean(consentActionId)}><Trash2 aria-hidden="true" />{consentActionId === grant.client_id ? "Revoking…" : "Revoke access"}</button>
+                </div>
+                <div className="consent-grant-scopes"><span>Granted scopes</span><ul>{grant.scopes.map((scope) => <li key={scope}>{scope}</li>)}</ul></div>
+              </article>)}
+            </div>}
           </section>}
 
           {activeTab === "passkeys" && <section className="account-passkeys">
