@@ -1,6 +1,6 @@
 use axum::{
     Form, Json, Router,
-    extract::{ConnectInfo, Extension, Query, State},
+    extract::{ConnectInfo, Extension, Query, RawQuery, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use subtle::ConstantTimeEq;
 use url::Url;
@@ -31,18 +32,81 @@ const ID_SECONDS: i64 = 5 * 60;
 const REFRESH_SECONDS: i64 = 30 * 24 * 60 * 60;
 const AUTH_REQUEST_SECONDS: i64 = 5 * 60;
 
-#[derive(Deserialize)]
 struct AuthorizeRequest {
     response_type: String,
     client_id: String,
     redirect_uri: String,
     scope: String,
     state: String,
+    state_parameter_present: bool,
     nonce: Option<String>,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
     prompt: Option<String>,
     max_age: Option<i64>,
+}
+
+struct AuthorizeParameters {
+    values: HashMap<String, Vec<String>>,
+}
+
+impl AuthorizeParameters {
+    fn parse(query: Option<&str>) -> Self {
+        let mut values = HashMap::<String, Vec<String>>::new();
+        if let Some(query) = query {
+            for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+                values
+                    .entry(key.into_owned())
+                    .or_default()
+                    .push(value.into_owned());
+            }
+        }
+        Self { values }
+    }
+
+    fn single(&self, key: &str) -> Option<&str> {
+        let values = self.values.get(key)?;
+        (values.len() == 1).then(|| values[0].as_str())
+    }
+
+    fn into_request(self, client_id: String, redirect_uri: String) -> Result<AuthorizeRequest, ()> {
+        const REQUEST_PARAMETERS: &[&str] = &[
+            "response_type",
+            "scope",
+            "state",
+            "nonce",
+            "code_challenge",
+            "code_challenge_method",
+            "prompt",
+            "max_age",
+        ];
+        if REQUEST_PARAMETERS.iter().any(|key| {
+            self.values
+                .get(*key)
+                .is_some_and(|values| values.len() != 1)
+        }) {
+            return Err(());
+        }
+        let max_age = self
+            .single("max_age")
+            .map(|value| value.parse::<i64>())
+            .transpose()
+            .map_err(|_| ())?;
+        let state = self.single("state").map(str::to_owned);
+        Ok(AuthorizeRequest {
+            response_type: self.single("response_type").unwrap_or_default().to_owned(),
+            client_id,
+            redirect_uri,
+            scope: self.single("scope").unwrap_or_default().to_owned(),
+            state: state.clone().unwrap_or_default(),
+            state_parameter_present: state.is_some(),
+            nonce: self.single("nonce").map(str::to_owned),
+            code_challenge: self.single("code_challenge").map(str::to_owned),
+            code_challenge_method: self.single("code_challenge_method").map(str::to_owned),
+            prompt: self.single("prompt").map(str::to_owned),
+            max_age,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -120,6 +184,13 @@ impl OAuthError {
             description: "client authentication failed".to_owned(),
         }
     }
+    fn invalid_scope(description: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: "invalid_scope",
+            description: description.into(),
+        }
+    }
     fn access_denied() -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
@@ -192,11 +263,30 @@ pub fn router() -> Router<AppState> {
 
 async fn authorize(
     State(state): State<AppState>,
-    Query(input): Query<AuthorizeRequest>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+) -> Response {
+    match authorize_request(state.clone(), raw_query, headers, peer).await {
+        Ok(response) => response,
+        Err(error) if error.status.is_server_error() => {
+            tracing::error!(error = error.error, "OIDC authorization request failed");
+            authorization_page_error(&state, "temporarily_unavailable")
+                .unwrap_or_else(|page_error| page_error.into_response())
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn authorize_request(
+    state: AppState,
+    raw_query: Option<String>,
     headers: HeaderMap,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Result<Response, OAuthError> {
-    let _slot = crate::security::try_anonymous_state_slot().ok_or_else(OAuthError::rate_limited)?;
+    let Some(_slot) = crate::security::try_anonymous_state_slot() else {
+        return authorization_page_error(&state, "temporarily_unavailable");
+    };
     let source = crate::security::source_ip(
         peer.map(|Extension(ConnectInfo(address))| address),
         &headers,
@@ -206,10 +296,104 @@ async fn authorize(
         .await
         .map_err(|_| OAuthError::server_error())?
     {
-        return Err(OAuthError::rate_limited());
+        return authorization_page_error(&state, "temporarily_unavailable");
     }
-    let scopes = validate_authorize_request(&state, &input).await?;
-    let prompts = authorize_prompts(&input)?;
+
+    let parameters = AuthorizeParameters::parse(raw_query.as_deref());
+    let Some(client_id) = parameters.single("client_id").map(str::to_owned) else {
+        tracing::warn!(
+            endpoint = "/authorize",
+            "OIDC request rejected: client_id is missing or repeated"
+        );
+        return authorization_page_error(&state, "invalid_client");
+    };
+    let client_type = match sqlx::query_scalar::<_, String>(
+        "SELECT client_type FROM oidc_clients WHERE client_id = ? AND enabled = 1",
+    )
+    .bind(&client_id)
+    .fetch_optional(&state.database.pool)
+    .await
+    {
+        Ok(Some(client_type)) => client_type,
+        Ok(None) => {
+            tracing::warn!(
+                endpoint = "/authorize",
+                client_id = %client_id,
+                "OIDC request rejected: client is unknown or disabled"
+            );
+            return authorization_page_error(&state, "invalid_client");
+        }
+        Err(error) => {
+            tracing::error!(%error, endpoint = "/authorize", "failed to load OIDC client");
+            return authorization_page_error(&state, "temporarily_unavailable");
+        }
+    };
+    let Some(redirect_uri) = parameters.single("redirect_uri").map(str::to_owned) else {
+        tracing::warn!(
+            endpoint = "/authorize",
+            client_id = %client_id,
+            "OIDC request rejected: redirect_uri is missing or repeated"
+        );
+        return authorization_page_error(&state, "invalid_redirect_uri");
+    };
+    match validate_redirect(&state.database, &client_id, &redirect_uri).await {
+        Ok(()) => {}
+        Err(error) if error.error == "invalid_request" => {
+            tracing::warn!(
+                endpoint = "/authorize",
+                client_id = %client_id,
+                "OIDC request rejected: redirect_uri is invalid or not registered"
+            );
+            return authorization_page_error(&state, "invalid_redirect_uri");
+        }
+        Err(error) => {
+            tracing::error!(
+                endpoint = "/authorize",
+                client_id = %client_id,
+                "failed to validate OIDC redirect_uri"
+            );
+            return authorization_page_error(&state, "temporarily_unavailable");
+        }
+    }
+
+    let state_value = parameters.single("state").map(str::to_owned);
+    let input = match parameters.into_request(client_id.clone(), redirect_uri.clone()) {
+        Ok(input) => input,
+        Err(()) => {
+            let input = AuthorizeRequest {
+                response_type: String::new(),
+                client_id,
+                redirect_uri,
+                scope: String::new(),
+                state: state_value.clone().unwrap_or_default(),
+                state_parameter_present: state_value.is_some(),
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                prompt: None,
+                max_age: None,
+            };
+            return authorization_protocol_error(&input, "invalid_request");
+        }
+    };
+    let scopes = match validate_authorize_request(&state, &input, &client_type).await {
+        Ok(scopes) => scopes,
+        Err(error) if error.status.is_client_error() => {
+            return authorization_protocol_error(&input, error.error);
+        }
+        Err(error) => {
+            tracing::error!(
+                endpoint = "/authorize",
+                error = error.error,
+                "failed to validate OIDC request"
+            );
+            return authorization_page_error(&state, "temporarily_unavailable");
+        }
+    };
+    let prompts = match authorize_prompts(&input) {
+        Ok(prompts) => prompts,
+        Err(error) => return authorization_protocol_error(&input, error.error),
+    };
     if prompts.iter().any(|prompt| *prompt == "select_account") {
         return authorization_protocol_error(&input, "account_selection_required");
     }
@@ -295,7 +479,7 @@ async fn authorize(
         .await
         .map_err(|_| OAuthError::server_error())?;
     if inserted.rows_affected() != 1 {
-        return Err(OAuthError::rate_limited());
+        return authorization_page_error(&state, "temporarily_unavailable");
     }
     let location = format!(
         "{}/?request_id={}",
@@ -1244,6 +1428,7 @@ async fn end_session(
 async fn validate_authorize_request(
     state: &AppState,
     input: &AuthorizeRequest,
+    client_type: &str,
 ) -> Result<Vec<String>, OAuthError> {
     if input.response_type != "code"
         || input.state.is_empty()
@@ -1258,23 +1443,6 @@ async fn validate_authorize_request(
             "required authorization parameters are invalid",
         ));
     }
-    let client =
-        sqlx::query("SELECT client_type FROM oidc_clients WHERE client_id = ? AND enabled = 1")
-            .bind(&input.client_id)
-            .fetch_optional(&state.database.pool)
-            .await
-            .map_err(|_| OAuthError::server_error())?;
-    let Some(client) = client else {
-        tracing::warn!(
-            endpoint = "/authorize",
-            client_id = %input.client_id,
-            "OIDC request rejected: client is unknown or disabled"
-        );
-        return Err(OAuthError::invalid_request("unknown client"));
-    };
-    let client_type: String = client
-        .try_get("client_type")
-        .map_err(|_| OAuthError::server_error())?;
     let pkce_present = match (
         input.code_challenge.as_deref(),
         input.code_challenge_method.as_deref(),
@@ -1295,7 +1463,6 @@ async fn validate_authorize_request(
             "public clients require PKCE S256; confidential clients may omit PKCE or use S256",
         ));
     }
-    validate_redirect(&state.database, &input.client_id, &input.redirect_uri).await?;
     let scopes = parse_scopes(&input.scope)?;
     ensure_scopes_still_allowed(state, &input.client_id, &scopes).await?;
     Ok(scopes)
@@ -1324,10 +1491,15 @@ fn authorization_protocol_error(
 ) -> Result<Response, OAuthError> {
     let mut url = Url::parse(&input.redirect_uri)
         .map_err(|_| OAuthError::invalid_request("redirect_uri is invalid"))?;
-    url.query_pairs_mut()
-        .append_pair("error", error)
-        .append_pair("state", &input.state);
+    url.query_pairs_mut().append_pair("error", error);
+    if input.state_parameter_present {
+        url.query_pairs_mut().append_pair("state", &input.state);
+    }
     redirect(url.as_str())
+}
+
+fn authorization_page_error(state: &AppState, error: &str) -> Result<Response, OAuthError> {
+    redirect(&format!("{}/?hanko_error={error}", state.config.issuer()))
 }
 
 async fn validate_redirect(
@@ -1378,9 +1550,7 @@ async fn ensure_scopes_still_allowed(
     {
         Ok(())
     } else {
-        Err(OAuthError::invalid_request(
-            "requested scope is not allowed",
-        ))
+        Err(OAuthError::invalid_scope("requested scope is not allowed"))
     }
 }
 
@@ -1407,14 +1577,14 @@ fn parse_scopes(scope: &str) -> Result<Vec<String>, OAuthError> {
         } else {
             reasons.push(format!("unsupported scopes: {}", unsupported.join(", ")));
         }
-        return Err(OAuthError::invalid_request(format!(
+        return Err(OAuthError::invalid_scope(format!(
             "requested scope \"{scope}\" is invalid: {}",
             reasons.join("; ")
         )));
     }
     let unique: std::collections::HashSet<_> = scopes.iter().collect();
     if unique.len() != scopes.len() {
-        return Err(OAuthError::invalid_request("scope values must be unique"));
+        return Err(OAuthError::invalid_scope("scope values must be unique"));
     }
     Ok(scopes)
 }
