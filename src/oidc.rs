@@ -350,6 +350,7 @@ async fn authorize_request(
             tracing::error!(
                 endpoint = "/authorize",
                 client_id = %client_id,
+                error = error.error,
                 "failed to validate OIDC redirect_uri"
             );
             return authorization_page_error(&state, "temporarily_unavailable");
@@ -2402,6 +2403,13 @@ mod tests {
             .to_str()
             .unwrap()
             .to_owned();
+        let redirect_url = Url::parse(&location).unwrap();
+        if redirect_url
+            .query_pairs()
+            .any(|(key, value)| key == "error" && value == "invalid_request")
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
         let preauth = response
             .headers()
             .get_all(header::SET_COOKIE)
@@ -2416,8 +2424,7 @@ mod tests {
                     .map(str::to_owned)
             })
             .unwrap();
-        let request_id = Url::parse(&location)
-            .unwrap()
+        let request_id = redirect_url
             .query_pairs()
             .find(|(key, _)| key == "request_id")
             .unwrap()

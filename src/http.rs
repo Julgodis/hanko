@@ -748,7 +748,9 @@ fn normalize_app_roles(
     app_roles: BTreeMap<String, Vec<String>>,
 ) -> Result<BTreeMap<String, Vec<String>>, ApiError> {
     if app_roles.len() > 50 {
-        return Err(ApiError::bad_request("at most 50 applications can have roles"));
+        return Err(ApiError::bad_request(
+            "at most 50 applications can have roles",
+        ));
     }
     let mut normalized = BTreeMap::new();
     for (client_id, roles) in app_roles {
@@ -761,7 +763,9 @@ fn normalize_app_roles(
             return Err(ApiError::bad_request("invalid app role client ID"));
         }
         if roles.len() > 50 {
-            return Err(ApiError::bad_request("at most 50 roles can be added per app"));
+            return Err(ApiError::bad_request(
+                "at most 50 roles can be added per app",
+            ));
         }
         let mut normalized_roles = Vec::new();
         for role in roles {
@@ -770,7 +774,9 @@ fn normalize_app_roles(
                 continue;
             }
             if role.len() > 100 || role.chars().any(char::is_control) {
-                return Err(ApiError::bad_request("role names must be 100 characters or fewer"));
+                return Err(ApiError::bad_request(
+                    "role names must be 100 characters or fewer",
+                ));
             }
             if !normalized_roles.iter().any(|existing| existing == role) {
                 normalized_roles.push(role.to_owned());
@@ -783,10 +789,7 @@ fn normalize_app_roles(
     Ok(normalized)
 }
 
-fn update_address(
-    attributes: &mut serde_json::Value,
-    input: AddressInput,
-) -> Result<(), ApiError> {
+fn update_address(attributes: &mut serde_json::Value, input: AddressInput) -> Result<(), ApiError> {
     let mut address = attributes
         .get("address")
         .and_then(serde_json::Value::as_object)
@@ -816,10 +819,7 @@ fn update_address(
         if value.is_empty() {
             address.remove(key);
         } else {
-            address.insert(
-                key.to_owned(),
-                serde_json::Value::String(value.to_owned()),
-            );
+            address.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
         }
     }
     let attributes = attributes.as_object_mut().ok_or_else(ApiError::internal)?;
