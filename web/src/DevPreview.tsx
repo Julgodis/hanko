@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import "./styles.css";
 
 type PreviewScreen = "signin" | "consent" | "welcome" | "setup" | "join-invite" | "clients" | "users" | "invite" | "invite-ready" | "groups" | "keys" | "passkeys" | "hanko" | "client-form";
+type PreviewUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
+type PreviewGroup = { id: string; name: string; display_name: string; member_count: number; claims: { claim_name: string; claim_value: string; required_scope: string }[] };
 
 const previewScreens: { id: PreviewScreen; label: string }[] = [
   { id: "signin", label: "Sign in" },
@@ -68,7 +70,7 @@ const clients = [
   },
 ];
 
-const users = [
+const users: PreviewUser[] = [
   { id: "usr_01", username: "admin", display_name: "Hanko Administrator", email: "admin@example.com", invitation_label: null, is_admin: true, disabled: false, groups: ["administrators"] },
   { id: "usr_02", username: "sana.lee", display_name: "Sana Lee", email: "sana.lee@example.com", invitation_label: "Design team", is_admin: false, disabled: false, groups: ["media-users", "staff"] },
   { id: "usr_03", username: "tom.rivers", display_name: "Tom Rivers", email: null, invitation_label: "Community event", is_admin: false, disabled: false, groups: [] },
@@ -80,10 +82,10 @@ const invitations = [
   { id: "inv_02", label: "Community event", email: null, max_uses: 10, use_count: 3, created_at: 1_790_517_600, expires_at: 1_791_122_400, revoked: false },
 ];
 
-const groups = [
-  { id: "grp_01", name: "media-users", display_name: "Media users", member_count: 4 },
-  { id: "grp_02", name: "administrators", display_name: "Administrators", member_count: 1 },
-  { id: "grp_03", name: "staff", display_name: "Staff", member_count: 6 },
+const groups: PreviewGroup[] = [
+  { id: "grp_01", name: "media-users", display_name: "Media users", member_count: 4, claims: [{ claim_name: "role", claim_value: "media-user", required_scope: "groups" }] },
+  { id: "grp_02", name: "administrators", display_name: "Administrators", member_count: 1, claims: [{ claim_name: "role", claim_value: "administrator", required_scope: "groups" }] },
+  { id: "grp_03", name: "staff", display_name: "Staff", member_count: 6, claims: [] },
 ];
 
 const signingKeys = [
@@ -93,6 +95,7 @@ const signingKeys = [
 
 let previewClients = [...clients];
 let previewInvitations = [...invitations];
+let previewGroups = [...groups];
 const originalFetch = window.fetch.bind(window);
 
 const previewPasskeys = [
@@ -118,16 +121,33 @@ function installPreviewApi() {
       hanko_seed: "hanko",
       oidc_username: screen === "join-invite" ? null : "sana.lee",
       oidc_name: screen === "join-invite" ? null : "Sana Lee",
+      oidc_picture: screen === "join-invite" ? null : "https://images.example.com/sana-lee.jpg",
+      oidc_phone: screen === "join-invite" ? null : "+1 555 123 4567",
+      oidc_address: screen === "join-invite" ? null : { street_address: "42 Cedar Lane, Apartment 5", locality: "Portland", region: "Oregon", postal_code: "97205", country: "United States" },
+      oidc_profile_claims: screen === "join-invite" ? {} : { profile: "https://sana.example.com", given_name: "Sana", family_name: "Lee", nickname: "Sana", website: "https://sana.example.com", locale: "en-US", zoneinfo: "America/Los_Angeles", app_roles: { hnk_catalog: ["reader", "publisher"] } },
     });
     if (url.pathname === "/api/setup-status") return jsonResponse({ initialized: screen !== "setup", bootstrap_enabled: true });
     if (url.pathname === "/api/authorize/request") return jsonResponse({
       client_name: "Test 2",
-      scopes: ["openid", "profile", "email", "groups", "offline_access"],
+      scopes: ["openid", "profile", "email", "address", "phone", "groups", "offline_access"],
       claims: {
         name: "Sana Lee",
         preferred_username: "sana.lee",
+        profile: "https://sana.example.com",
+        given_name: "Sana",
+        family_name: "Lee",
+        nickname: "Sana",
+        website: "https://sana.example.com",
+        locale: "en-US",
+        zoneinfo: "America/Los_Angeles",
         email: "sana.lee@example.com",
+        email_verified: false,
+        picture: "https://images.example.com/sana-lee.jpg",
+        address: { street_address: "42 Cedar Lane, Apartment 5", locality: "Portland", region: "Oregon", postal_code: "97205", country: "United States" },
+        phone_number: "+1 555 123 4567",
+        roles: ["reader", "publisher"],
         groups: ["media-users", "staff"],
+        role: ["media-user"],
         department: "Product design",
       },
     });
@@ -156,8 +176,42 @@ function installPreviewApi() {
       previewClients = previewClients.filter((item) => item.client_id !== decodeURIComponent(url.pathname.split("/").at(-1) ?? ""));
       return jsonResponse({});
     }
-    if (url.pathname === "/api/admin/groups" && method === "GET") return jsonResponse(groups);
+    if (url.pathname === "/api/admin/groups" && method === "GET") return jsonResponse(previewGroups);
+    if (url.pathname === "/api/admin/groups" && method === "POST") {
+      const payload = JSON.parse(String(init?.body ?? "{}"));
+      const createdGroup = { id: `grp_preview_${previewGroups.length + 1}`, member_count: 0, ...payload };
+      previewGroups.push(createdGroup);
+      return jsonResponse(createdGroup);
+    }
+    if (url.pathname.startsWith("/api/admin/groups/") && method === "PUT") {
+      const groupId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
+      const groupIndex = previewGroups.findIndex((group) => group.id === groupId);
+      if (groupIndex < 0) return jsonResponse({}, 404);
+      previewGroups[groupIndex] = { ...previewGroups[groupIndex], ...JSON.parse(String(init?.body ?? "{}")) };
+      return jsonResponse({});
+    }
     if (url.pathname === "/api/admin/users" && method === "GET") return jsonResponse(users);
+    if (url.pathname.startsWith("/api/admin/users/") && method === "PUT") {
+      const userId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
+      const user = users.find((item) => item.id === userId);
+      if (!user) return jsonResponse({ error: "user not found" }, 404);
+      user.groups = JSON.parse(String(init?.body ?? "{}")).groups ?? [];
+      for (const group of groups) group.member_count = users.filter((item) => item.groups.includes(group.name)).length;
+      return jsonResponse({});
+    }
+    if (url.pathname.startsWith("/api/admin/groups/") && method === "PUT") {
+      const groupId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
+      const group = groups.find((item) => item.id === groupId);
+      if (!group) return jsonResponse({ error: "group not found" }, 404);
+      const memberIds: string[] = JSON.parse(String(init?.body ?? "{}")).users ?? [];
+      for (const user of users) {
+        user.groups = memberIds.includes(user.id)
+          ? [...new Set([...user.groups, group.name])]
+          : user.groups.filter((name) => name !== group.name);
+      }
+      for (const item of groups) item.member_count = users.filter((user) => user.groups.includes(item.name)).length;
+      return jsonResponse({});
+    }
     if (url.pathname === "/api/admin/invitations" && method === "GET") return jsonResponse(previewInvitations);
     if (url.pathname === "/api/admin/invitations" && method === "POST") {
       const payload = JSON.parse(String(init?.body ?? "{}"));
@@ -172,6 +226,10 @@ function installPreviewApi() {
     }
     if (url.pathname === "/api/admin/signing-keys" && method === "GET") return jsonResponse(signingKeys);
     if (url.pathname === "/api/admin/signing-keys" && method === "POST") return jsonResponse({});
+    if (url.pathname === "/api/account/profile" && method === "PUT") {
+      const payload = JSON.parse(String(init?.body ?? "{}"));
+      return jsonResponse({ username: payload.username, display_name: payload.display_name, picture: payload.picture || null, phone_number: payload.phone_number || null, address: payload.address, profile_claims: payload.profile_claims ?? {} });
+    }
     if (url.pathname === "/api/passkeys") return jsonResponse(previewPasskeys);
     return jsonResponse({});
   };

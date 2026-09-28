@@ -21,6 +21,13 @@ export function csrfToken() {
   return cookie?.slice(prefix.length) ?? "";
 }
 
+export class ApiError extends Error {
+  constructor(message: string, readonly code: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
@@ -31,7 +38,11 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = body.error_description || body.error || body.message || "The request could not be completed.";
-    throw new Error(typeof error === "string" ? error : "The request could not be completed.");
+    throw new ApiError(
+      typeof error === "string" ? error : "The request could not be completed.",
+      typeof body.error === "string" ? body.error : "",
+      response.status,
+    );
   }
   return body as T;
 }
