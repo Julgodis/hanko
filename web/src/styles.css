@@ -582,15 +582,6 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 
 .account-consents { display: grid; gap: 14px; }
 .account-consents > .admin-hint { max-width: 700px; }
-.consent-grant-list { display: grid; gap: 12px; }
-.consent-grant-card { display: grid; gap: 14px; padding: 17px; border: 1px solid var(--rule); border-radius: 9px; background: color-mix(in srgb, var(--paper-raised), transparent 10%); }
-.consent-grant-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.consent-grant-heading h3 { margin: 0; color: var(--ink); font-size: 16px; font-weight: 600; }
-.consent-grant-heading p { margin: 4px 0 0; color: var(--ink-muted); font-size: 13px; line-height: 1.5; }
-.consent-grant-scopes { display: grid; gap: 7px; }
-.consent-grant-scopes > span { color: var(--ink-muted); font-size: 12px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
-.consent-grant-scopes ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.consent-grant-scopes li { padding: 4px 8px; border: 1px solid var(--rule); border-radius: 99px; color: var(--ink); background: var(--paper); font-size: 12px; }
 
 .account-hanko { margin: 0 0 22px; padding: 0 0 24px; border-bottom: 1px solid var(--rule); }
 .account-hanko-preview { display: grid; min-height: 244px; place-items: center; margin: 0 auto 10px; }
@@ -921,6 +912,7 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .group-table { min-width: 690px; }
 .signing-key-table { min-width: 650px; }
 .passkey-table { min-width: 790px; }
+.consent-table { min-width: 900px; }
 .admin-table th,
 .admin-table td { padding: 13px 12px; border-bottom: 1px solid var(--rule); vertical-align: middle; }
 .admin-table th { color: var(--ink-muted); background: color-mix(in srgb, var(--paper-raised), transparent 4%); font-size: 14px; font-weight: 650; letter-spacing: .065em; text-transform: uppercase; white-space: nowrap; }
@@ -1044,8 +1036,6 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 }
 
 @media (max-width: 600px) {
-  .consent-grant-heading { align-items: stretch; flex-direction: column; }
-  .consent-grant-heading .passkey-remove-button { width: 100%; }
   body { min-height: 100svh; min-height: 100dvh; }
   .auth-scene { min-height: 100svh; min-height: 100dvh; }
   .privacy-toggle { top: max(12px, env(safe-area-inset-top)); bottom: auto; }
