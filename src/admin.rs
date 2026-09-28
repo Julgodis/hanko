@@ -1500,6 +1500,8 @@ async fn validate_invitation(
     if !valid && !in_progress {
         tracing::warn!(
             endpoint = "/api/invitations/validate",
+            token_length = input.token.len(),
+            token_length_valid = (32..=128).contains(&input.token.len()),
             "invitation is invalid, expired, revoked, or unavailable"
         );
     }
@@ -1595,7 +1597,12 @@ async fn consume_invitation(
             .execute(&mut *transaction)
             .await
             .map_err(|error| {
-                tracing::warn!(%error, "invited user creation failed");
+                tracing::warn!(
+                    %error,
+                    invitation_id = %invitation_link_id,
+                    user_id = %user_id,
+                    "invited user creation failed"
+                );
                 AdminError::conflict("this invitation could not create an account")
             })?;
 

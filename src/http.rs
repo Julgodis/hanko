@@ -1321,7 +1321,11 @@ async fn credential_change_verify(
         )
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "passkey change confirmation failed");
+            tracing::warn!(
+                %error,
+                user_id = %session.user_id,
+                "passkey change confirmation failed"
+            );
             ApiError::bad_request("passkey confirmation failed")
         })?;
     Ok(Json(
@@ -1353,7 +1357,11 @@ async fn register_verify(
         )
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "passkey registration failed");
+            tracing::warn!(
+                %error,
+                user_id = %session.user_id,
+                "passkey registration failed"
+            );
             match error {
                 crate::webauthn::WebauthnError::NonDiscoverable => ApiError::bad_request(
                     "passkey was not saved as discoverable; choose another passkey provider",

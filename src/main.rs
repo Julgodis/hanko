@@ -60,35 +60,54 @@ fn spawn_cleanup(database: Database, signing_keys: keys::SigningKeys) {
         loop {
             interval.tick().await;
             let now = security::unix_now();
-            for (query, cutoff) in [
+            for (job, query, cutoff) in [
                 (
+                    "authorization request cleanup",
                     "DELETE FROM authorization_requests WHERE expires_at <= ?",
                     now,
                 ),
-                ("DELETE FROM authorization_codes WHERE expires_at <= ?", now),
-                ("DELETE FROM webauthn_ceremonies WHERE expires_at <= ?", now),
-                ("DELETE FROM sessions WHERE expires_at <= ?", now),
                 (
+                    "authorization code cleanup",
+                    "DELETE FROM authorization_codes WHERE expires_at <= ?",
+                    now,
+                ),
+                (
+                    "WebAuthn ceremony cleanup",
+                    "DELETE FROM webauthn_ceremonies WHERE expires_at <= ?",
+                    now,
+                ),
+                (
+                    "session cleanup",
+                    "DELETE FROM sessions WHERE expires_at <= ?",
+                    now,
+                ),
+                (
+                    "invitation pending count refresh",
                     "UPDATE invitation_links SET pending_count = (SELECT COUNT(*) FROM users WHERE users.invitation_link_id = invitation_links.id AND users.invitation_reserved_until > ?)",
                     now,
                 ),
                 (
+                    "invitation reservation cleanup",
                     "DELETE FROM users WHERE invitation_link_id IS NOT NULL AND invitation_reserved_until <= ? AND NOT EXISTS (SELECT 1 FROM passkeys WHERE passkeys.user_id = users.id)",
                     now,
                 ),
                 (
+                    "refresh token family cleanup",
                     "DELETE FROM refresh_token_families WHERE expires_at <= ?",
                     now,
                 ),
                 (
+                    "enrollment invitation cleanup",
                     "DELETE FROM enrollment_invitations WHERE expires_at <= ? OR consumed_at IS NOT NULL",
                     now,
                 ),
                 (
+                    "login rate limit cleanup",
                     "DELETE FROM login_rate_limits WHERE window_started_at <= ?",
                     now - 3600,
                 ),
                 (
+                    "anonymous rate limit cleanup",
                     "DELETE FROM anonymous_rate_limits WHERE window_started_at <= ?",
                     now - 60,
                 ),
@@ -98,7 +117,7 @@ fn spawn_cleanup(database: Database, signing_keys: keys::SigningKeys) {
                     .execute(&database.pool)
                     .await
                 {
-                    tracing::warn!(%error, "periodic identity data cleanup failed");
+                    tracing::warn!(%error, job = job, "periodic identity data cleanup failed");
                 }
             }
             if let Err(error) = signing_keys.prune_retired(now).await {
