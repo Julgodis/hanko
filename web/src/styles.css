@@ -531,6 +531,7 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .setup-action > svg { width: 18px; height: 18px; }
 .setup-action .setup-arrow { width: 15px; height: 15px; margin-left: auto; }
 .setup-status { margin: 24px 0 0; color: var(--ink-muted); font-size: 14px; line-height: 1.5; }
+.setup-invitation-check-error { display: grid; gap: 10px; }
 .setup-error-detail { margin: 14px 0 0; color: var(--ink-muted); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 
 .seal-customizer { margin: 8px auto 0; text-align: left; }

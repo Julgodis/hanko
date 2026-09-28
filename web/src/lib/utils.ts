@@ -22,7 +22,7 @@ export function csrfToken() {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly code: string, readonly status: number) {
+  constructor(message: string, readonly code: string, readonly status: number, readonly retryAfterSeconds: number | null = null) {
     super(message);
     this.name = "ApiError";
   }
@@ -38,10 +38,14 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = body.error_description || body.error || body.message || "The request could not be completed.";
+    const retryAfterHeader = response.headers.get("Retry-After");
     throw new ApiError(
       typeof error === "string" ? error : "The request could not be completed.",
       typeof body.error === "string" ? body.error : "",
       response.status,
+      retryAfterHeader && Number.isFinite(Number(retryAfterHeader))
+        ? Math.max(0, Number(retryAfterHeader))
+        : null,
     );
   }
   return body as T;
