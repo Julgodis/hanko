@@ -128,6 +128,8 @@ struct OidcProfileClaimsInput {
     website: Option<String>,
     locale: Option<String>,
     zoneinfo: Option<String>,
+    // Kept in the request type so self-service attempts to set or clear roles
+    // are rejected explicitly instead of being silently ignored.
     app_roles: Option<BTreeMap<String, Vec<String>>>,
 }
 
@@ -570,6 +572,13 @@ async fn update_profile(
     require_origin(&headers, &state.config)?;
     let session = require_session(&headers, &state.database).await?;
     require_csrf(&headers, &session)?;
+    if input
+        .profile_claims
+        .as_ref()
+        .is_some_and(|claims| claims.app_roles.is_some())
+    {
+        return Err(ApiError::forbidden());
+    }
 
     let current = sqlx::query(
         "SELECT username, display_name, attributes FROM users WHERE id = ? AND disabled_at IS NULL",
@@ -674,15 +683,6 @@ async fn update_profile(
         ] {
             update_profile_attribute(&mut attributes, claim, value, max_len, is_url)?;
         }
-        if let Some(app_roles) = profile_claims.app_roles {
-            let app_roles = normalize_app_roles(app_roles)?;
-            let attributes = attributes.as_object_mut().ok_or_else(ApiError::internal)?;
-            if app_roles.is_empty() {
-                attributes.remove("app_roles");
-            } else {
-                attributes.insert("app_roles".to_owned(), serde_json::json!(app_roles));
-            }
-        }
     }
     let updated = sqlx::query("UPDATE users SET username = ?, display_name = ?, attributes = ?, expose_preferred_username = ?, expose_name = ?, updated_at = ? WHERE id = ? AND disabled_at IS NULL")
         .bind(username)
@@ -746,51 +746,6 @@ fn update_profile_attribute(
         );
     }
     Ok(())
-}
-
-fn normalize_app_roles(
-    app_roles: BTreeMap<String, Vec<String>>,
-) -> Result<BTreeMap<String, Vec<String>>, ApiError> {
-    if app_roles.len() > 50 {
-        return Err(ApiError::bad_request(
-            "at most 50 applications can have roles",
-        ));
-    }
-    let mut normalized = BTreeMap::new();
-    for (client_id, roles) in app_roles {
-        if client_id.is_empty()
-            || client_id.len() > 100
-            || !client_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        {
-            return Err(ApiError::bad_request("invalid app role client ID"));
-        }
-        if roles.len() > 50 {
-            return Err(ApiError::bad_request(
-                "at most 50 roles can be added per app",
-            ));
-        }
-        let mut normalized_roles = Vec::new();
-        for role in roles {
-            let role = role.trim();
-            if role.is_empty() {
-                continue;
-            }
-            if role.len() > 100 || role.chars().any(char::is_control) {
-                return Err(ApiError::bad_request(
-                    "role names must be 100 characters or fewer",
-                ));
-            }
-            if !normalized_roles.iter().any(|existing| existing == role) {
-                normalized_roles.push(role.to_owned());
-            }
-        }
-        if !normalized_roles.is_empty() {
-            normalized.insert(client_id, normalized_roles);
-        }
-    }
-    Ok(normalized)
 }
 
 fn update_address(attributes: &mut serde_json::Value, input: AddressInput) -> Result<(), ApiError> {
