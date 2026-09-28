@@ -266,6 +266,21 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if self.status.is_server_error() {
+            tracing::error!(
+                status = %self.status,
+                error = self.message,
+                retry_after_seconds = ?self.retry_after_seconds,
+                "HTTP request failed"
+            );
+        } else {
+            tracing::warn!(
+                status = %self.status,
+                error = self.message,
+                retry_after_seconds = ?self.retry_after_seconds,
+                "HTTP request returned an error"
+            );
+        }
         let retry_after_seconds = self.retry_after_seconds;
         let mut response = (
             self.status,

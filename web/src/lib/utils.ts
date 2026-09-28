@@ -28,6 +28,21 @@ export class ApiError extends Error {
   }
 }
 
+export function logUiIssue(context: string, cause: unknown) {
+  const details = cause instanceof ApiError
+    ? {
+        error: cause.message,
+        error_code: cause.code || undefined,
+        status: cause.status,
+        retry_after_seconds: cause.retryAfterSeconds ?? undefined,
+      }
+    : cause instanceof Error
+      ? { error: cause.message, error_type: cause.name }
+      : { error: "Unknown error", error_type: "UnknownError" };
+  const log = cause instanceof ApiError && cause.status >= 500 ? console.error : console.warn;
+  log.call(console, "Hanko UI issue", { context, ...details });
+}
+
 export async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");

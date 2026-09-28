@@ -5,7 +5,7 @@ import { HankoSeal } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
-import { api, defaultPasskeyLabel, json } from "./lib/utils";
+import { api, defaultPasskeyLabel, json, logUiIssue } from "./lib/utils";
 import { canEditConfiguredUserClaim, isRequiredUserClaim, missingRequiredUserClaims, type OidcProfileClaims } from "./lib/userClaims";
 
 const AVAILABLE_SCOPES = ["profile", "email", "address", "phone", "picture", "groups", "offline_access"] as const;
@@ -69,7 +69,8 @@ function splitLines(value: string) {
   return [...new Set(value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
 }
 
-function errorMessage(error: unknown) {
+function errorMessage(error: unknown, context: string) {
+  logUiIssue(context, error);
   return error instanceof Error ? error.message : "The request could not be completed.";
 }
 
@@ -217,7 +218,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
           });
         }
       } catch (loadError) {
-        if (active) setLoadError(errorMessage(loadError));
+        if (active) setLoadError(errorMessage(loadError, "load admin dashboard"));
       } finally {
         if (active) setLoading(false);
       }
@@ -249,7 +250,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
           }
         }
       } catch (tabError) {
-        if (active) setLoadError(errorMessage(tabError));
+        if (active) setLoadError(errorMessage(tabError, "load admin tab"));
       } finally {
         if (active && activeTab === "passkeys") setPasskeysLoading(false);
       }
@@ -396,7 +397,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       })));
       setUserClaimsReady(true);
     } catch (loadError) {
-      setUserEditorError(errorMessage(loadError));
+      setUserEditorError(errorMessage(loadError, "load user claims"));
     } finally {
       setUserClaimsLoading(false);
     }
@@ -443,7 +444,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       });
       setUserEditorMessage("Custom claims saved.");
     } catch (saveError) {
-      setUserEditorError(errorMessage(saveError));
+      setUserEditorError(errorMessage(saveError, "save user claims"));
     } finally {
       setUserClaimsBusy(false);
     }
@@ -461,7 +462,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       setMembershipSelection(userList.filter((user) => user.groups.includes(group.name)).map((user) => user.id));
       setMembershipReady(true);
     } catch (loadError) {
-      setMembershipError(errorMessage(loadError));
+      setMembershipError(errorMessage(loadError, "load group membership"));
     } finally {
       setMembershipLoading(false);
     }
@@ -491,7 +492,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       setGroups(groupList);
       setMembershipEditor(null);
     } catch (saveError) {
-      setMembershipError(errorMessage(saveError));
+      setMembershipError(errorMessage(saveError, "save group membership"));
     } finally {
       setMembershipBusy(false);
     }
@@ -508,6 +509,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
     setError("");
     const redirects = splitLines(redirectUris);
     if (redirects.length === 0) {
+      logUiIssue("save OIDC client", new Error("At least one callback URL is required"));
       setError("Add at least one exact callback URL.");
       return;
     }
@@ -552,7 +554,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       setEditingClientId("");
       await refreshClients();
     } catch (saveError) {
-      setError(errorMessage(saveError));
+      setError(errorMessage(saveError, "save OIDC client"));
     } finally {
       setBusy(false);
     }
@@ -568,7 +570,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       if (editingClientId === client.client_id) closeClientForm();
       await refreshClients();
     } catch (removeError) {
-      setError(errorMessage(removeError));
+      setError(errorMessage(removeError, "remove OIDC client"));
     } finally {
       setDeletingClientId("");
     }
@@ -602,7 +604,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       setUserGroups([]);
       setInvitations(await api<Invitation[]>("/api/admin/invitations"));
     } catch (createError) {
-      setAdminActionMessage(errorMessage(createError));
+      setAdminActionMessage(errorMessage(createError, "create invitation"));
     } finally {
       setAdminActionBusy(false);
     }
@@ -617,7 +619,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       await api(`/api/admin/invitations/${encodeURIComponent(invitation.id)}`, { method: "DELETE" });
       setInvitations(await api<Invitation[]>("/api/admin/invitations"));
     } catch (removeError) {
-      setAdminActionMessage(errorMessage(removeError));
+      setAdminActionMessage(errorMessage(removeError, "remove invitation"));
     } finally {
       setAdminActionBusy(false);
     }
@@ -636,6 +638,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
           required_scope: claim.required_scope,
         }));
     } catch {
+      logUiIssue("save group", new Error("Group claim value is not valid JSON"));
       setAdminActionMessage("Each group claim value must be valid JSON, such as \"member\" or [\"read\"].");
       return;
     }
@@ -655,7 +658,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       setGroupFormOpen(false);
       setEditingGroupId("");
     } catch (saveError) {
-      setAdminActionMessage(errorMessage(saveError));
+      setAdminActionMessage(errorMessage(saveError, "save group"));
     } finally {
       setAdminActionBusy(false);
     }
@@ -679,7 +682,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       })));
       setUserGroups((current) => current.filter((name) => name !== group.name));
     } catch (deleteError) {
-      setAdminActionMessage(errorMessage(deleteError));
+      setAdminActionMessage(errorMessage(deleteError, "delete group"));
     } finally {
       setDeletingGroupId("");
       setAdminActionBusy(false);
@@ -694,7 +697,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       setSigningKeys(await api<SigningKey[]>("/api/admin/signing-keys"));
       setAdminActionMessage("A new signing key is active.");
     } catch (rotateError) {
-      setAdminActionMessage(errorMessage(rotateError));
+      setAdminActionMessage(errorMessage(rotateError, "rotate signing key"));
     } finally {
       setAdminActionBusy(false);
     }
@@ -726,7 +729,8 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       });
       await refreshPasskeys();
       setPasskeyMessage("Passkey added to this account.");
-    } catch {
+    } catch (cause) {
+      logUiIssue("add passkey", cause);
       setPasskeyError("Passkey registration wasn’t completed. You can try again.");
     } finally {
       setAddingPasskey(false);
@@ -747,7 +751,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       await refreshPasskeys();
       setPasskeyMessage("Passkey name updated.");
     } catch (renameError) {
-      setPasskeyError(errorMessage(renameError));
+      setPasskeyError(errorMessage(renameError, "rename passkey"));
     } finally {
       setPasskeyActionId("");
     }
@@ -778,7 +782,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       setRemovalConfirmation("");
       setPasskeyMessage("Passkey removed.");
     } catch (removeError) {
-      setPasskeyError(errorMessage(removeError));
+      setPasskeyError(errorMessage(removeError, "remove passkey"));
       try { await refreshPasskeys(); } catch { /* Keep the original action error visible. */ }
     } finally {
       setPasskeyActionId("");
@@ -802,7 +806,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       });
       setHankoMessage("Your personal hanko is saved.");
     } catch (saveError) {
-      setHankoMessage(errorMessage(saveError));
+      setHankoMessage(errorMessage(saveError, "save personal Hanko"));
     } finally {
       setSavingHanko(false);
     }
@@ -857,7 +861,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       });
       setOidcProfileMessage("Your OIDC profile is saved.");
     } catch (saveError) {
-      setOidcProfileMessage(errorMessage(saveError));
+      setOidcProfileMessage(errorMessage(saveError, "save OIDC profile"));
     } finally {
       setSavingOidcProfile(false);
     }

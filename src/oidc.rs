@@ -231,6 +231,21 @@ impl OAuthError {
 
 impl IntoResponse for OAuthError {
     fn into_response(self) -> Response {
+        if self.status.is_server_error() {
+            tracing::error!(
+                status = %self.status,
+                error_code = self.error,
+                error_description = %self.description,
+                "OIDC request failed"
+            );
+        } else {
+            tracing::warn!(
+                status = %self.status,
+                error_code = self.error,
+                error_description = %self.description,
+                "OIDC request returned an error"
+            );
+        }
         let mut response = (
             self.status,
             Json(serde_json::json!({
@@ -1645,6 +1660,12 @@ fn authorization_protocol_error(
     input: &AuthorizeRequest,
     error: &str,
 ) -> Result<Response, OAuthError> {
+    tracing::warn!(
+        endpoint = "/authorize",
+        client_id = %input.client_id,
+        error_code = error,
+        "OIDC authorization could not continue"
+    );
     let mut url = Url::parse(&input.redirect_uri)
         .map_err(|_| OAuthError::invalid_request("redirect_uri is invalid"))?;
     url.query_pairs_mut().append_pair("error", error);
@@ -1655,6 +1676,19 @@ fn authorization_protocol_error(
 }
 
 fn authorization_page_error(state: &AppState, error: &str) -> Result<Response, OAuthError> {
+    if error == "temporarily_unavailable" {
+        tracing::error!(
+            endpoint = "/authorize",
+            error_code = error,
+            "OIDC authorization could not start"
+        );
+    } else {
+        tracing::warn!(
+            endpoint = "/authorize",
+            error_code = error,
+            "OIDC authorization request was rejected"
+        );
+    }
     redirect(&format!("{}/?hanko_error={error}", state.config.issuer()))
 }
 

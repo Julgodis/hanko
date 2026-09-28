@@ -5,7 +5,7 @@ import ClientAdmin from "./ClientAdmin";
 import FirstRun from "./FirstRun";
 import { HankoSeal, type HankoState } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
-import { ApiError, api, appPath, json } from "./lib/utils";
+import { ApiError, api, appPath, json, logUiIssue } from "./lib/utils";
 import type { OidcProfileClaims } from "./lib/userClaims";
 
 type Phase = "idle" | "preparing" | "authenticating" | "success" | "error";
@@ -131,7 +131,10 @@ function App() {
           setRequest(authorizationRequest);
         }
       } catch (cause) {
-        if (active) setLoadError(loadErrorCopy(cause, Boolean(requestId)));
+        if (active) {
+          logUiIssue("load sign-in", cause);
+          setLoadError(loadErrorCopy(cause, Boolean(requestId)));
+        }
       } finally {
         if (active) setLoading(false);
       }
@@ -276,6 +279,7 @@ function SignIn({
       await new Promise(resolve => window.setTimeout(resolve, reducedMotion ? 120 : 820));
       await onAuthenticated();
     } catch (cause) {
+      logUiIssue("passkey sign-in", cause);
       setFailure(signInFailure(cause, passkeyVerified, Boolean(requestId)));
       setPhase("error");
     }
@@ -366,6 +370,7 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
       ]);
       window.location.assign(result.redirect_to);
     } catch (cause) {
+      logUiIssue("authorization decision", cause);
       if (cause instanceof ApiError && cause.code === "login_required") {
         setDecision("idle");
         onFreshAuthenticationRequired();
