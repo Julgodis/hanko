@@ -376,13 +376,46 @@ pub fn set_session_cookies(response: &mut Response, session: &BrowserSession, co
 }
 
 pub fn clear_session_cookies(response: &mut Response, config: &Config) {
-    for name in [SESSION_COOKIE, CSRF_COOKIE, PREAUTH_COOKIE] {
-        response.headers_mut().append(
-            header::SET_COOKIE,
-            cookie_header(name, "", config, name != CSRF_COOKIE, 0)
-                .parse()
-                .expect("valid clearing cookie header"),
-        );
+    let configured_path = if config.base_path().is_empty() {
+        "/".to_owned()
+    } else {
+        config.base_path().to_owned()
+    };
+    let mut paths = vec![configured_path.clone()];
+    if configured_path != "/" {
+        let path_with_trailing_slash = if configured_path.ends_with('/') {
+            configured_path.trim_end_matches('/').to_owned()
+        } else {
+            format!("{configured_path}/")
+        };
+        paths.push(path_with_trailing_slash);
+        paths.push("/".to_owned());
+    }
+    for name in [
+        SESSION_COOKIE,
+        CSRF_COOKIE,
+        "hanko_crf",
+        PREAUTH_COOKIE,
+        "AUTHP",
+    ] {
+        for path in &paths {
+            let secure = if config.public_origin.scheme() == "https" {
+                "; Secure"
+            } else {
+                ""
+            };
+            let http_only = if name == CSRF_COOKIE || name == "hanko_crf" {
+                ""
+            } else {
+                "; HttpOnly"
+            };
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                format!("{name}=; Path={path}; SameSite=Lax; Max-Age=0{http_only}{secure}")
+                    .parse()
+                    .expect("valid clearing cookie header"),
+            );
+        }
     }
 }
 
@@ -454,11 +487,14 @@ pub async fn load_session(
         return Ok(None);
     };
     let session_hash = digest(&raw_token);
+    let now = unix_now();
     let row = sqlx::query(
-        "SELECT s.user_id, s.csrf_hash, s.setup_only, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.session_hash = ? AND s.expires_at > ? AND u.disabled_at IS NULL",
+        "SELECT s.user_id, s.csrf_hash, s.setup_only, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id LEFT JOIN invitation_links i ON i.id = u.invitation_link_id WHERE s.session_hash = ? AND s.expires_at > ? AND u.disabled_at IS NULL AND (s.setup_only = 0 OR u.invitation_link_id IS NULL OR (u.invitation_reserved_until > ? AND i.revoked_at IS NULL AND i.expires_at > ?))",
     )
     .bind(&session_hash)
-    .bind(unix_now())
+    .bind(now)
+    .bind(now)
+    .bind(now)
     .fetch_optional(&database.pool)
     .await?;
     let Some(row) = row else {

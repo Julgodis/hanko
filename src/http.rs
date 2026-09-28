@@ -24,10 +24,11 @@ use crate::{
     db::Database,
     keys::SigningKeys,
     security::{
-        AnonymousRequestLimiter, BrowserSession, PREAUTH_COOKIE, anonymous_request_allowed,
-        clear_session_cookies, cookie_header, cookie_value, create_passkey_session, create_session,
-        csrf_header_matches, digest, load_identity, load_session, origin_is_valid,
-        set_session_cookies, source_ip, try_anonymous_state_slot, unix_now,
+        AnonymousRequestLimiter, BrowserSession, PREAUTH_COOKIE, SESSION_COOKIE,
+        anonymous_request_allowed, clear_session_cookies, cookie_header, cookie_value,
+        create_passkey_session, create_session, csrf_header_matches, digest, load_identity,
+        load_session, origin_is_valid, set_session_cookies, source_ip, try_anonymous_state_slot,
+        unix_now,
     },
     webauthn::WebauthnService,
 };
@@ -565,14 +566,16 @@ async fn bootstrap(
 async fn session_info(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<SessionResponse>, ApiError> {
+) -> Result<Response, ApiError> {
+    let has_session_cookie = cookie_value(&headers, SESSION_COOKIE).is_some();
     let identity = load_identity(&headers, &state.database)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to load session");
             ApiError::internal()
         })?;
-    Ok(match identity {
+    let authenticated = identity.is_some();
+    let mut response = match identity {
         Some(identity) => Json(SessionResponse {
             authenticated: true,
             username: Some(identity.username),
@@ -605,7 +608,12 @@ async fn session_info(
             setup_only: false,
             required_user_claims: state.config.required_user_claims.clone(),
         }),
-    })
+    }
+    .into_response();
+    if has_session_cookie && !authenticated {
+        clear_session_cookies(&mut response, &state.config);
+    }
+    Ok(response)
 }
 
 async fn update_profile(

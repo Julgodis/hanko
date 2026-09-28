@@ -19,6 +19,7 @@ const EMPTY_OIDC_PROFILE: OidcProfileDraft = { profile: "", given_name: "", fami
 type Props = {
   hasSetupSession: boolean;
   invitationToken?: string | null;
+  loginAttemptDuringSetup?: boolean;
   initialColor?: string;
   initialSeed?: string;
   initialProfile?: { username?: string; displayName?: string; pictureUrl?: string; phoneNumber?: string; address?: Partial<OidcAddress>; profileClaims?: OidcProfileClaims };
@@ -51,7 +52,7 @@ const INK_WASH = <svg className="ink-wash" viewBox="0 0 1440 190" preserveAspect
   <path d="M0 153 C74 143 112 127 167 138 C218 148 242 164 307 150 C361 139 394 121 451 140 C510 160 535 167 594 145 C646 125 683 91 733 111 C784 132 819 151 876 144 C933 137 967 111 1025 128 C1083 145 1127 168 1181 154 C1246 136 1284 121 1338 140 C1382 156 1406 164 1440 151 L1440 190 L0 190 Z" />
 </svg>;
 
-export default function FirstRun({ hasSetupSession, invitationToken, initialColor, initialSeed, initialProfile, requiredUserClaims, onComplete }: Props) {
+export default function FirstRun({ hasSetupSession, invitationToken, loginAttemptDuringSetup = false, initialColor, initialSeed, initialProfile, requiredUserClaims, onComplete }: Props) {
   const isAdminSetup = !hasSetupSession && !invitationToken;
   const canEditUserClaim = (claim: string) => canEditConfiguredUserClaim(claim, requiredUserClaims);
   const fieldRequirement = (claim: string) => isRequiredUserClaim(claim, requiredUserClaims) ? "Required" : "Optional";
@@ -78,11 +79,11 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
   const [phase, setPhase] = useState<Phase>("idle");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [invitationStatus, setInvitationStatus] = useState<InvitationStatus>(invitationToken && !hasSetupSession ? "checking" : "none");
+  const [invitationStatus, setInvitationStatus] = useState<InvitationStatus>(invitationToken ? "checking" : "none");
   const [invitationCheckAttempt, setInvitationCheckAttempt] = useState(0);
 
   useEffect(() => {
-    if (!invitationToken || hasSetupSession) return;
+    if (!invitationToken) return;
     let active = true;
     setInvitationStatus("checking");
     api<{ valid: boolean; in_progress: boolean }>("/api/invitations/validate", {
@@ -102,7 +103,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
       }
     });
     return () => { active = false; };
-  }, [invitationToken, hasSetupSession, invitationCheckAttempt]);
+  }, [invitationToken, invitationCheckAttempt]);
 
   const steps: { id: Step; label: string }[] = isAdminSetup
     ? [{ id: "bootstrap", label: "Bootstrap code" }, { id: "profile", label: "OIDC information" }, { id: "hanko", label: "Hanko" }, { id: "passkey", label: "Passkey" }]
@@ -158,6 +159,14 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
           });
         } catch (consumeError) {
           if (consumeError instanceof ApiError && consumeError.status === 401) {
+            try {
+              await api("/api/invitations/validate", {
+                method: "POST",
+                body: json({ token: pendingInvitation }),
+              });
+            } catch {
+              // The consume response already identifies this invitation as unavailable.
+            }
             setInvitationStatus("invalid");
             throw new Error(INVALID_INVITATION_MESSAGE);
           }
@@ -224,6 +233,28 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
         setPhase("idle");
       } else {
         logUiIssue("complete account setup", registrationError);
+        const invitationMayHaveExpired = registrationError instanceof ApiError && (
+          registrationError.status === 401
+          || registrationError.code === "could not start passkey registration"
+          || registrationError.code === "passkey registration failed"
+        );
+        if (invitationToken && inviteReserved && invitationMayHaveExpired) {
+          try {
+            const invitation = await api<{ valid: boolean; in_progress: boolean }>("/api/invitations/validate", {
+              method: "POST",
+              body: json({ token: invitationToken }),
+            });
+            if (!invitation.valid && !invitation.in_progress) {
+              setInvitationStatus("invalid");
+              setStep("profile");
+              setError("");
+              setPhase("idle");
+              return;
+            }
+          } catch {
+            // Keep the registration error visible if invite status cannot be checked.
+          }
+        }
         setError(registrationError instanceof ApiError && registrationError.code === "too many active registration requests; try again shortly"
           ? registrationCapacityMessage(registrationError.retryAfterSeconds, inviteReserved)
           : getError(registrationError));
@@ -276,6 +307,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
     <section className="setup-panel" aria-live="polite">
       <div className="auth-copy">
         <h1>{title}</h1>
+        {loginAttemptDuringSetup && <p className="setup-status" role="status">Finish the invitation or first-run setup before signing in.</p>}
         {invitationToken && step === "profile" && <p>Choose the profile details apps can see. Next, you’ll create your Hanko and add a passkey.</p>}
       </div>
 

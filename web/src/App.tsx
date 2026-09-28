@@ -119,15 +119,18 @@ function App() {
           api<Session>("/api/session"),
           api<SetupStatus>("/api/setup-status"),
         ]);
+        const setupStage = !setup.initialized || identity.setup_only || Boolean(enrollmentToken);
+        if (active) {
+          setSession(identity);
+          setSetupStatus(setup);
+        }
         let authorizationRequest: AuthorizationRequest | null = null;
-        if (requestId) {
+        if (requestId && !setupStage) {
           authorizationRequest = await api<AuthorizationRequest>(
             `/api/authorize/request?request_id=${encodeURIComponent(requestId)}`,
           );
         }
         if (active) {
-          setSession(identity);
-          setSetupStatus(setup);
           setRequest(authorizationRequest);
         }
       } catch (cause) {
@@ -195,6 +198,7 @@ function App() {
     return <FirstRun
       hasSetupSession={session?.setup_only ?? false}
       invitationToken={enrollmentToken}
+      loginAttemptDuringSetup={Boolean(requestId)}
       initialColor={session?.hanko_color ?? undefined}
       initialSeed={session?.hanko_seed ?? undefined}
       initialProfile={{ username: session?.oidc_username ?? "", displayName: session?.oidc_name ?? "", pictureUrl: session?.oidc_picture ?? "", phoneNumber: session?.oidc_phone ?? "", address: session?.oidc_address ?? undefined, profileClaims: session?.oidc_profile_claims ?? undefined }}
