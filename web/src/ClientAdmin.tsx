@@ -1,5 +1,5 @@
 import { Check, Copy, Fingerprint, KeyRound, Mail, Pencil, Plus, Shield, ShieldCheck, Users, UserRound, Stamp, Trash2 } from "lucide-react";
-import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
@@ -32,7 +32,6 @@ type Client = {
 type GroupClaimMapping = { claim_name: string; claim_value: unknown; required_scope: Scope };
 type Group = { id: string; name: string; display_name: string; member_count: number; claims?: GroupClaimMapping[] };
 type AdminUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; created_at: number; groups: string[] };
-type MembershipEditor = { kind: "group"; id: string };
 type UserClaim = { claim_name: string; claim_value: unknown; required_scope: string | null };
 type UserClaimDraft = { claim_name: string; claim_value: string; required_scope: string };
 type Invitation = { id: string; label: string; email: string | null; max_uses: number; use_count: number; created_at: number; expires_at: number; revoked: boolean };
@@ -177,13 +176,16 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [deletingGroupId, setDeletingGroupId] = useState("");
   const [adminActionBusy, setAdminActionBusy] = useState(false);
   const [adminActionMessage, setAdminActionMessage] = useState("");
-  const [membershipEditor, setMembershipEditor] = useState<MembershipEditor | null>(null);
-  const [membershipSelection, setMembershipSelection] = useState<string[]>([]);
-  const [membershipBusy, setMembershipBusy] = useState(false);
-  const [membershipLoading, setMembershipLoading] = useState(false);
-  const [membershipReady, setMembershipReady] = useState(false);
-  const [membershipError, setMembershipError] = useState("");
+  const [groupMemberSelection, setGroupMemberSelection] = useState<string[]>([]);
+  const [groupMemberSearch, setGroupMemberSearch] = useState("");
+  const [groupMembersLoading, setGroupMembersLoading] = useState(false);
+  const [groupMembersBusy, setGroupMembersBusy] = useState(false);
+  const [groupMembersReady, setGroupMembersReady] = useState(false);
+  const [groupMembersError, setGroupMembersError] = useState("");
+  const [groupMembersMessage, setGroupMembersMessage] = useState("");
+  const groupMemberLoadId = useRef(0);
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
+  const [userClaimsReturnGroup, setUserClaimsReturnGroup] = useState(false);
   const [userClaimDrafts, setUserClaimDrafts] = useState<UserClaimDraft[]>([]);
   const [userClaimsLoading, setUserClaimsLoading] = useState(false);
   const [userClaimsReady, setUserClaimsReady] = useState(false);
@@ -386,15 +388,22 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   }
 
   function openCreateGroup() {
+    groupMemberLoadId.current += 1;
     setGroupName("");
     setGroupDisplayName("");
     setGroupClaims([]);
     setEditingGroupId("");
+    setGroupMemberSelection([]);
+    setGroupMemberSearch("");
+    setGroupMembersReady(false);
+    setGroupMembersError("");
+    setGroupMembersMessage("");
     setAdminActionMessage("");
     setGroupFormOpen(true);
   }
 
-  function openEditGroup(group: Group) {
+  async function openEditGroup(group: Group) {
+    const loadId = ++groupMemberLoadId.current;
     setGroupName(group.name);
     setGroupDisplayName(group.display_name);
     setGroupClaims((group.claims ?? []).map((claim) => ({
@@ -403,18 +412,44 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       required_scope: claim.required_scope,
     })));
     setEditingGroupId(group.id);
+    setGroupMemberSelection([]);
+    setGroupMemberSearch("");
+    setUsers([]);
+    setGroupMembersReady(false);
+    setGroupMembersError("");
+    setGroupMembersMessage("");
+    setGroupMembersLoading(true);
     setAdminActionMessage("");
     setGroupFormOpen(true);
+    try {
+      const userList = await api<AdminUser[]>("/api/admin/users");
+      if (groupMemberLoadId.current !== loadId) return;
+      setUsers(userList);
+      setGroupMemberSelection(userList.filter((user) => user.groups.includes(group.name)).map((user) => user.id));
+      setGroupMembersReady(true);
+    } catch (loadError) {
+      if (groupMemberLoadId.current === loadId) setGroupMembersError(errorMessage(loadError, "load group members"));
+    } finally {
+      if (groupMemberLoadId.current === loadId) setGroupMembersLoading(false);
+    }
   }
 
   function closeGroupForm() {
+    groupMemberLoadId.current += 1;
     setGroupFormOpen(false);
     setEditingGroupId("");
+    setGroupMemberSelection([]);
+    setGroupMemberSearch("");
+    setGroupMembersReady(false);
+    setGroupMembersError("");
+    setGroupMembersMessage("");
     setAdminActionMessage("");
   }
 
-  async function openEditUser(user: AdminUser) {
+  async function openEditUser(user: AdminUser, returnToGroup = false) {
     setEditingUser(user);
+    setUserClaimsReturnGroup(returnToGroup);
+    if (returnToGroup) setActiveTab("users");
     setUserClaimDrafts([]);
     setUserClaimsLoading(true);
     setUserClaimsReady(false);
@@ -436,11 +471,14 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   }
 
   function closeUserEditor() {
+    const returnToGroup = userClaimsReturnGroup;
     setEditingUser(null);
+    setUserClaimsReturnGroup(false);
     setUserClaimDrafts([]);
     setUserClaimsReady(false);
     setUserEditorError("");
     setUserEditorMessage("");
+    if (returnToGroup) setActiveTab("groups");
   }
 
   function updateUserClaim(index: number, key: keyof UserClaimDraft, value: string) {
@@ -482,39 +520,23 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     }
   }
 
-  async function openGroupMembers(group: Group) {
-    setMembershipEditor({ kind: "group", id: group.id });
-    setMembershipSelection([]);
-    setMembershipReady(false);
-    setMembershipError("");
-    setMembershipLoading(true);
-    try {
-      const userList = await api<AdminUser[]>("/api/admin/users");
-      setUsers(userList);
-      setMembershipSelection(userList.filter((user) => user.groups.includes(group.name)).map((user) => user.id));
-      setMembershipReady(true);
-    } catch (loadError) {
-      setMembershipError(errorMessage(loadError, "load group membership"));
-    } finally {
-      setMembershipLoading(false);
-    }
-  }
-
-  function toggleMembership(value: string) {
-    setMembershipSelection((current) => current.includes(value)
+  function toggleGroupMember(value: string) {
+    setGroupMembersMessage("");
+    setGroupMemberSelection((current) => current.includes(value)
       ? current.filter((item) => item !== value)
       : [...current, value]);
   }
 
-  async function saveMembership(event: FormEvent<HTMLFormElement>) {
+  async function saveGroupMembers(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!membershipEditor) return;
-    setMembershipBusy(true);
-    setMembershipError("");
+    if (!editingGroupId) return;
+    setGroupMembersBusy(true);
+    setGroupMembersError("");
+    setGroupMembersMessage("");
     try {
-      await api(`/api/admin/groups/${encodeURIComponent(membershipEditor.id)}/members`, {
+      await api(`/api/admin/groups/${encodeURIComponent(editingGroupId)}/members`, {
         method: "PUT",
-        body: json({ users: membershipSelection }),
+        body: json({ users: groupMemberSelection }),
       });
       const [userList, groupList] = await Promise.all([
         api<AdminUser[]>("/api/admin/users"),
@@ -522,18 +544,13 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       ]);
       setUsers(userList);
       setGroups(groupList);
-      setMembershipEditor(null);
+      setGroupMembersReady(true);
+      setGroupMembersMessage("Members saved.");
     } catch (saveError) {
-      setMembershipError(errorMessage(saveError, "save group membership"));
+      setGroupMembersError(errorMessage(saveError, "save group members"));
     } finally {
-      setMembershipBusy(false);
+      setGroupMembersBusy(false);
     }
-  }
-
-  function closeMembershipEditor() {
-    setMembershipEditor(null);
-    setMembershipReady(false);
-    setMembershipError("");
   }
 
   async function saveClient(event: FormEvent<HTMLFormElement>) {
@@ -706,7 +723,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     setAdminActionMessage("");
     try {
       await api(`/api/admin/groups/${encodeURIComponent(group.id)}`, { method: "DELETE" });
-      if (membershipEditor?.kind === "group" && membershipEditor.id === group.id) closeMembershipEditor();
       setGroups((current) => current.filter((item) => item.id !== group.id));
       setUsers((current) => current.map((user) => ({
         ...user,
@@ -911,7 +927,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   function selectTab(tab: Tab) {
     setAdminActionMessage("");
     setLoadError("");
-    closeMembershipEditor();
     closeUserEditor();
     setActiveTab(tab);
   }
@@ -938,6 +953,9 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   };
   const [tabTitle, tabDescription] = tabTitles[activeTab];
   const clientBeingEdited = clients.find((client) => client.client_id === editingClientId) ?? null;
+  const normalizedGroupMemberSearch = groupMemberSearch.trim().toLocaleLowerCase();
+  const filteredGroupMembers = users.filter((user) => [user.display_name, user.username, user.email ?? "", user.invitation_label ?? ""]
+    .some((value) => value.toLocaleLowerCase().includes(normalizedGroupMemberSearch)));
   const title = activeTab === "clients" && clientFormMode !== null
     ? clientFormMode === "edit" ? "Edit OIDC client" : "Add an OIDC client"
     : activeTab === "users" && editingUser ? "Edit user"
@@ -945,9 +963,10 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       : activeTab === "groups" && groupFormOpen ? editingGroupId ? "Edit a group" : "Create a group" : tabTitle;
   const description = activeTab === "clients" && clientFormMode !== null
     ? "Configure how this application connects to Hanko."
-    : activeTab === "users" && editingUser ? "Review account details and manage this user’s custom claims."
+      : activeTab === "users" && editingUser ? userClaimsReturnGroup ? "Manage this member’s custom claims."
+        : "Review account details and manage this user’s custom claims."
       : activeTab === "users" && userFormOpen ? "Create an invitation for someone to set up an account."
-      : activeTab === "groups" && groupFormOpen ? "Set group details and the claims shared with its members." : tabDescription;
+      : activeTab === "groups" && groupFormOpen ? "Set group details, membership, and claims shared with its members." : tabDescription;
 
   return <AdminScene>
     <div className="admin-layout">
@@ -969,7 +988,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       <section className="admin-content" aria-labelledby="admin-page-title">
         <header className="admin-heading">
           {(activeTab === "clients" && clientFormMode !== null) && <button className="admin-back-action" type="button" onClick={closeClientForm}>← Back to clients</button>}
-          {(activeTab === "users" && (userFormOpen || editingUser)) && <button className="admin-back-action" type="button" onClick={editingUser ? closeUserEditor : closeUserForm}>← Back to users</button>}
+          {(activeTab === "users" && (userFormOpen || editingUser)) && <button className="admin-back-action" type="button" onClick={editingUser ? closeUserEditor : closeUserForm}>{editingUser && userClaimsReturnGroup ? "← Back to group" : "← Back to users"}</button>}
           {(activeTab === "groups" && groupFormOpen) && <button className="admin-back-action" type="button" onClick={closeGroupForm}>← Back to groups</button>}
           <h1 id="admin-page-title">{title}</h1>
           <p>{description}</p>
@@ -1158,7 +1177,8 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             </form>}
           </>}
 
-          {activeTab === "groups" && isAdmin && groupFormOpen && <form className="client-form admin-create-form user-create-page" onSubmit={createGroup}>
+          {activeTab === "groups" && isAdmin && groupFormOpen && <section className="group-edit-page">
+            <form className="client-form admin-create-form user-create-page" onSubmit={createGroup}>
               <label className="admin-field"><span>Group name</span><input autoComplete="off" maxLength={80} value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="media-users" required disabled={Boolean(editingGroupId)} /></label>
               <label className="admin-field"><span>Display name</span><input maxLength={120} value={groupDisplayName} onChange={(event) => setGroupDisplayName(event.target.value)} placeholder="Media users" required /></label>
               <fieldset className="admin-options admin-claims">
@@ -1174,7 +1194,34 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
               </fieldset>
               {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
               <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !groupName.trim() || !groupDisplayName.trim()}>{adminActionBusy ? "Saving…" : editingGroupId ? "Save group" : "Create group"}</button><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={closeGroupForm}>Cancel</button></div>
-            </form>}
+            </form>
+            {editingGroupId && <section className="group-members-panel" aria-labelledby="group-members-heading">
+              <div className="group-members-toolbar">
+                <div>
+                  <h2 id="group-members-heading">Members <span>{groupMemberSelection.length}</span></h2>
+                  <p>Choose who belongs to this group. Changes take effect in newly issued tokens.</p>
+                </div>
+                <label className="admin-field group-member-search"><span>Search users</span><input type="search" value={groupMemberSearch} onChange={(event) => setGroupMemberSearch(event.target.value)} placeholder="Name, username, or email" disabled={groupMembersLoading || groupMembersBusy} /></label>
+              </div>
+              {groupMembersError && <p className="admin-message admin-message-error" role="alert">{groupMembersError}</p>}
+              {groupMembersMessage && <p className="admin-message" role="status">{groupMembersMessage}</p>}
+              {groupMembersLoading ? <p className="admin-hint">Loading users…</p> : users.length === 0 ? <p className="admin-hint">No user accounts are available.</p> : filteredGroupMembers.length === 0 ? <p className="admin-hint">No users match “{groupMemberSearch.trim()}”.</p> : <div className="admin-table-scroll group-member-table-scroll"><table className="admin-table group-member-table">
+                <thead><tr><th scope="col">Member</th><th scope="col">User</th><th scope="col">Username</th><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Claims</th></tr></thead>
+                <tbody>{filteredGroupMembers.map((user) => <tr key={user.id}>
+                  <td><label className="group-member-toggle"><input type="checkbox" aria-label={`Toggle ${user.display_name || user.username} in ${groupDisplayName}`} checked={groupMemberSelection.includes(user.id)} onChange={() => toggleGroupMember(user.id)} disabled={groupMembersBusy} /></label></td>
+                  <td><strong><PrivateValue>{user.display_name || user.username}</PrivateValue></strong>{user.invitation_label && <small><PrivateValue>{user.invitation_label}</PrivateValue></small>}</td>
+                  <td><code className="table-id"><PrivateValue>{user.username}</PrivateValue></code></td>
+                  <td>{user.email ? <PrivateValue>{user.email}</PrivateValue> : <span className="table-muted">—</span>}</td>
+                  <td><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></td>
+                  <td><button className="client-list-action membership-action" type="button" onClick={() => void openEditUser(user, true)} disabled={userClaimsLoading || userClaimsBusy || groupMembersBusy}><Pencil aria-hidden="true" />Edit claims</button></td>
+                </tr>)}</tbody>
+              </table></div>}
+              <form className="group-members-actions" onSubmit={saveGroupMembers}>
+                <p className="admin-hint">{groupMemberSelection.length} {groupMemberSelection.length === 1 ? "user is" : "users are"} selected. Per-user claims can override claims set above.</p>
+                <button className="primary-action client-submit" type="submit" disabled={groupMembersBusy || groupMembersLoading || !groupMembersReady}>{groupMembersBusy ? "Saving members…" : "Save members"}</button>
+              </form>
+            </section>}
+          </section>}
 
           {activeTab === "groups" && isAdmin && !groupFormOpen && <>
             <div className="client-list-heading user-list-heading"><h2>Groups <span>{groups.length}</span></h2><button className="client-add-action" type="button" onClick={openCreateGroup}><Plus aria-hidden="true" /> Add a group</button></div>
@@ -1187,16 +1234,8 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
                   <td><strong><PrivateValue>{group.display_name}</PrivateValue></strong></td>
                   <td>{(group.claims ?? []).length ? <span>{(group.claims ?? []).map((claim) => claim.claim_name).join(", ")}</span> : <span className="table-muted">—</span>}</td>
                   <td><PrivateValue>{group.member_count}</PrivateValue></td>
-                  <td><div className="table-actions"><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={() => openEditGroup(group)}><Pencil aria-hidden="true" /><span>Edit</span></button><button className="client-list-action membership-action" type="button" onClick={() => void openGroupMembers(group)} disabled={adminActionBusy || membershipBusy || membershipLoading}><Users aria-hidden="true" />Manage members</button><button className="client-list-action client-remove-action" type="button" disabled={adminActionBusy} onClick={() => void deleteGroup(group)}><Trash2 aria-hidden="true" /><span>{deletingGroupId === group.id ? "Deleting…" : "Delete"}</span></button></div></td>
+                  <td><div className="table-actions"><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={() => void openEditGroup(group)}><Pencil aria-hidden="true" /><span>Edit</span></button><button className="client-list-action client-remove-action" type="button" disabled={adminActionBusy} onClick={() => void deleteGroup(group)}><Trash2 aria-hidden="true" /><span>{deletingGroupId === group.id ? "Deleting…" : "Delete"}</span></button></div></td>
                 </tr>
-                {membershipEditor?.kind === "group" && membershipEditor.id === group.id && <tr key={`${group.id}-members`}><td colSpan={5}>
-                  <form className="membership-editor" onSubmit={saveMembership}>
-                    <h3>Members of <PrivateValue>{group.display_name}</PrivateValue></h3>
-                    {membershipLoading ? <p className="admin-hint">Loading users…</p> : users.length === 0 ? <p className="admin-hint">No user accounts are available.</p> : <fieldset className="admin-options"><legend>Choose users</legend><div className="admin-choice-grid">{users.map((user) => <label className="admin-check" key={user.id}><input type="checkbox" checked={membershipSelection.includes(user.id)} onChange={() => toggleMembership(user.id)} disabled={membershipBusy} /><span><strong><PrivateValue>{user.display_name || user.username}</PrivateValue></strong><small><PrivateValue>{user.username}{user.disabled ? " · disabled" : ""}</PrivateValue></small></span></label>)}</div></fieldset>}
-                    {membershipError && <p className="admin-message admin-message-error" role="alert">{membershipError}</p>}
-                    <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={membershipBusy || membershipLoading || !membershipReady}>{membershipBusy ? "Saving…" : "Save members"}</button><button className="client-list-action" type="button" disabled={membershipBusy} onClick={closeMembershipEditor}>Cancel</button></div>
-                  </form>
-                </td></tr>}
               </Fragment>)}</tbody>
             </table></div>}</section>
           </>}

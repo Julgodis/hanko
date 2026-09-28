@@ -252,7 +252,7 @@ function installPreviewApi() {
     }
     if (url.pathname.startsWith("/api/admin/groups/") && url.pathname.endsWith("/members") && method === "PUT") {
       const groupId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
-      const group = groups.find((item) => item.id === groupId);
+      const group = previewGroups.find((item) => item.id === groupId);
       if (!group) return jsonResponse({ error: "group not found" }, 404);
       const memberIds: string[] = JSON.parse(String(init?.body ?? "{}")).users ?? [];
       for (const user of users) {
@@ -260,7 +260,7 @@ function installPreviewApi() {
           ? [...new Set([...user.groups, group.name])]
           : user.groups.filter((name) => name !== group.name);
       }
-      for (const item of groups) item.member_count = users.filter((user) => user.groups.includes(item.name)).length;
+      for (const item of previewGroups) item.member_count = users.filter((user) => user.groups.includes(item.name)).length;
       return jsonResponse({});
     }
     if (url.pathname === "/api/admin/invitations" && method === "GET") return jsonResponse(previewInvitations);
