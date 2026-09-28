@@ -73,9 +73,13 @@ services:
       context: .
       args:
         VITE_HIDDEN_USER_CLAIMS: ${VITE_HIDDEN_USER_CLAIMS:-}
+    environment:
+      REQUIRED_USER_CLAIMS: ${REQUIRED_USER_CLAIMS:-}
 ```
 
 Use comma-separated claim names such as `given_name,family_name,address,phone_number`. This setting only hides form fields; it does not enforce permissions in the API or revoke values already stored. Application roles cannot be edited through the self-service profile API. Provisioned `app_roles` values remain available in OIDC claims; use admin-managed groups and group claims to manage authorization roles in Hanko.
+
+To require profile fields during account setup and profile updates, set the runtime variable `REQUIRED_USER_CLAIMS`. For example, `REQUIRED_USER_CLAIMS=preferred_username` requires users to choose a username that is shared as the OIDC `preferred_username` claim. Separate multiple fields with commas. Supported fields are defined in [`shared/user_claims.json`](shared/user_claims.json). Requiring `address` means at least one address component must be filled in. Required fields stay visible even when also listed in `VITE_HIDDEN_USER_CLAIMS`.
 
 ## Scope
 

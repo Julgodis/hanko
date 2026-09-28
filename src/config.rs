@@ -1,5 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
-use std::net::IpAddr;
+use serde::Deserialize;
+use std::{net::IpAddr, sync::LazyLock};
 use url::Url;
 
 #[derive(Clone, Debug)]
@@ -11,6 +12,7 @@ pub struct Config {
     pub master_key: Option<[u8; 32]>,
     pub bootstrap_token: Option<String>,
     pub trusted_proxy_addresses: Vec<IpAddr>,
+    pub required_user_claims: Vec<String>,
 }
 
 impl Config {
@@ -52,6 +54,8 @@ impl Config {
             })
             .transpose()?
             .unwrap_or_default();
+        config.required_user_claims =
+            parse_required_user_claims(&std::env::var("REQUIRED_USER_CLAIMS").unwrap_or_default())?;
         Ok(config)
     }
 
@@ -102,6 +106,7 @@ impl Config {
             master_key: None,
             bootstrap_token: None,
             trusted_proxy_addresses: Vec::new(),
+            required_user_claims: Vec::new(),
         })
     }
 
@@ -124,6 +129,50 @@ impl Config {
     }
 }
 
+#[derive(Deserialize)]
+struct UserClaimDefinitions {
+    supported_user_claims: Vec<String>,
+    address_user_claims: Vec<String>,
+}
+
+static USER_CLAIM_DEFINITIONS: LazyLock<UserClaimDefinitions> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../shared/user_claims.json"))
+        .expect("shared user claim definitions must be valid")
+});
+
+pub(crate) fn is_supported_user_claim(claim: &str) -> bool {
+    USER_CLAIM_DEFINITIONS
+        .supported_user_claims
+        .iter()
+        .any(|supported| supported == claim)
+}
+
+pub(crate) fn is_address_user_claim(claim: &str) -> bool {
+    USER_CLAIM_DEFINITIONS
+        .address_user_claims
+        .iter()
+        .any(|address_claim| address_claim == claim)
+}
+
+fn parse_required_user_claims(value: &str) -> Result<Vec<String>, ConfigError> {
+    let mut claims = Vec::new();
+    for claim in value
+        .split(',')
+        .map(str::trim)
+        .filter(|claim| !claim.is_empty())
+    {
+        if !is_supported_user_claim(claim)
+            || claims
+                .iter()
+                .any(|existing: &String| existing.as_str() == claim)
+        {
+            return Err(ConfigError::InvalidRequiredUserClaims);
+        }
+        claims.push(claim.to_owned());
+    }
+    Ok(claims)
+}
+
 fn parse_master_key(value: &str) -> Result<[u8; 32], ConfigError> {
     let key = STANDARD
         .decode(value)
@@ -143,6 +192,8 @@ pub enum ConfigError {
     InvalidMasterKey,
     #[error("TRUSTED_PROXY_ADDRESSES must be a comma-separated list of IP addresses")]
     InvalidTrustedProxyAddresses,
+    #[error("REQUIRED_USER_CLAIMS must contain unique supported OIDC user field names")]
+    InvalidRequiredUserClaims,
 }
 
 #[cfg(test)]

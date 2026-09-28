@@ -1,0 +1,29 @@
+{
+  "supported_user_claims": [
+    "preferred_username",
+    "name",
+    "picture",
+    "phone_number",
+    "address",
+    "street_address",
+    "locality",
+    "region",
+    "postal_code",
+    "country",
+    "profile",
+    "given_name",
+    "family_name",
+    "nickname",
+    "website",
+    "locale",
+    "zoneinfo"
+  ],
+  "address_user_claims": [
+    "address",
+    "street_address",
+    "locality",
+    "region",
+    "postal_code",
+    "country"
+  ]
+}

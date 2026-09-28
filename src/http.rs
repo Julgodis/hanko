@@ -156,6 +156,7 @@ struct SessionResponse {
     hanko_seed: Option<String>,
     is_admin: bool,
     setup_only: bool,
+    required_user_claims: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -571,6 +572,7 @@ async fn session_info(
             hanko_seed: Some(identity.hanko_seed),
             is_admin: identity.is_admin,
             setup_only: identity.setup_only,
+            required_user_claims: state.config.required_user_claims.clone(),
         }),
         None => Json(SessionResponse {
             authenticated: false,
@@ -586,6 +588,7 @@ async fn session_info(
             hanko_seed: None,
             is_admin: false,
             setup_only: false,
+            required_user_claims: state.config.required_user_claims.clone(),
         }),
     })
 }
@@ -710,6 +713,14 @@ async fn update_profile(
             update_profile_attribute(&mut attributes, claim, value, max_len, is_url)?;
         }
     }
+    if !required_user_claims_present(
+        &state.config.required_user_claims,
+        oidc_username.as_deref(),
+        raw_name,
+        &attributes,
+    ) {
+        return Err(ApiError::bad_request("a required profile field is missing"));
+    }
     let updated = sqlx::query("UPDATE users SET username = ?, display_name = ?, attributes = ?, expose_preferred_username = ?, expose_name = ?, updated_at = ? WHERE id = ? AND disabled_at IS NULL")
         .bind(username)
         .bind(display_name)
@@ -741,6 +752,35 @@ async fn update_profile(
         "address": attributes.get("address"),
         "profile_claims": crate::security::oidc_profile_claims(&attributes),
     })))
+}
+
+fn required_user_claims_present(
+    required_claims: &[String],
+    preferred_username: Option<&str>,
+    name: Option<&str>,
+    attributes: &serde_json::Value,
+) -> bool {
+    required_claims.iter().all(|claim| match claim.as_str() {
+        "preferred_username" => preferred_username.is_some_and(|value| !value.trim().is_empty()),
+        "name" => name.is_some_and(|value| !value.trim().is_empty()),
+        "address" => attributes
+            .get("address")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|address| {
+                address
+                    .values()
+                    .any(|value| value.as_str().is_some_and(|field| !field.trim().is_empty()))
+            }),
+        claim if crate::config::is_address_user_claim(claim) => attributes
+            .get("address")
+            .and_then(|address| address.get(claim))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty()),
+        _ => attributes
+            .get(claim)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty()),
+    })
 }
 
 fn update_profile_attribute(
@@ -1019,6 +1059,11 @@ async fn register_options(
     require_origin(&headers, &state.config)?;
     let session = require_session(&headers, &state.database).await?;
     require_csrf(&headers, &session)?;
+    if session.setup_only && !required_profile_is_complete(&state, &session.user_id).await? {
+        return Err(ApiError::bad_request(
+            "complete required profile fields before registering a passkey",
+        ));
+    }
     let _slot = try_anonymous_state_slot().ok_or(ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
         message: "too many passkey registration requests; try again shortly",
@@ -1183,6 +1228,11 @@ async fn register_verify(
     require_origin(&headers, &state.config)?;
     let session = require_session(&headers, &state.database).await?;
     require_csrf(&headers, &session)?;
+    if session.setup_only && !required_profile_is_complete(&state, &session.user_id).await? {
+        return Err(ApiError::bad_request(
+            "complete required profile fields before registering a passkey",
+        ));
+    }
     state
         .webauthn
         .finish_registration(
@@ -1199,6 +1249,41 @@ async fn register_verify(
         })?;
     // Setup and invitation sessions leave setup mode only after the first passkey commits.
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn required_profile_is_complete(state: &AppState, user_id: &str) -> Result<bool, ApiError> {
+    if state.config.required_user_claims.is_empty() {
+        return Ok(true);
+    }
+    let row = sqlx::query(
+        "SELECT username, display_name, expose_preferred_username, expose_name, attributes FROM users WHERE id = ? AND disabled_at IS NULL",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.database.pool)
+    .await
+    .map_err(|_| ApiError::internal())?
+    .ok_or_else(ApiError::unauthorized)?;
+    let username: String = row.try_get("username").map_err(|_| ApiError::internal())?;
+    let display_name: String = row
+        .try_get("display_name")
+        .map_err(|_| ApiError::internal())?;
+    let exposes_username: bool = row
+        .try_get("expose_preferred_username")
+        .map_err(|_| ApiError::internal())?;
+    let exposes_name: bool = row
+        .try_get("expose_name")
+        .map_err(|_| ApiError::internal())?;
+    let attributes_json: String = row
+        .try_get("attributes")
+        .map_err(|_| ApiError::internal())?;
+    let attributes: serde_json::Value =
+        serde_json::from_str(&attributes_json).map_err(|_| ApiError::internal())?;
+    Ok(required_user_claims_present(
+        &state.config.required_user_claims,
+        exposes_username.then_some(username.as_str()),
+        exposes_name.then_some(display_name.as_str()),
+        &attributes,
+    ))
 }
 
 async fn list_passkeys(
