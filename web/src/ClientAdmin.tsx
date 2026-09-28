@@ -31,8 +31,10 @@ type Client = {
 };
 type GroupClaimMapping = { claim_name: string; claim_value: unknown; required_scope: Scope };
 type Group = { id: string; name: string; display_name: string; member_count: number; claims?: GroupClaimMapping[] };
-type AdminUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
-type MembershipEditor = { kind: "user"; id: string } | { kind: "group"; id: string };
+type AdminUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; created_at: number; groups: string[] };
+type MembershipEditor = { kind: "group"; id: string };
+type UserClaim = { claim_name: string; claim_value: unknown; required_scope: string | null };
+type UserClaimDraft = { claim_name: string; claim_value: string; required_scope: string };
 type Invitation = { id: string; label: string; email: string | null; max_uses: number; use_count: number; created_at: number; expires_at: number; revoked: boolean };
 type CreatedInvitation = { id: string; label: string; email: string | null; enrollment_url: string; expires_at: number };
 type SigningKey = { kid: string; algorithm: string; status: string; created_at: number; retire_after: number | null };
@@ -171,6 +173,13 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [membershipLoading, setMembershipLoading] = useState(false);
   const [membershipReady, setMembershipReady] = useState(false);
   const [membershipError, setMembershipError] = useState("");
+  const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
+  const [userClaimDrafts, setUserClaimDrafts] = useState<UserClaimDraft[]>([]);
+  const [userClaimsLoading, setUserClaimsLoading] = useState(false);
+  const [userClaimsReady, setUserClaimsReady] = useState(false);
+  const [userClaimsBusy, setUserClaimsBusy] = useState(false);
+  const [userEditorError, setUserEditorError] = useState("");
+  const [userEditorMessage, setUserEditorMessage] = useState("");
 
   async function refreshClients() {
     setClients(await api<Client[]>("/api/admin/clients"));
@@ -248,10 +257,10 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   }, [activeTab, isAdmin]);
 
   useEffect(() => {
-    if (clientFormMode !== null || userFormOpen || groupFormOpen) {
+    if (clientFormMode !== null || userFormOpen || groupFormOpen || editingUser) {
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
-  }, [clientFormMode, userFormOpen, groupFormOpen]);
+  }, [clientFormMode, userFormOpen, groupFormOpen, editingUser]);
 
   function toggleScope(scope: (typeof AVAILABLE_SCOPES)[number]) {
     setScopes((current) => current.includes(scope)
@@ -324,6 +333,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   }
 
   function openCreateUser() {
+    closeUserEditor();
     setInvitationLabel("");
     setInvitationEmail("");
     setInvitationMaxUses("1");
@@ -368,11 +378,73 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     setAdminActionMessage("");
   }
 
-  function openUserGroups(user: AdminUser) {
-    setMembershipEditor({ kind: "user", id: user.id });
-    setMembershipSelection(user.groups);
-    setMembershipReady(true);
-    setMembershipError("");
+  async function openEditUser(user: AdminUser) {
+    setEditingUser(user);
+    setUserClaimDrafts([]);
+    setUserClaimsLoading(true);
+    setUserClaimsReady(false);
+    setUserEditorError("");
+    setUserEditorMessage("");
+    try {
+      const claims = await api<UserClaim[]>(`/api/admin/users/${encodeURIComponent(user.id)}/claims`);
+      setUserClaimDrafts(claims.map((claim) => ({
+        claim_name: claim.claim_name,
+        claim_value: JSON.stringify(claim.claim_value) ?? "null",
+        required_scope: claim.required_scope ?? "",
+      })));
+      setUserClaimsReady(true);
+    } catch (loadError) {
+      setUserEditorError(errorMessage(loadError));
+    } finally {
+      setUserClaimsLoading(false);
+    }
+  }
+
+  function closeUserEditor() {
+    setEditingUser(null);
+    setUserClaimDrafts([]);
+    setUserClaimsReady(false);
+    setUserEditorError("");
+    setUserEditorMessage("");
+  }
+
+  function updateUserClaim(index: number, key: keyof UserClaimDraft, value: string) {
+    setUserClaimDrafts((current) => current.map((claim, claimIndex) =>
+      claimIndex === index ? { ...claim, [key]: value } : claim));
+  }
+
+  async function saveUserClaims(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingUser) return;
+    setUserClaimsBusy(true);
+    setUserEditorError("");
+    setUserEditorMessage("");
+    try {
+      const claims = userClaimDrafts
+        .filter((claim) => claim.claim_name.trim() || claim.claim_value.trim())
+        .map((claim) => {
+          let claimValue: unknown;
+          try {
+            claimValue = JSON.parse(claim.claim_value);
+          } catch {
+            throw new Error(`Enter valid JSON for “${claim.claim_name || "new claim"}”.`);
+          }
+          return {
+            claim_name: claim.claim_name.trim(),
+            claim_value: claimValue,
+            required_scope: claim.required_scope || null,
+          };
+        });
+      await api(`/api/admin/users/${encodeURIComponent(editingUser.id)}/claims`, {
+        method: "PUT",
+        body: json({ claims }),
+      });
+      setUserEditorMessage("Custom claims saved.");
+    } catch (saveError) {
+      setUserEditorError(errorMessage(saveError));
+    } finally {
+      setUserClaimsBusy(false);
+    }
   }
 
   async function openGroupMembers(group: Group) {
@@ -405,17 +477,10 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     setMembershipBusy(true);
     setMembershipError("");
     try {
-      if (membershipEditor.kind === "user") {
-        await api(`/api/admin/users/${encodeURIComponent(membershipEditor.id)}/groups`, {
-          method: "PUT",
-          body: json({ groups: membershipSelection }),
-        });
-      } else {
-        await api(`/api/admin/groups/${encodeURIComponent(membershipEditor.id)}/members`, {
-          method: "PUT",
-          body: json({ users: membershipSelection }),
-        });
-      }
+      await api(`/api/admin/groups/${encodeURIComponent(membershipEditor.id)}/members`, {
+        method: "PUT",
+        body: json({ users: membershipSelection }),
+      });
       const [userList, groupList] = await Promise.all([
         api<AdminUser[]>("/api/admin/users"),
         api<Group[]>("/api/admin/groups"),
@@ -797,6 +862,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     setAdminActionMessage("");
     setLoadError("");
     closeMembershipEditor();
+    closeUserEditor();
     setActiveTab(tab);
   }
 
@@ -812,7 +878,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   ];
   const tabTitles: Record<Tab, [string, string]> = {
     clients: ["OIDC clients", "Connect applications to Hanko."],
-    users: ["Users", "Create invite links, review accounts, and manage group memberships."],
+    users: ["Users", "Create invite links, review accounts, and manage custom claims."],
     groups: ["Groups", "Manage memberships, scoped claims, and OIDC client access."],
     keys: ["Signing keys", "Manage the keys used to sign tokens."],
     hanko: ["Your profile", "Manage the details shared with apps and your personal Hanko."],
@@ -822,11 +888,13 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const clientBeingEdited = clients.find((client) => client.client_id === editingClientId) ?? null;
   const title = activeTab === "clients" && clientFormMode !== null
     ? clientFormMode === "edit" ? "Edit OIDC client" : "Add an OIDC client"
-    : activeTab === "users" && userFormOpen ? "Invite a user"
+    : activeTab === "users" && editingUser ? "Edit user"
+      : activeTab === "users" && userFormOpen ? "Invite a user"
       : activeTab === "groups" && groupFormOpen ? editingGroupId ? "Edit a group" : "Create a group" : tabTitle;
   const description = activeTab === "clients" && clientFormMode !== null
     ? "Configure how this application connects to Hanko."
-    : activeTab === "users" && userFormOpen ? "Create an invitation for someone to set up an account."
+    : activeTab === "users" && editingUser ? "Review account details and manage this user’s custom claims."
+      : activeTab === "users" && userFormOpen ? "Create an invitation for someone to set up an account."
       : activeTab === "groups" && groupFormOpen ? "Set group details and the claims shared with its members." : tabDescription;
 
   return <AdminScene>
@@ -849,7 +917,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       <section className="admin-content" aria-labelledby="admin-page-title">
         <header className="admin-heading">
           {(activeTab === "clients" && clientFormMode !== null) && <button className="admin-back-action" type="button" onClick={closeClientForm}>← Back to clients</button>}
-          {(activeTab === "users" && userFormOpen) && <button className="admin-back-action" type="button" onClick={closeUserForm}>← Back to users</button>}
+          {(activeTab === "users" && (userFormOpen || editingUser)) && <button className="admin-back-action" type="button" onClick={editingUser ? closeUserEditor : closeUserForm}>← Back to users</button>}
           {(activeTab === "groups" && groupFormOpen) && <button className="admin-back-action" type="button" onClick={closeGroupForm}>← Back to groups</button>}
           <h1 id="admin-page-title">{title}</h1>
           <p>{description}</p>
@@ -962,27 +1030,19 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       </section>}
     </section>}
 
-          {activeTab === "users" && isAdmin && !userFormOpen && <>
+          {activeTab === "users" && isAdmin && !userFormOpen && !editingUser && <>
             <div className="client-list-heading user-list-heading"><h2>Accounts <span>{users.length}</span></h2></div>
             {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
             <section className="registered-clients admin-records user-records">
               {users.length === 0 ? <p className="admin-hint">No accounts found.</p> : <div className="admin-table-scroll"><table className="admin-table user-table">
-                <thead><tr><th scope="col">User</th><th scope="col">Username</th><th scope="col">Email</th><th scope="col">Groups</th><th scope="col">Invite label</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
-                <tbody>{users.map((user) => <Fragment key={user.id}>
+                <thead><tr><th scope="col">User</th><th scope="col">Username</th><th scope="col">Groups</th><th scope="col">Invite label</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+                <tbody>{users.map((user) =>
                   <tr key={user.id}>
-                    <td><strong><PrivateValue>{user.display_name || user.username}</PrivateValue></strong></td><td><code className="table-id"><PrivateValue>{user.username}</PrivateValue></code></td><td>{user.email ? <PrivateValue>{user.email}</PrivateValue> : <span className="table-muted">No email</span>}</td><td>{user.groups.length ? <PrivateValue>{user.groups.join(", ")}</PrivateValue> : <span className="table-muted">—</span>}</td><td>{user.invitation_label ? <PrivateValue>{user.invitation_label}</PrivateValue> : <span className="table-muted">—</span>}</td>
+                    <td><strong><PrivateValue>{user.display_name || user.username}</PrivateValue></strong></td><td><code className="table-id"><PrivateValue>{user.username}</PrivateValue></code></td><td>{user.groups.length ? <PrivateValue>{user.groups.join(", ")}</PrivateValue> : <span className="table-muted">—</span>}</td><td>{user.invitation_label ? <PrivateValue>{user.invitation_label}</PrivateValue> : <span className="table-muted">—</span>}</td>
                     <td><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></td>
-                    <td><button className="client-list-action membership-action" type="button" onClick={() => openUserGroups(user)} disabled={membershipBusy || membershipLoading}><Pencil aria-hidden="true" />Edit groups</button></td>
+                    <td><button className="client-list-action membership-action" type="button" onClick={() => void openEditUser(user)} disabled={userClaimsLoading || userClaimsBusy}><Pencil aria-hidden="true" />Edit user</button></td>
                   </tr>
-                  {membershipEditor?.kind === "user" && membershipEditor.id === user.id && <tr key={`${user.id}-groups`}><td colSpan={7}>
-                    <form className="membership-editor" onSubmit={saveMembership}>
-                      <h3>Groups for <PrivateValue>{user.display_name || user.username}</PrivateValue></h3>
-                      {groups.length === 0 ? <p className="admin-hint">Create a group before assigning one to this user.</p> : <fieldset className="admin-options"><legend>Choose groups</legend><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check" key={group.id}><input type="checkbox" checked={membershipSelection.includes(group.name)} onChange={() => toggleMembership(group.name)} disabled={membershipBusy} /><span><strong><PrivateValue>{group.display_name}</PrivateValue></strong><small><PrivateValue>{group.name}</PrivateValue></small></span></label>)}</div></fieldset>}
-                      {membershipError && <p className="admin-message admin-message-error" role="alert">{membershipError}</p>}
-                      <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={membershipBusy || !membershipReady || groups.length === 0}>{membershipBusy ? "Saving…" : "Save groups"}</button><button className="client-list-action" type="button" disabled={membershipBusy} onClick={closeMembershipEditor}>Cancel</button></div>
-                    </form>
-                  </td></tr>}
-                </Fragment>)}</tbody>
+                )}</tbody>
               </table></div>}
             </section>
             <section className="registered-clients admin-records">
@@ -1003,6 +1063,34 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
               </table></div>}
             </section>
           </>}
+
+          {activeTab === "users" && isAdmin && editingUser && <section className="user-edit-page">
+            <dl className="user-detail-grid">
+              <div><dt>Display name</dt><dd><PrivateValue>{editingUser.display_name}</PrivateValue></dd></div>
+              <div><dt>Username</dt><dd><PrivateValue>{editingUser.username}</PrivateValue></dd></div>
+              <div><dt>Email</dt><dd>{editingUser.email ? <PrivateValue>{editingUser.email}</PrivateValue> : <span className="table-muted">No email</span>}</dd></div>
+              <div><dt>Status</dt><dd>{editingUser.disabled ? "Disabled" : editingUser.is_admin ? "Administrator" : "Active"}</dd></div>
+              <div><dt>Invite label</dt><dd>{editingUser.invitation_label ? <PrivateValue>{editingUser.invitation_label}</PrivateValue> : <span className="table-muted">—</span>}</dd></div>
+              <div><dt>Groups</dt><dd>{editingUser.groups.length ? <PrivateValue>{editingUser.groups.join(", ")}</PrivateValue> : <span className="table-muted">—</span>}</dd></div>
+              <div><dt>Created</dt><dd><PrivateValue>{new Date(editingUser.created_at * 1000).toLocaleDateString()}</PrivateValue></dd></div>
+            </dl>
+            <form className="client-form user-editor-form" onSubmit={saveUserClaims}>
+              <fieldset className="admin-options admin-claims">
+                <legend>Custom claims <em>Optional</em></legend>
+                <p className="admin-hint">Add JSON claims to this user’s ID and access tokens. A user claim takes precedence over a group claim with the same name; a client-specific claim mapping takes precedence over both.</p>
+                {userClaimsLoading ? <p className="admin-hint">Loading custom claims…</p> : userClaimDrafts.map((claim, index) => <div className="claim-editor user-claim-editor" key={index}>
+                  <label className="admin-field"><span>Claim name</span><input autoComplete="off" maxLength={100} value={claim.claim_name} onChange={(event) => updateUserClaim(index, "claim_name", event.target.value)} placeholder="department" required={Boolean(claim.claim_value.trim())} /></label>
+                  <label className="admin-field"><span>JSON value</span><textarea maxLength={4096} rows={2} value={claim.claim_value} onChange={(event) => updateUserClaim(index, "claim_value", event.target.value)} placeholder={'"design"'} required={Boolean(claim.claim_name.trim())} /></label>
+                  <label className="admin-field"><span>Required scope</span><select value={claim.required_scope} onChange={(event) => updateUserClaim(index, "required_scope", event.target.value)}><option value="">Always include</option>{["openid", ...AVAILABLE_SCOPES].map((scope) => <option value={scope} key={scope}>{scope}</option>)}</select></label>
+                  <button className="claim-remove" type="button" aria-label="Remove user claim" onClick={() => setUserClaimDrafts((current) => current.filter((_, claimIndex) => claimIndex !== index))}><Trash2 aria-hidden="true" /></button>
+                </div>)}
+                {!userClaimsLoading && <button className="add-claim" type="button" onClick={() => setUserClaimDrafts((current) => [...current, { claim_name: "", claim_value: "", required_scope: "" }])}><Plus aria-hidden="true" /> Add custom claim</button>}
+              </fieldset>
+              {userEditorError && <p className="admin-message admin-message-error" role="alert">{userEditorError}</p>}
+              {userEditorMessage && <p className="admin-message" role="status">{userEditorMessage}</p>}
+              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={userClaimsBusy || userClaimsLoading || !userClaimsReady}>{userClaimsBusy ? "Saving…" : "Save custom claims"}</button><button className="client-list-action" type="button" disabled={userClaimsBusy} onClick={closeUserEditor}>Cancel</button></div>
+            </form>
+          </section>}
 
           {activeTab === "users" && isAdmin && userFormOpen && <>
       {createdInvitation ? <section className="created-client" role="status"><div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Invite link ready</h2><p>Anyone with this link can join until it expires or reaches its user limit.</p></div></div><Credential label={<>Invite link · <PrivateValue>{createdInvitation.label}</PrivateValue></>} value={createdInvitation.enrollment_url} copied={copied === "invitation"} onCopy={() => copyValue("invitation", createdInvitation.enrollment_url)} />{createdInvitation.email && <a className="secondary-action invitation-email-action" href={invitationEmailHref(createdInvitation)}><Mail aria-hidden="true" />Email this invite</a>}<p className="created-footnote">Expires {new Date(createdInvitation.expires_at * 1000).toLocaleString()}. The link is shown only now, so copy it before leaving this page.</p><button className="client-list-action create-another-invite" type="button" onClick={openCreateUser}><Plus aria-hidden="true" /> Create another invite</button></section> : <form className="client-form admin-create-form user-create-page" onSubmit={createInvitation}>

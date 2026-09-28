@@ -70,6 +70,19 @@ struct UpdateUserGroups {
 }
 
 #[derive(Deserialize)]
+struct UserClaimInput {
+    claim_name: String,
+    claim_value: Value,
+    required_scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateUserClaims {
+    #[serde(default)]
+    claims: Vec<UserClaimInput>,
+}
+
+#[derive(Deserialize)]
 struct UpdateGroupMembers {
     #[serde(default)]
     users: Vec<String>,
@@ -179,6 +192,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/users", get(list_users))
         .route("/api/admin/users/{user_id}/groups", put(update_user_groups))
         .route(
+            "/api/admin/users/{user_id}/claims",
+            get(list_user_claims).put(update_user_claims),
+        )
+        .route(
             "/api/admin/invitations",
             get(list_invitations).post(create_invitation),
         )
@@ -216,15 +233,12 @@ async fn list_users(
     headers: HeaderMap,
 ) -> Result<Json<Value>, AdminError> {
     let _admin = require_admin(&state, &headers, false).await?;
-    let rows = sqlx::query("SELECT id, username, display_name, email, attributes, invitation_label, is_admin, disabled_at, created_at FROM users ORDER BY username")
+    let rows = sqlx::query("SELECT id, username, display_name, email, invitation_label, is_admin, disabled_at, created_at FROM users ORDER BY username")
         .fetch_all(&state.database.pool)
         .await
         .map_err(|_| AdminError::internal())?;
     let mut users = Vec::with_capacity(rows.len());
     for row in rows {
-        let attributes: String = row
-            .try_get("attributes")
-            .map_err(|_| AdminError::internal())?;
         let id: String = row.try_get("id").map_err(|_| AdminError::internal())?;
         users.push(serde_json::json!({
             "id": id,
@@ -232,7 +246,6 @@ async fn list_users(
             "display_name": row.try_get::<String, _>("display_name").map_err(|_| AdminError::internal())?,
             "email": row.try_get::<Option<String>, _>("email").map_err(|_| AdminError::internal())?,
             "invitation_label": row.try_get::<Option<String>, _>("invitation_label").map_err(|_| AdminError::internal())?,
-            "attributes": serde_json::from_str::<Value>(&attributes).map_err(|_| AdminError::internal())?,
             "is_admin": row.try_get::<bool, _>("is_admin").map_err(|_| AdminError::internal())?,
             "disabled": row.try_get::<Option<i64>, _>("disabled_at").map_err(|_| AdminError::internal())?.is_some(),
             "created_at": row.try_get::<i64, _>("created_at").map_err(|_| AdminError::internal())?,
@@ -240,6 +253,89 @@ async fn list_users(
         }));
     }
     Ok(Json(Value::Array(users)))
+}
+
+async fn list_user_claims(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>, AdminError> {
+    let _admin = require_admin(&state, &headers, false).await?;
+    let user_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)")
+        .bind(&user_id)
+        .fetch_one(&state.database.pool)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    if !user_exists {
+        return Err(AdminError::user_not_found());
+    }
+    let rows = sqlx::query("SELECT claim_name, claim_value, required_scope FROM user_claim_mappings WHERE user_id = ? ORDER BY claim_name")
+        .bind(&user_id)
+        .fetch_all(&state.database.pool)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    let claims = rows
+        .into_iter()
+        .map(|row| {
+            let encoded_value: String = row
+                .try_get("claim_value")
+                .map_err(|_| AdminError::internal())?;
+            Ok(serde_json::json!({
+                "claim_name": row.try_get::<String, _>("claim_name").map_err(|_| AdminError::internal())?,
+                "claim_value": serde_json::from_str::<Value>(&encoded_value).map_err(|_| AdminError::internal())?,
+                "required_scope": row.try_get::<Option<String>, _>("required_scope").map_err(|_| AdminError::internal())?,
+            }))
+        })
+        .collect::<Result<Vec<_>, AdminError>>()?;
+    Ok(Json(Value::Array(claims)))
+}
+
+async fn update_user_claims(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Json(input): Json<UpdateUserClaims>,
+) -> Result<StatusCode, AdminError> {
+    let _admin = require_admin(&state, &headers, true).await?;
+    validate_user_claims(&input.claims)?;
+
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    let user_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)")
+        .bind(&user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    if !user_exists {
+        return Err(AdminError::user_not_found());
+    }
+
+    sqlx::query("DELETE FROM user_claim_mappings WHERE user_id = ?")
+        .bind(&user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    for claim in input.claims {
+        let value =
+            serde_json::to_string(&claim.claim_value).map_err(|_| AdminError::internal())?;
+        sqlx::query("INSERT INTO user_claim_mappings (user_id, claim_name, claim_value, required_scope) VALUES (?, ?, ?, ?)")
+            .bind(&user_id)
+            .bind(claim.claim_name.trim())
+            .bind(value)
+            .bind(claim.required_scope)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn update_user_groups(
@@ -1558,6 +1654,41 @@ fn validate_group_claims(claims: &[GroupClaimInput]) -> Result<(), AdminError> {
         let value = serde_json::to_vec(&claim.claim_value).map_err(|_| AdminError::internal())?;
         if value.len() > 4096 {
             return Err(AdminError::bad_request("group claim value is too large"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_user_claims(claims: &[UserClaimInput]) -> Result<(), AdminError> {
+    if claims.len() > 100 {
+        return Err(AdminError::bad_request("too many user claims"));
+    }
+    let mut seen_claims = std::collections::HashSet::new();
+    for claim in claims {
+        let name = claim.claim_name.trim();
+        if !valid_claim_name(name) || !seen_claims.insert(name) {
+            return Err(AdminError::bad_request(
+                "invalid or duplicate user claim name",
+            ));
+        }
+        if claim.required_scope.as_deref().is_some_and(|scope| {
+            !matches!(
+                scope,
+                "openid"
+                    | "profile"
+                    | "email"
+                    | "address"
+                    | "phone"
+                    | "picture"
+                    | "groups"
+                    | "offline_access"
+            )
+        }) {
+            return Err(AdminError::bad_request("unsupported user claim scope"));
+        }
+        let value = serde_json::to_vec(&claim.claim_value).map_err(|_| AdminError::internal())?;
+        if value.len() > 4096 {
+            return Err(AdminError::bad_request("user claim value is too large"));
         }
     }
     Ok(())

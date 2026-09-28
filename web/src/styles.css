@@ -893,7 +893,7 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .client-table { min-width: 0; }
 .client-table th,
 .client-table td { padding-inline: 8px; }
-.user-table { min-width: 940px; }
+.user-table { min-width: 800px; }
 .invitation-table { min-width: 775px; }
 .group-table { min-width: 690px; }
 .signing-key-table { min-width: 650px; }
@@ -921,6 +921,15 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .membership-editor h3 { margin: 0; color: var(--ink); font-size: 16px; font-weight: 590; }
 .membership-editor .admin-options { padding-top: 12px; }
 .membership-editor .client-form-actions .primary-action { min-height: 40px; }
+.user-edit-page { display: grid; max-width: 820px; gap: 26px; }
+.user-editor-form { max-width: none; }
+.user-claim-editor { align-items: start; }
+.user-claim-editor .claim-remove { align-self: center; margin-bottom: 0; transform: translateY(4px); }
+.user-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 20px; margin: 0; }
+.user-detail-grid > div { min-width: 0; }
+.user-detail-grid dt { margin-bottom: 3px; color: var(--ink-muted); font-size: 12px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+.user-detail-grid dd { margin: 0; color: var(--ink); font-size: 14px; overflow-wrap: anywhere; }
+.user-claim-editor .admin-field textarea { min-height: 40px; padding: 8px; font-size: 14px; }
 .user-list-heading { margin-top: 0; }
 .user-records { margin-top: 0; padding-top: 0; border-top: 0; }
 
@@ -1034,6 +1043,7 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
   .admin-scene { padding-inline: 20px; }
   .admin-heading { margin-bottom: 28px; }
   .admin-choice-grid { grid-template-columns: 1fr; }
+  .user-detail-grid { grid-template-columns: 1fr; }
   .invitation-settings { grid-template-columns: 1fr; }
   .setup-scene { padding-inline: 25px; }
   .setup-panel { max-width: 370px; }

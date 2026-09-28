@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import "./styles.css";
 
 type PreviewScreen = "signin" | "consent" | "welcome" | "setup" | "join-invite" | "clients" | "users" | "invite" | "invite-ready" | "groups" | "keys" | "passkeys" | "hanko" | "client-form";
-type PreviewUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
+type PreviewUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; created_at: number; groups: string[]; claims: { claim_name: string; claim_value: unknown; required_scope: string | null }[] };
 type PreviewGroup = { id: string; name: string; display_name: string; member_count: number; claims: { claim_name: string; claim_value: string; required_scope: string }[] };
 type PreviewClient = { client_id: string; name: string; client_type: string; token_endpoint_auth_method: string; pkce_policy: string; enabled: boolean; redirect_uris: string[]; post_logout_redirect_uris: string[]; scopes: string[]; allowed_groups: string[]; claims: { claim_name: string; user_attribute_path: string; required_scope: string | null }[]; user_count: number };
 
@@ -75,10 +75,10 @@ const clients: PreviewClient[] = [
 ];
 
 const users: PreviewUser[] = [
-  { id: "usr_01", username: "admin", display_name: "Hanko Administrator", email: "admin@example.com", invitation_label: null, is_admin: true, disabled: false, groups: ["administrators"] },
-  { id: "usr_02", username: "sana.lee", display_name: "Sana Lee", email: "sana.lee@example.com", invitation_label: "Design team", is_admin: false, disabled: false, groups: ["media-users", "staff"] },
-  { id: "usr_03", username: "tom.rivers", display_name: "Tom Rivers", email: null, invitation_label: "Community event", is_admin: false, disabled: false, groups: [] },
-  { id: "usr_04", username: "former-member", display_name: "Former member", email: "former@example.com", invitation_label: null, is_admin: false, disabled: true, groups: ["media-users"] },
+  { id: "usr_01", username: "admin", display_name: "Hanko Administrator", email: "admin@example.com", invitation_label: null, is_admin: true, disabled: false, created_at: 1_790_517_600, groups: ["administrators"], claims: [] },
+  { id: "usr_02", username: "sana.lee", display_name: "Sana Lee", email: "sana.lee@example.com", invitation_label: "Design team", is_admin: false, disabled: false, created_at: 1_781_884_800, groups: ["media-users", "staff"], claims: [{ claim_name: "department", claim_value: "Product design", required_scope: "profile" }] },
+  { id: "usr_03", username: "tom.rivers", display_name: "Tom Rivers", email: null, invitation_label: "Community event", is_admin: false, disabled: false, created_at: 1_772_647_200, groups: [], claims: [] },
+  { id: "usr_04", username: "former-member", display_name: "Former member", email: "former@example.com", invitation_label: null, is_admin: false, disabled: true, created_at: 1_764_000_000, groups: ["media-users"], claims: [] },
 ];
 
 const invitations = [
@@ -222,7 +222,7 @@ function installPreviewApi() {
       for (const user of users) user.groups = user.groups.filter((name) => name !== group.name);
       return jsonResponse({});
     }
-    if (url.pathname.startsWith("/api/admin/groups/") && method === "PUT") {
+    if (url.pathname.startsWith("/api/admin/groups/") && !url.pathname.endsWith("/members") && method === "PUT") {
       const groupId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
       const groupIndex = previewGroups.findIndex((group) => group.id === groupId);
       if (groupIndex < 0) return jsonResponse({}, 404);
@@ -230,7 +230,19 @@ function installPreviewApi() {
       return jsonResponse({});
     }
     if (url.pathname === "/api/admin/users" && method === "GET") return jsonResponse(users);
-    if (url.pathname.startsWith("/api/admin/users/") && method === "PUT") {
+    if (url.pathname.startsWith("/api/admin/users/") && url.pathname.endsWith("/claims") && method === "GET") {
+      const userId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
+      const user = users.find((item) => item.id === userId);
+      return user ? jsonResponse(user.claims) : jsonResponse({ error: "user not found" }, 404);
+    }
+    if (url.pathname.startsWith("/api/admin/users/") && url.pathname.endsWith("/claims") && method === "PUT") {
+      const userId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
+      const user = users.find((item) => item.id === userId);
+      if (!user) return jsonResponse({ error: "user not found" }, 404);
+      user.claims = JSON.parse(String(init?.body ?? "{}")).claims ?? [];
+      return jsonResponse({});
+    }
+    if (url.pathname.startsWith("/api/admin/users/") && url.pathname.endsWith("/groups") && method === "PUT") {
       const userId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
       const user = users.find((item) => item.id === userId);
       if (!user) return jsonResponse({ error: "user not found" }, 404);
@@ -238,7 +250,7 @@ function installPreviewApi() {
       for (const group of groups) group.member_count = users.filter((item) => item.groups.includes(group.name)).length;
       return jsonResponse({});
     }
-    if (url.pathname.startsWith("/api/admin/groups/") && method === "PUT") {
+    if (url.pathname.startsWith("/api/admin/groups/") && url.pathname.endsWith("/members") && method === "PUT") {
       const groupId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
       const group = groups.find((item) => item.id === groupId);
       if (!group) return jsonResponse({ error: "group not found" }, 404);
