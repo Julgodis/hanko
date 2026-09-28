@@ -27,7 +27,7 @@ All times are Unix seconds in UTC. IDs are random UUIDs unless they are protocol
 | Table | Purpose and important constraints |
 | --- | --- |
 | `users` | `id`, unique internal `username`, optional unique `email`, optional OIDC `name`/`preferred_username` exposure, optional admin-only `invitation_label`, one generated Hanko seed and ink color, JSON `attributes`, `is_admin`, `disabled_at`, timestamps. |
-| `invitation_links` | Hashed bearer token, admin-only label, optional email recipient, optional group list, user limit and use count, expiry and revocation timestamps. A conditional update enforces limits when a link is accepted. |
+| `invitation_links` | Hashed bearer token, admin-only label, optional email recipient, optional group list, user limit, completed use count and pending setup reservations, expiry and revocation timestamps. A conditional update reserves a slot while an account is being set up. |
 | `passkeys` | User FK, globally unique WebAuthn credential ID, serialized `webauthn-rs` `Passkey`, label and timestamps. Credential IDs cannot be attached to multiple users. |
 | `groups` | Unique stable name and display metadata. |
 | `group_claim_mappings` | JSON-valued custom claims attached to groups. A user receives claims from their current groups only when the configured OIDC scope is requested. |
@@ -69,7 +69,7 @@ JSON columns are validated at API boundaries. Migrations add constraints/indexes
 2. The administrator enters optional OIDC username/name values. `PUT /api/account/profile` requires the exact configured Origin, the setup session, its CSRF cookie, and the matching `X-CSRF-Token`. Empty values keep internal identifiers private and disable those OIDC claims.
 3. The account chooses its generated seal color and seed; `PUT /api/account/hanko` saves the personal Hanko.
 4. The account registers a passkey through the WebAuthn registration ceremony. Only after verification does the server promote the session to a normal administrator session.
-5. An administrator creates an invite link with an internal label, expiry, user limit, optional email recipient, and optional groups. Recipients complete the optional OIDC profile step; the server generates private fallback identifiers, assigns the admin-only label, and increments the link's use count when they accept it. They then save their Hanko and register a passkey. WebAuthn ceremony state remains on the server throughout both flows.
+5. An administrator creates an invite link with an internal label, expiry, user limit, optional email recipient, and optional groups. On acceptance, the server reserves a use and creates a pending account with private fallback identifiers and the admin-only label. It increments the completed use count only in the transaction that saves the new passkey. A failed passkey attempt can be retried in the same setup session; abandoned reservations expire with that session. WebAuthn ceremony state remains on the server throughout both flows.
 
 ### OIDC Authorization Code + PKCE
 

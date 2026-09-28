@@ -202,6 +202,7 @@ struct ErrorBody {
 struct ApiError {
     status: StatusCode,
     message: &'static str,
+    retry_after_seconds: Option<u64>,
 }
 
 impl ApiError {
@@ -209,6 +210,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message,
+            retry_after_seconds: None,
         }
     }
 
@@ -216,6 +218,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             message: "authentication required",
+            retry_after_seconds: None,
         }
     }
 
@@ -223,6 +226,7 @@ impl ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             message: "request rejected",
+            retry_after_seconds: None,
         }
     }
 
@@ -230,6 +234,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             message,
+            retry_after_seconds: None,
         }
     }
 
@@ -237,6 +242,7 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: "passkey not found",
+            retry_after_seconds: None,
         }
     }
 
@@ -244,19 +250,35 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "internal server error",
+            retry_after_seconds: None,
+        }
+    }
+
+    fn capacity(message: &'static str, retry_after_seconds: u64) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message,
+            retry_after_seconds: Some(retry_after_seconds),
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let retry_after_seconds = self.retry_after_seconds;
+        let mut response = (
             self.status,
             Json(ErrorBody {
                 error: self.message,
             }),
         )
-            .into_response()
+            .into_response();
+        if let Some(seconds) = retry_after_seconds {
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 
@@ -403,6 +425,7 @@ async fn generated_user_picture(
     .ok_or(ApiError {
         status: StatusCode::NOT_FOUND,
         message: "user not found",
+        retry_after_seconds: None,
     })?;
     let color: String = user
         .try_get("hanko_color")
@@ -436,6 +459,7 @@ async fn bootstrap(
     let _slot = try_anonymous_state_slot().ok_or(ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
         message: "too many setup requests; try again shortly",
+        retry_after_seconds: None,
     })?;
     let source = source_ip(
         peer.map(|Extension(ConnectInfo(address))| address),
@@ -449,11 +473,13 @@ async fn bootstrap(
         return Err(ApiError {
             status: StatusCode::TOO_MANY_REQUESTS,
             message: "too many setup requests; try again shortly",
+            retry_after_seconds: None,
         });
     }
     let expected_token = state.config.bootstrap_token.as_deref().ok_or(ApiError {
         status: StatusCode::NOT_FOUND,
         message: "bootstrap is disabled",
+        retry_after_seconds: None,
     })?;
     let expected_hash = digest(expected_token);
     let supplied_hash = digest(&input.token);
@@ -891,6 +917,7 @@ async fn login_options(
     let _slot = try_anonymous_state_slot().ok_or(ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
         message: "too many sign-in requests; try again shortly",
+        retry_after_seconds: None,
     })?;
     let source = source_ip(
         peer.map(|Extension(ConnectInfo(address))| address),
@@ -904,6 +931,7 @@ async fn login_options(
         return Err(ApiError {
             status: StatusCode::TOO_MANY_REQUESTS,
             message: "too many sign-in requests; try again shortly",
+            retry_after_seconds: None,
         });
     }
     let supplied_preauth = cookie_value(&headers, PREAUTH_COOKIE);
@@ -930,6 +958,7 @@ async fn login_options(
             return Err(ApiError {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 message: "too many sign-in attempts; try again shortly",
+                retry_after_seconds: None,
             });
         }
     }
@@ -941,6 +970,7 @@ async fn login_options(
             crate::webauthn::WebauthnError::Capacity => ApiError {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 message: "too many active sign-in requests; try again shortly",
+                retry_after_seconds: None,
             },
             _ => ApiError::unauthorized(),
         })?;
@@ -992,6 +1022,7 @@ async fn register_options(
     let _slot = try_anonymous_state_slot().ok_or(ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
         message: "too many passkey registration requests; try again shortly",
+        retry_after_seconds: None,
     })?;
     let source = source_ip(
         peer.map(|Extension(ConnectInfo(address))| address),
@@ -1005,6 +1036,7 @@ async fn register_options(
         return Err(ApiError {
             status: StatusCode::TOO_MANY_REQUESTS,
             message: "too many passkey registration requests; try again shortly",
+            retry_after_seconds: None,
         });
     }
     let input = input.map(|Json(input)| input).unwrap_or_default();
@@ -1020,7 +1052,7 @@ async fn register_options(
     let display_name: String = row
         .try_get("display_name")
         .map_err(|_| ApiError::internal())?;
-    let (ceremony_id, public_key) = state
+    let registration = state
         .webauthn
         .start_registration(
             &session.user_id,
@@ -1029,20 +1061,31 @@ async fn register_options(
             &session.session_hash,
             input.approval_token.as_deref(),
         )
-        .await
-        .map_err(|error| {
+        .await;
+    let (ceremony_id, public_key) = match registration {
+        Ok(registration) => registration,
+        Err(error @ crate::webauthn::WebauthnError::Capacity) => {
             tracing::error!(%error, "failed to start passkey registration");
-            if matches!(error, crate::webauthn::WebauthnError::Capacity) {
-                ApiError {
-                    status: StatusCode::TOO_MANY_REQUESTS,
-                    message: "too many active registration requests; try again shortly",
-                }
-            } else if matches!(error, crate::webauthn::WebauthnError::Authentication) {
-                ApiError::forbidden()
-            } else {
-                ApiError::bad_request("could not start passkey registration")
+            let retry_after = state
+                .webauthn
+                .registration_retry_after_seconds(&session.user_id, &session.session_hash)
+                .await
+                .unwrap_or(300);
+            return Err(ApiError::capacity(
+                "too many active registration requests; try again shortly",
+                retry_after,
+            ));
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to start passkey registration");
+            if matches!(error, crate::webauthn::WebauthnError::Authentication) {
+                return Err(ApiError::forbidden());
             }
-        })?;
+            return Err(ApiError::bad_request(
+                "could not start passkey registration",
+            ));
+        }
+    };
     Ok(Json(
         serde_json::json!({ "ceremony_id": ceremony_id, "publicKey": public_key }),
     ))
@@ -1063,6 +1106,7 @@ async fn credential_change_options(
     let _slot = try_anonymous_state_slot().ok_or(ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
         message: "too many passkey confirmation requests; try again shortly",
+        retry_after_seconds: None,
     })?;
     let source = source_ip(
         peer.map(|Extension(ConnectInfo(address))| address),
@@ -1076,6 +1120,7 @@ async fn credential_change_options(
         return Err(ApiError {
             status: StatusCode::TOO_MANY_REQUESTS,
             message: "too many passkey confirmation requests; try again shortly",
+            retry_after_seconds: None,
         });
     }
     let (ceremony_id, public_key) = state
@@ -1091,6 +1136,7 @@ async fn credential_change_options(
             crate::webauthn::WebauthnError::Capacity => ApiError {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 message: "too many active passkey confirmation requests; try again shortly",
+                retry_after_seconds: None,
             },
             crate::webauthn::WebauthnError::User => ApiError::not_found(),
             _ => ApiError::bad_request("could not start passkey confirmation"),

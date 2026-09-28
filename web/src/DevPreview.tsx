@@ -275,6 +275,10 @@ function installPreviewApi() {
       previewInvitations = previewInvitations.map((invitation) => invitation.id === invitationId ? { ...invitation, revoked: true } : invitation);
       return jsonResponse({});
     }
+    if (url.pathname === "/api/invitations/validate" && method === "POST") {
+      const payload = JSON.parse(String(init?.body ?? "{}"));
+      return jsonResponse({ valid: payload.token === "preview-invite-token", in_progress: false });
+    }
     if (url.pathname === "/api/admin/signing-keys" && method === "GET") return jsonResponse(signingKeys);
     if (url.pathname === "/api/admin/signing-keys" && method === "POST") return jsonResponse({});
     if (url.pathname === "/api/account/profile" && method === "PUT") {

@@ -1,10 +1,10 @@
 import { ArrowLeft, ArrowRight, Check } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal, type HankoState } from "./components/HankoSeal";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { generateHankoPalette, makeHankoSeed, ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
-import { api, defaultPasskeyLabel, json } from "./lib/utils";
+import { ApiError, api, defaultPasskeyLabel, json } from "./lib/utils";
 import { canEditUserClaim, type OidcProfileClaims } from "./lib/userClaims";
 
 type RegistrationStart = {
@@ -25,9 +25,24 @@ type Props = {
   onComplete: () => Promise<void>;
 };
 type Phase = "idle" | "preparing" | "authenticating" | "success" | "error";
+type InvitationStatus = "none" | "checking" | "valid" | "in_progress" | "invalid" | "error";
+
+const INVALID_INVITATION_MESSAGE = "This invite is no longer valid. It may have expired, been revoked, already been used, or reached its user limit. Ask the person who sent it for a new invite.";
 
 function getError(error: unknown) {
   return error instanceof Error ? error.message : "The request could not be completed.";
+}
+
+function registrationCapacityMessage(retryAfterSeconds: number | null, inviteReserved: boolean) {
+  let wait = "Try again shortly.";
+  if (retryAfterSeconds != null && retryAfterSeconds < 60) {
+    const seconds = Math.max(1, retryAfterSeconds);
+    wait = `Try again in about ${seconds} second${seconds === 1 ? "" : "s"}.`;
+  } else if (retryAfterSeconds != null) {
+    const minutes = Math.ceil(retryAfterSeconds / 60);
+    wait = `Try again in about ${minutes} minute${minutes === 1 ? "" : "s"}.`;
+  }
+  return `${inviteReserved ? "Your invite is reserved for this setup and won’t count until you finish adding a passkey. " : ""}There are too many active passkey registration requests right now. ${wait}`;
 }
 
 const INK_WASH = <svg className="ink-wash" viewBox="0 0 1440 190" preserveAspectRatio="xMidYMax slice" aria-hidden="true">
@@ -60,6 +75,23 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
   const [phase, setPhase] = useState<Phase>("idle");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [invitationStatus, setInvitationStatus] = useState<InvitationStatus>(invitationToken && !hasSetupSession ? "checking" : "none");
+  const [invitationCheckAttempt, setInvitationCheckAttempt] = useState(0);
+
+  useEffect(() => {
+    if (!invitationToken || hasSetupSession) return;
+    let active = true;
+    setInvitationStatus("checking");
+    api<{ valid: boolean; in_progress: boolean }>("/api/invitations/validate", {
+      method: "POST",
+      body: json({ token: invitationToken }),
+    }).then(({ valid, in_progress }) => {
+      if (active) setInvitationStatus(valid ? "valid" : in_progress ? "in_progress" : "invalid");
+    }).catch(() => {
+      if (active) setInvitationStatus("error");
+    });
+    return () => { active = false; };
+  }, [invitationToken, hasSetupSession, invitationCheckAttempt]);
 
   const steps: { id: Step; label: string }[] = isAdminSetup
     ? [{ id: "bootstrap", label: "Bootstrap code" }, { id: "profile", label: "OIDC information" }, { id: "hanko", label: "Hanko" }, { id: "passkey", label: "Passkey" }]
@@ -91,13 +123,23 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
     setError("");
     setBusy(true);
     setPhase("preparing");
+    let inviteReserved = Boolean(invitationToken && setupSession);
     try {
       let ready = setupSession;
       if (!ready && pendingInvitation) {
-        await api("/api/invitations/consume", {
-          method: "POST",
-          body: json({ token: pendingInvitation }),
-        });
+        try {
+          await api("/api/invitations/consume", {
+            method: "POST",
+            body: json({ token: pendingInvitation }),
+          });
+        } catch (consumeError) {
+          if (consumeError instanceof ApiError && consumeError.status === 401) {
+            setInvitationStatus("invalid");
+            throw new Error(INVALID_INVITATION_MESSAGE);
+          }
+          throw consumeError;
+        }
+        inviteReserved = true;
         setPendingInvitation(null);
         ready = true;
         setSetupSession(true);
@@ -152,8 +194,16 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
       await new Promise((resolve) => window.setTimeout(resolve, reducedMotion ? 120 : 620));
       await onComplete();
     } catch (registrationError) {
-      setError(getError(registrationError));
-      setPhase("error");
+      if (registrationError instanceof Error && registrationError.message === INVALID_INVITATION_MESSAGE) {
+        setStep("profile");
+        setError("");
+        setPhase("idle");
+      } else {
+        setError(registrationError instanceof ApiError && registrationError.code === "too many active registration requests; try again shortly"
+          ? registrationCapacityMessage(registrationError.retryAfterSeconds, inviteReserved)
+          : getError(registrationError));
+        setPhase("error");
+      }
     } finally {
       setBusy(false);
     }
@@ -178,6 +228,22 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
   }
 
   const sealState: HankoState = phase === "success" ? "stamping" : phase;
+
+  if (invitationToken && invitationStatus === "invalid") {
+    return <main className="auth-scene setup-scene phase-error">
+      <div className="paper-grain" aria-hidden="true" />
+      {INK_WASH}
+      <section className="setup-panel" aria-live="polite">
+        <div className="auth-copy">
+          <h1>Invite link unavailable</h1>
+          <p>{INVALID_INVITATION_MESSAGE}</p>
+        </div>
+        <div className="first-run-seal-stage">
+          <HankoSeal state="error" size={216} title="Invite link unavailable" color={hankoColor} seed={hankoSeed} />
+        </div>
+      </section>
+    </main>;
+  }
 
   return <main className={`auth-scene setup-scene phase-${phase}`}>
     <div className="paper-grain" aria-hidden="true" />
@@ -213,6 +279,11 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
       </form>}
 
       {interactive && step === "profile" && <form className="setup-form" onSubmit={continueProfile}>
+        {invitationToken && invitationStatus === "checking" && <p className="setup-status" role="status">Checking whether this invite can still be used…</p>}
+        {invitationToken && invitationStatus === "valid" && <p className="setup-status" role="status">This invite is valid and ready to use.</p>}
+        {invitationToken && invitationStatus === "in_progress" && <p className="admin-message" role="status">This invite is reserved while someone finishes setting up an account. It only counts if setup completes; if setup is abandoned, it becomes available again when their setup session expires, as long as the invite hasn’t expired.</p>}
+        {invitationToken && invitationStatus === "invalid" && <p className="admin-message admin-message-error" role="alert">{INVALID_INVITATION_MESSAGE}</p>}
+        {invitationToken && invitationStatus === "error" && <div className="setup-invitation-check-error"><p className="admin-message admin-message-error" role="alert">We couldn’t check this invite right now. Try again when you’re back online.</p><button className="setup-back" type="button" onClick={() => setInvitationCheckAttempt((attempt) => attempt + 1)}>Check invite again</button></div>}
         {canEditUserClaim("preferred_username") && <label className="admin-field">
           <span>Username <em>Optional</em></span>
           <input autoComplete="username" autoCapitalize="none" maxLength={64} pattern={"[A-Za-z0-9._\\-]+"} value={username} onChange={(event) => setUsername(event.target.value.toLowerCase())} placeholder="Used as preferred_username" />
@@ -250,7 +321,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
         {canEditUserClaim("locale") && <label className="admin-field"><span>Locale <em>Optional</em></span><input maxLength={128} value={profileClaims.locale} onChange={(event) => setProfileClaims((claims) => ({ ...claims, locale: event.target.value }))} placeholder="en-US" /></label>}
         {canEditUserClaim("zoneinfo") && <label className="admin-field"><span>Time zone <em>Optional</em></span><input maxLength={128} value={profileClaims.zoneinfo} onChange={(event) => setProfileClaims((claims) => ({ ...claims, zoneinfo: event.target.value }))} placeholder="Europe/Stockholm" /></label>}
         {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
-        <StepActions onBack={isAdminSetup && !setupSession ? () => { setError(""); setStep("bootstrap"); } : undefined} busy={false} label="Continue" />
+        <StepActions onBack={isAdminSetup && !setupSession ? () => { setError(""); setStep("bootstrap"); } : undefined} busy={false} disabled={Boolean(invitationToken && !setupSession && invitationStatus !== "valid")} label="Continue" />
       </form>}
 
       {interactive && step === "hanko" && <form className="setup-form" onSubmit={continueHanko}>
@@ -270,10 +341,10 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
   </main>;
 }
 
-function StepActions({ onBack, busy, label, onContinue }: { onBack?: () => void; busy: boolean; label: string; onContinue?: () => void }) {
+function StepActions({ onBack, busy, disabled = false, label, onContinue }: { onBack?: () => void; busy: boolean; disabled?: boolean; label: string; onContinue?: () => void }) {
   return <div className={`setup-step-actions ${onBack ? "has-back" : ""}`}>
     {onBack && <button className="setup-back" type="button" onClick={onBack} disabled={busy}><ArrowLeft aria-hidden="true" /> Back</button>}
-    <button className="primary-action setup-action" type={onContinue ? "button" : "submit"} onClick={onContinue} disabled={busy}>
+    <button className="primary-action setup-action" type={onContinue ? "button" : "submit"} onClick={onContinue} disabled={busy || disabled}>
       <span>{busy ? "Saving…" : label}</span><ArrowRight aria-hidden="true" className="setup-arrow" />
     </button>
   </div>;

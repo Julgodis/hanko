@@ -16,8 +16,9 @@ use uuid::Uuid;
 use crate::{
     http::AppState,
     security::{
-        BrowserSession, create_session, csrf_header_matches, digest, load_session, origin_is_valid,
-        random_secret, set_session_cookies, source_ip, try_anonymous_state_slot, unix_now,
+        BrowserSession, SESSION_SECONDS, create_session, csrf_header_matches, digest, load_session,
+        origin_is_valid, random_secret, set_session_cookies, source_ip, try_anonymous_state_slot,
+        unix_now,
     },
 };
 
@@ -139,6 +140,12 @@ struct ConsumeInvitation {
 }
 
 #[derive(Serialize)]
+struct InvitationValidation {
+    valid: bool,
+    in_progress: bool,
+}
+
+#[derive(Serialize)]
 struct ErrorBody {
     error: &'static str,
 }
@@ -225,6 +232,7 @@ pub fn router() -> Router<AppState> {
             "/api/admin/signing-keys",
             get(list_signing_keys).post(rotate_signing_key),
         )
+        .route("/api/invitations/validate", post(validate_invitation))
         .route("/api/invitations/consume", post(consume_invitation))
 }
 
@@ -233,7 +241,7 @@ async fn list_users(
     headers: HeaderMap,
 ) -> Result<Json<Value>, AdminError> {
     let _admin = require_admin(&state, &headers, false).await?;
-    let rows = sqlx::query("SELECT id, username, display_name, email, invitation_label, is_admin, disabled_at, created_at FROM users ORDER BY username")
+    let rows = sqlx::query("SELECT id, username, display_name, email, invitation_label, is_admin, disabled_at, created_at FROM users WHERE invitation_link_id IS NULL ORDER BY username")
         .fetch_all(&state.database.pool)
         .await
         .map_err(|_| AdminError::internal())?;
@@ -588,7 +596,7 @@ async fn list_groups(
     for row in rows {
         let id: String = row.try_get("id").map_err(|_| AdminError::internal())?;
         let members: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM user_groups WHERE group_id = ?")
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_groups ug JOIN users u ON u.id = ug.user_id WHERE ug.group_id = ? AND u.invitation_link_id IS NULL")
                 .bind(&id)
                 .fetch_one(&state.database.pool)
                 .await
@@ -1422,6 +1430,63 @@ async fn rotate_signing_key(
     Ok(Json(serde_json::json!({ "kid": kid, "status": "active" })))
 }
 
+async fn validate_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    Json(input): Json<ConsumeInvitation>,
+) -> Result<Json<InvitationValidation>, AdminError> {
+    if !origin_is_valid(&headers, &state.config) {
+        return Err(AdminError::forbidden());
+    }
+    let source = source_ip(
+        peer.map(|Extension(ConnectInfo(address))| address),
+        &headers,
+        &state.config,
+    );
+    if !crate::http::allow_anonymous_state_creation(&state, "validate_invitation", source, 10, 300)
+        .await
+        .map_err(|_| AdminError::internal())?
+    {
+        return Err(AdminError::rate_limited());
+    }
+    let (valid, in_progress) = if (32..=128).contains(&input.token.len()) {
+        let now = unix_now();
+        let token_hash = digest(&input.token);
+        sqlx::query_as::<_, (bool, bool)>(
+            "SELECT EXISTS(
+                SELECT 1 FROM invitation_links
+                WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?
+                    AND use_count + (SELECT COUNT(*) FROM users WHERE users.invitation_link_id = invitation_links.id AND users.invitation_reserved_until > ?) < max_uses
+            ) OR EXISTS(
+                SELECT 1 FROM enrollment_invitations
+                WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?
+                    AND EXISTS (SELECT 1 FROM users WHERE users.id = enrollment_invitations.user_id AND users.disabled_at IS NULL)
+                    AND NOT EXISTS (SELECT 1 FROM passkeys WHERE passkeys.user_id = enrollment_invitations.user_id)
+            ), EXISTS(
+                SELECT 1 FROM invitation_links
+                WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?
+                    AND use_count < max_uses
+                    AND use_count + (SELECT COUNT(*) FROM users WHERE users.invitation_link_id = invitation_links.id AND users.invitation_reserved_until > ?) >= max_uses
+            )",
+        )
+        .bind(&token_hash)
+        .bind(now)
+        .bind(now)
+        .bind(&token_hash)
+        .bind(now)
+        .bind(&token_hash)
+        .bind(now)
+        .bind(now)
+        .fetch_one(&state.database.pool)
+        .await
+        .map_err(|_| AdminError::internal())?
+    } else {
+        (false, false)
+    };
+    Ok(Json(InvitationValidation { valid, in_progress }))
+}
+
 async fn consume_invitation(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1454,7 +1519,19 @@ async fn consume_invitation(
         .begin()
         .await
         .map_err(|_| AdminError::internal())?;
-    let invitation = sqlx::query("UPDATE invitation_links SET use_count = use_count + 1 WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ? AND use_count < max_uses RETURNING label, email, group_names")
+    sqlx::query("UPDATE invitation_links SET pending_count = (SELECT COUNT(*) FROM users WHERE users.invitation_link_id = invitation_links.id AND users.invitation_reserved_until > ?) WHERE token_hash = ?")
+        .bind(now)
+        .bind(&token_hash)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    sqlx::query("DELETE FROM users WHERE invitation_link_id = (SELECT id FROM invitation_links WHERE token_hash = ?) AND invitation_reserved_until <= ? AND NOT EXISTS (SELECT 1 FROM passkeys WHERE passkeys.user_id = users.id)")
+        .bind(&token_hash)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    let invitation = sqlx::query("UPDATE invitation_links SET pending_count = pending_count + 1 WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ? AND use_count + pending_count < max_uses RETURNING id, label, email, group_names")
         .bind(&token_hash)
         .bind(now)
         .fetch_optional(&mut *transaction)
@@ -1462,6 +1539,9 @@ async fn consume_invitation(
         .map_err(|_| AdminError::internal())?;
 
     let user_id = if let Some(invitation) = invitation {
+        let invitation_link_id: String = invitation
+            .try_get("id")
+            .map_err(|_| AdminError::internal())?;
         let label: String = invitation
             .try_get("label")
             .map_err(|_| AdminError::internal())?;
@@ -1476,13 +1556,15 @@ async fn consume_invitation(
 
         let user_id = Uuid::new_v4().to_string();
         let username = format!("user-{}", Uuid::new_v4().simple());
-        sqlx::query("INSERT INTO users (id, username, email, display_name, attributes, hanko_seed, invitation_label, expose_preferred_username, expose_name, created_at, updated_at) VALUES (?, ?, ?, ?, '{}', ?, ?, 0, 0, ?, ?)")
+        sqlx::query("INSERT INTO users (id, username, email, display_name, attributes, hanko_seed, invitation_label, invitation_link_id, invitation_reserved_until, expose_preferred_username, expose_name, created_at, updated_at) VALUES (?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, 0, ?, ?)")
             .bind(&user_id)
             .bind(&username)
             .bind(email)
             .bind(&username)
             .bind(random_secret())
             .bind(label)
+            .bind(invitation_link_id)
+            .bind(now + SESSION_SECONDS)
             .bind(now)
             .bind(now)
             .execute(&mut *transaction)

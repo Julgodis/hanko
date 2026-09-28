@@ -68,6 +68,14 @@ fn spawn_cleanup(database: Database, signing_keys: keys::SigningKeys) {
                 ("DELETE FROM webauthn_ceremonies WHERE expires_at <= ?", now),
                 ("DELETE FROM sessions WHERE expires_at <= ?", now),
                 (
+                    "UPDATE invitation_links SET pending_count = (SELECT COUNT(*) FROM users WHERE users.invitation_link_id = invitation_links.id AND users.invitation_reserved_until > ?)",
+                    now,
+                ),
+                (
+                    "DELETE FROM users WHERE invitation_link_id IS NOT NULL AND invitation_reserved_until <= ? AND NOT EXISTS (SELECT 1 FROM passkeys WHERE passkeys.user_id = users.id)",
+                    now,
+                ),
+                (
                     "DELETE FROM refresh_token_families WHERE expires_at <= ?",
                     now,
                 ),

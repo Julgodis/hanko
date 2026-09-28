@@ -147,6 +147,44 @@ impl WebauthnService {
         Ok((ceremony_id, options))
     }
 
+    pub async fn registration_retry_after_seconds(
+        &self,
+        user_id: &str,
+        session_hash: &[u8],
+    ) -> Result<u64, WebauthnError> {
+        let now = unix_now();
+        let retry_at: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(next_free_at) FROM (
+                SELECT CASE WHEN COUNT(*) >= ? THEN MIN(expires_at) END AS next_free_at
+                FROM webauthn_ceremonies
+                WHERE kind = 'registration' AND consumed_at IS NULL AND expires_at > ?
+                UNION ALL
+                SELECT CASE WHEN COUNT(*) >= ? THEN MIN(expires_at) END AS next_free_at
+                FROM webauthn_ceremonies
+                WHERE kind = 'registration' AND user_id = ? AND consumed_at IS NULL AND expires_at > ?
+                UNION ALL
+                SELECT CASE WHEN COUNT(*) >= ? THEN MIN(expires_at) END AS next_free_at
+                FROM webauthn_ceremonies
+                WHERE kind = 'registration' AND user_id = ? AND browser_hash = ? AND consumed_at IS NULL AND expires_at > ?
+            )",
+        )
+        .bind(MAX_ACTIVE_REGISTRATION_CEREMONIES)
+        .bind(now)
+        .bind(MAX_ACTIVE_REGISTRATIONS_PER_USER)
+        .bind(user_id)
+        .bind(now)
+        .bind(MAX_ACTIVE_REGISTRATIONS_PER_SESSION)
+        .bind(user_id)
+        .bind(session_hash)
+        .bind(now)
+        .fetch_one(&self.database.pool)
+        .await?;
+        Ok(retry_at
+            .unwrap_or(now + CEREMONY_SECONDS)
+            .saturating_sub(now)
+            .max(1) as u64)
+    }
+
     pub async fn finish_registration(
         &self,
         ceremony_id: &str,
@@ -173,6 +211,7 @@ impl WebauthnService {
         let credential_id = passkey.cred_id().as_ref().to_vec();
         let now = unix_now();
         let mut transaction = self.database.pool.begin().await?;
+        let mut invitation_link_id: Option<String> = None;
         if let Some(approval_hash) = approval_hash {
             let consumed = sqlx::query("UPDATE credential_change_approvals SET consumed_at = ? WHERE approval_hash = ? AND user_id = ? AND session_hash = ? AND action = 'add' AND target_passkey_id IS NULL AND consumed_at IS NULL AND expires_at > ? AND EXISTS (SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 0 AND expires_at > ?) AND EXISTS (SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL) RETURNING approval_hash")
                 .bind(now)
@@ -190,17 +229,25 @@ impl WebauthnService {
                 return Err(WebauthnError::Authentication);
             }
         } else {
-            let bootstrap_still_valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 1 AND expires_at > ?) AND NOT EXISTS(SELECT 1 FROM passkeys WHERE user_id = ?) AND EXISTS(SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL)")
+            let bootstrap_still_valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 1 AND expires_at > ?) AND NOT EXISTS(SELECT 1 FROM passkeys WHERE user_id = ?) AND EXISTS(SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL AND (invitation_link_id IS NULL OR invitation_reserved_until > ?))")
                 .bind(session_hash)
                 .bind(user_id)
                 .bind(now)
                 .bind(user_id)
                 .bind(user_id)
+                .bind(now)
                 .fetch_one(&mut *transaction)
                 .await?;
             if !bootstrap_session || !bootstrap_still_valid {
                 return Err(WebauthnError::Ceremony);
             }
+            let user = sqlx::query("SELECT invitation_link_id FROM users WHERE id = ? AND disabled_at IS NULL AND (invitation_link_id IS NULL OR invitation_reserved_until > ?)")
+                .bind(user_id)
+                .bind(now)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(WebauthnError::Ceremony)?;
+            invitation_link_id = user.try_get("invitation_link_id")?;
         }
         sqlx::query("INSERT INTO passkeys (id, user_id, credential_id, passkey_json, label, created_at) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(Uuid::new_v4().to_string())
@@ -212,6 +259,24 @@ impl WebauthnService {
             .execute(&mut *transaction)
             .await?;
         if bootstrap_session {
+            if let Some(invitation_link_id) = invitation_link_id {
+                let finalized = sqlx::query("UPDATE invitation_links SET use_count = use_count + 1, pending_count = pending_count - 1 WHERE id = ? AND pending_count > 0 AND use_count < max_uses AND use_count + pending_count <= max_uses RETURNING id")
+                    .bind(&invitation_link_id)
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+                if finalized.is_none() {
+                    return Err(WebauthnError::Ceremony);
+                }
+                let released = sqlx::query("UPDATE users SET invitation_link_id = NULL, invitation_reserved_until = NULL WHERE id = ? AND invitation_link_id = ? AND invitation_reserved_until > ?")
+                    .bind(user_id)
+                    .bind(invitation_link_id)
+                    .bind(now)
+                    .execute(&mut *transaction)
+                    .await?;
+                if released.rows_affected() != 1 {
+                    return Err(WebauthnError::Ceremony);
+                }
+            }
             let promoted = sqlx::query("UPDATE sessions SET setup_only = 0 WHERE session_hash = ? AND user_id = ? AND setup_only = 1 AND expires_at > ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL)")
                 .bind(session_hash)
                 .bind(user_id)
