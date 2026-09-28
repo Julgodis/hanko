@@ -11,12 +11,14 @@ type RegistrationStart = {
   publicKey: Parameters<typeof startRegistration>[0]["optionsJSON"];
 };
 type Step = "bootstrap" | "profile" | "hanko" | "passkey";
+type OidcAddress = { street_address: string; locality: string; region: string; postal_code: string; country: string };
+const EMPTY_OIDC_ADDRESS: OidcAddress = { street_address: "", locality: "", region: "", postal_code: "", country: "" };
 type Props = {
   hasSetupSession: boolean;
   invitationToken?: string | null;
   initialColor?: string;
   initialSeed?: string;
-  initialProfile?: { username?: string; displayName?: string };
+  initialProfile?: { username?: string; displayName?: string; pictureUrl?: string; phoneNumber?: string; address?: Partial<OidcAddress> };
   onComplete: () => Promise<void>;
 };
 type Phase = "idle" | "preparing" | "authenticating" | "success" | "error";
@@ -37,6 +39,9 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
   const [step, setStep] = useState<Step>(hasSetupSession || invitationToken ? "profile" : "bootstrap");
   const [username, setUsername] = useState(initialProfile?.username ?? "");
   const [displayName, setDisplayName] = useState(initialProfile?.displayName ?? "");
+  const [pictureUrl, setPictureUrl] = useState(initialProfile?.pictureUrl ?? "");
+  const [phoneNumber, setPhoneNumber] = useState(initialProfile?.phoneNumber ?? "");
+  const [address, setAddress] = useState<OidcAddress>({ ...EMPTY_OIDC_ADDRESS, ...(initialProfile?.address ?? {}) });
   const [bootstrapToken, setBootstrapToken] = useState("");
   const [initialMark] = useState(() => {
     const seed = initialSeed ?? makeHankoSeed();
@@ -102,7 +107,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
 
       await api("/api/account/profile", {
         method: "PUT",
-        body: json({ username: username.trim() || null, display_name: displayName.trim() || null }),
+        body: json({ username: username.trim() || null, display_name: displayName.trim() || null, picture: pictureUrl.trim(), phone_number: phoneNumber.trim(), address }),
       });
       await api("/api/account/hanko", {
         method: "PUT",
@@ -195,6 +200,25 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
           <input autoComplete="name" maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="How apps should know you" />
           <small>Shared as the OIDC name claim when provided.</small>
         </label>
+        <label className="admin-field">
+          <span>Picture URL <em>Optional</em></span>
+          <input type="url" maxLength={2048} value={pictureUrl} onChange={(event) => setPictureUrl(event.target.value)} placeholder="Generated from your Hanko stamp" />
+          <small>Leave blank to use a generated image matching your Hanko stamp. A custom HTTPS image URL overrides it.</small>
+        </label>
+        <label className="admin-field">
+          <span>Phone number <em>Optional</em></span>
+          <input type="tel" autoComplete="tel" maxLength={64} value={phoneNumber} onChange={(event) => setPhoneNumber(event.target.value)} placeholder="+1 555 123 4567" />
+          <small>Shared with apps that request the phone scope. Hanko does not verify phone ownership.</small>
+        </label>
+        <label className="admin-field">
+          <span>Street address <em>Optional</em></span>
+          <textarea autoComplete="street-address" maxLength={500} rows={2} value={address.street_address} onChange={(event) => setAddress((current) => ({ ...current, street_address: event.target.value }))} placeholder="Street, apartment or floor" />
+          <small>Apartment and floor details can go here. Shared with apps that request the address scope.</small>
+        </label>
+        <label className="admin-field"><span>City or locality <em>Optional</em></span><input autoComplete="address-level2" maxLength={500} value={address.locality} onChange={(event) => setAddress((current) => ({ ...current, locality: event.target.value }))} /></label>
+        <label className="admin-field"><span>Region or state <em>Optional</em></span><input autoComplete="address-level1" maxLength={500} value={address.region} onChange={(event) => setAddress((current) => ({ ...current, region: event.target.value }))} /></label>
+        <label className="admin-field"><span>Postal code <em>Optional</em></span><input autoComplete="postal-code" maxLength={500} value={address.postal_code} onChange={(event) => setAddress((current) => ({ ...current, postal_code: event.target.value }))} /></label>
+        <label className="admin-field"><span>Country <em>Optional</em></span><input autoComplete="country-name" maxLength={500} value={address.country} onChange={(event) => setAddress((current) => ({ ...current, country: event.target.value }))} /></label>
         {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
         <StepActions onBack={isAdminSetup && !setupSession ? () => { setError(""); setStep("bootstrap"); } : undefined} busy={false} label="Continue" />
       </form>}

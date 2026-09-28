@@ -800,7 +800,14 @@ async fn create_client(
         || scopes.iter().any(|scope| {
             !matches!(
                 scope.as_str(),
-                "openid" | "profile" | "email" | "groups" | "offline_access"
+                "openid"
+                    | "profile"
+                    | "email"
+                    | "picture"
+                    | "address"
+                    | "phone"
+                    | "groups"
+                    | "offline_access"
             )
         })
     {
@@ -942,7 +949,14 @@ async fn update_client(
         || scopes.iter().any(|scope| {
             !matches!(
                 scope.as_str(),
-                "openid" | "profile" | "email" | "groups" | "offline_access"
+                "openid"
+                    | "profile"
+                    | "email"
+                    | "picture"
+                    | "address"
+                    | "phone"
+                    | "groups"
+                    | "offline_access"
             )
         })
     {
@@ -1311,6 +1325,11 @@ fn valid_claim_name(value: &str) -> bool {
         "name",
         "preferred_username",
         "email",
+        "email_verified",
+        "picture",
+        "address",
+        "phone_number",
+        "phone_number_verified",
         "groups",
     ];
     !value.is_empty()

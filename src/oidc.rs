@@ -1075,6 +1075,14 @@ async fn issue_tokens(
         .map_err(|_| OAuthError::server_error())?;
     let attributes: Value =
         serde_json::from_str(&attributes).map_err(|_| OAuthError::server_error())?;
+    let picture = attributes
+        .get("picture")
+        .and_then(Value::as_str)
+        .filter(|picture| !picture.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::stamp::picture_url(&state.config.issuer(), user_id));
+    let phone_number = attributes.get("phone_number").and_then(Value::as_str);
+    let address = attributes.get("address");
     let groups = user_groups(state, user_id).await?;
     let group_custom_claims = group_custom_claims(state, user_id, scopes).await?;
     let custom_claims = custom_claims(state, client_id, &attributes, scopes).await?;
@@ -1100,6 +1108,9 @@ async fn issue_tokens(
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
         email.as_deref(),
+        Some(picture.as_str()),
+        phone_number,
+        address,
         &groups,
     );
     for (claim, value) in &group_custom_claims {
@@ -1139,6 +1150,9 @@ async fn issue_tokens(
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
         email.as_deref(),
+        Some(picture.as_str()),
+        phone_number,
+        address,
         &groups,
     );
     for (claim, value) in group_custom_claims {
@@ -1324,9 +1338,28 @@ async fn userinfo(
             result.insert("preferred_username".into(), Value::String(username));
         }
     }
+    if scopes
+        .iter()
+        .any(|scope| matches!(*scope, "profile" | "picture"))
+    {
+        if let Some(picture) = claims.additional.get("picture") {
+            result.insert("picture".into(), picture.clone());
+        }
+    }
     if scopes.contains(&"email") {
         if let Some(email) = email {
             result.insert("email".into(), Value::String(email));
+        }
+    }
+    if scopes.contains(&"address") {
+        if let Some(address) = claims.additional.get("address") {
+            result.insert("address".into(), address.clone());
+        }
+    }
+    if scopes.contains(&"phone") {
+        if let Some(phone_number) = claims.additional.get("phone_number") {
+            result.insert("phone_number".into(), phone_number.clone());
+            result.insert("phone_number_verified".into(), Value::Bool(false));
         }
     }
     if scopes.contains(&"groups") {
@@ -1355,6 +1388,11 @@ async fn userinfo(
                 | "name"
                 | "preferred_username"
                 | "email"
+                | "email_verified"
+                | "picture"
+                | "address"
+                | "phone_number"
+                | "phone_number_verified"
         ) {
             result.insert(claim, value);
         }
@@ -1569,7 +1607,14 @@ fn parse_scopes(scope: &str) -> Result<Vec<String>, OAuthError> {
         .filter(|scope| {
             !matches!(
                 scope.as_str(),
-                "openid" | "profile" | "email" | "groups" | "offline_access"
+                "openid"
+                    | "profile"
+                    | "email"
+                    | "picture"
+                    | "address"
+                    | "phone"
+                    | "groups"
+                    | "offline_access"
             )
         })
         .map(String::as_str)
@@ -1720,6 +1765,14 @@ async fn preview_user_claims(
         .map_err(|_| OAuthError::server_error())?;
     let attributes: Value =
         serde_json::from_str(&attributes).map_err(|_| OAuthError::server_error())?;
+    let picture = attributes
+        .get("picture")
+        .and_then(Value::as_str)
+        .filter(|picture| !picture.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::stamp::picture_url(&state.config.issuer(), user_id));
+    let phone_number = attributes.get("phone_number").and_then(Value::as_str);
+    let address = attributes.get("address");
     let groups = user_groups(state, user_id).await?;
     let group_custom_claims = group_custom_claims(state, user_id, scopes).await?;
 
@@ -1730,6 +1783,9 @@ async fn preview_user_claims(
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
         email.as_deref(),
+        Some(picture.as_str()),
+        phone_number,
+        address,
         &groups,
     );
     for (claim, value) in group_custom_claims {
@@ -1757,6 +1813,12 @@ async fn custom_claims(
         let name: String = row
             .try_get("claim_name")
             .map_err(|_| OAuthError::server_error())?;
+        if matches!(
+            name.as_str(),
+            "picture" | "address" | "email_verified" | "phone_number" | "phone_number_verified"
+        ) {
+            continue;
+        }
         let path: String = row
             .try_get("user_attribute_path")
             .map_err(|_| OAuthError::server_error())?;
@@ -1859,6 +1921,9 @@ fn add_user_claims(
     username: Option<&str>,
     display_name: Option<&str>,
     email: Option<&str>,
+    picture: Option<&str>,
+    phone_number: Option<&str>,
+    address: Option<&Value>,
     groups: &[String],
 ) {
     if scopes.iter().any(|scope| scope == "profile") {
@@ -1877,11 +1942,37 @@ fn add_user_claims(
             claims.insert("email".into(), Value::String(email.to_owned()));
         }
     }
+    if scopes
+        .iter()
+        .any(|scope| matches!(scope.as_str(), "profile" | "picture"))
+    {
+        if let Some(picture) = picture {
+            claims.insert("picture".into(), Value::String(picture.to_owned()));
+        }
+    }
     if scopes.iter().any(|scope| scope == "groups") {
         claims.insert(
             "groups".into(),
             serde_json::to_value(groups).unwrap_or(Value::Array(vec![])),
         );
+    }
+    if scopes.iter().any(|scope| scope == "address") {
+        if let Some(address) = address.filter(|address| {
+            address
+                .as_object()
+                .is_some_and(|address| !address.is_empty())
+        }) {
+            claims.insert("address".into(), address.clone());
+        }
+    }
+    if scopes.iter().any(|scope| scope == "phone") {
+        if let Some(phone_number) = phone_number {
+            claims.insert(
+                "phone_number".into(),
+                Value::String(phone_number.to_owned()),
+            );
+            claims.insert("phone_number_verified".into(), Value::Bool(false));
+        }
     }
 }
 
@@ -2052,11 +2143,31 @@ mod tests {
     fn profile_claims_are_independently_optional() {
         let scopes = vec!["openid".to_owned(), "profile".to_owned()];
         let mut claims = Map::new();
-        add_user_claims(&mut claims, &scopes, None, None, None, &[]);
+        add_user_claims(
+            &mut claims,
+            &scopes,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        );
         assert!(claims.get("name").is_none());
         assert!(claims.get("preferred_username").is_none());
 
-        add_user_claims(&mut claims, &scopes, Some("alice"), None, None, &[]);
+        add_user_claims(
+            &mut claims,
+            &scopes,
+            Some("alice"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        );
         assert_eq!(claims["preferred_username"], "alice");
         assert!(claims.get("name").is_none());
     }
