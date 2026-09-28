@@ -1,5 +1,5 @@
 import { startAuthentication } from "@simplewebauthn/browser";
-import { ArrowRight, Check, Clock3, Fingerprint, Mail, MapPin, Phone, ShieldCheck, UserRound, Users, type LucideIcon } from "lucide-react";
+import { ArrowRight, Clock3, Fingerprint, Mail, MapPin, Phone, ShieldCheck, UserRound, Users, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import ClientAdmin from "./ClientAdmin";
 import FirstRun from "./FirstRun";
@@ -101,11 +101,21 @@ function App() {
     const routePath = appPath("account").replace(/\/+$/, "");
     return window.location.pathname.replace(/\/+$/, "") === routePath;
   }, []);
+  const homeRoute = useMemo(() => {
+    const routePath = appPath("").replace(/\/+$/, "");
+    return window.location.pathname.replace(/\/+$/, "") === routePath;
+  }, []);
   const [session, setSession] = useState<Session | null>(null);
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [request, setRequest] = useState<AuthorizationRequest | null>(null);
   const [loading, setLoading] = useState(!authorizationPageError);
   const [loadError, setLoadError] = useState<UserFacingError | null>(null);
+
+  useEffect(() => {
+    if (homeRoute && session?.authenticated && !session.setup_only && !requestId) {
+      window.location.replace(appPath("account"));
+    }
+  }, [homeRoute, requestId, session]);
 
   async function loadAuthorizationRequest(id: string): Promise<AuthorizationRequest> {
     let authorizationRequest = await api<AuthorizationRequest>(
@@ -235,7 +245,7 @@ function App() {
     if (clientsRoute && !session.is_admin) {
       return <Scene phase="error"><Seal phase="error" /><Copy title="Administrator access required" text="Sign in with an administrator account to manage OIDC clients." /></Scene>;
     }
-    return <ClientAdmin isAdmin={session.is_admin} accountName={session.username ?? ""} requiredUserClaims={session.required_user_claims ?? []} />;
+    return <ClientAdmin isAdmin={session.is_admin} defaultTab={clientsRoute ? "clients" : "hanko"} accountName={session.username ?? ""} requiredUserClaims={session.required_user_claims ?? []} />;
   }
 
   if (requestId && request?.requires_fresh_authentication) {
@@ -258,7 +268,9 @@ function App() {
   }
 
   if (session?.authenticated && !session.setup_only) {
-    return <Scene phase="success"><Seal phase="success" color={session.hanko_color} seed={session.hanko_seed} /><Success name="Hanko" /></Scene>;
+    return <Scene phase="success"><Seal phase="success" color={session.hanko_color} seed={session.hanko_seed} />
+      <span className="sr-only" role="status">Signed in. Opening account settings.</span>
+    </Scene>;
   }
 
   return <SignIn
@@ -341,9 +353,6 @@ function SignIn({
   } else if (phase === "authenticating") {
     title = "Confirm it’s you";
     text = "Approve this sign-in on your device.";
-  } else if (phase === "success") {
-    title = "Welcome back";
-    text = `You’re signed in to ${clientName}.`;
   } else if (phase === "error") {
     if (failure === "access_denied") {
       title = "Access not allowed";
@@ -367,7 +376,7 @@ function SignIn({
 
   return <Scene phase={phase}>
     <Seal phase={phase} />
-    <Copy title={title} text={text} />
+    {phase !== "success" && <Copy title={title} text={text} />}
     {phase === "idle" && (useAccountName
       ? <form className="account-sign-in" onSubmit={accountSignIn}>
         <label htmlFor="passkey-account">Account name or email</label>
@@ -383,7 +392,6 @@ function SignIn({
         <Fingerprint aria-hidden="true" className="size-[19px]" strokeWidth={1.8} />
         <span>{freshAuthentication ? "Confirm with passkey" : "Sign in with passkey"}</span>
       </button>)}
-    {phase === "success" && <span className="success-check" aria-label="Signed in"><Check aria-hidden="true" /></span>}
     {phase === "error" && failure !== "access_denied" && failure !== "expired" && <button className="primary-action" onClick={retry}>
       <span>Try again</span><ArrowRight aria-hidden="true" className="size-4" />
     </button>}
@@ -561,13 +569,6 @@ function claimForScope(scope: string, clientName: string): { label: string; icon
   }
 }
 
-function Success({ name }: { name: string }) {
-  return <>
-    <Copy title="Welcome back" text={`You’re signed in to ${name}.`} />
-    <span className="success-check" aria-label="Signed in"><Check aria-hidden="true" /></span>
-  </>;
-}
-
 function Scene({
   phase,
   className = "",
@@ -594,11 +595,12 @@ function Copy({ title, text }: { title: string; text?: string }) {
 }
 
 function Seal({ phase, size = "large", color, seed }: { phase: Phase; size?: "large" | "small"; color?: string | null; seed?: string | null }) {
+  const sealSize = phase === "success" ? 176 : 112;
   return <div className={`seal-stage seal-stage-${size} seal-state-${phase}`}>
     {size === "large" && <span className="seal-shadow" aria-hidden="true">
-      <HankoSeal size={112} title="" />
+      <HankoSeal size={sealSize} title="" />
     </span>}
-    <HankoSeal className="hanko-seal" state={sealState(phase)} size={112} color={color ?? undefined} seed={seed ?? undefined} title="Hanko seal" />
+    <HankoSeal className="hanko-seal" state={sealState(phase)} size={sealSize} color={color ?? undefined} seed={seed ?? undefined} title={phase === "success" ? "Sign-in complete" : "Hanko seal"} />
     <span className="seal-impression" aria-hidden="true" />
     <span className="ink-particle particle-one" aria-hidden="true" />
     <span className="ink-particle particle-two" aria-hidden="true" />

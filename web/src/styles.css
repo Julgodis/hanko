@@ -177,10 +177,15 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible { outline: 
 .phase-success .hanko-seal { animation: stamp-impact .82s cubic-bezier(.25, .72, .3, 1) both; }
 .phase-success .seal-impression { animation: ink-impression .72s ease-out both; }
 .phase-success .ink-particle { animation: ink-fleck .56s ease-out both; }
-.phase-success .particle-one { --particle-x: -51px; --particle-y: -20px; }
-.phase-success .particle-two { --particle-x: 49px; --particle-y: -29px; animation-delay: .025s; }
-.phase-success .particle-three { --particle-x: -42px; --particle-y: 25px; animation-delay: .045s; }
-.phase-success .particle-four { --particle-x: 53px; --particle-y: 20px; animation-delay: .015s; }
+.seal-state-success.seal-stage-large { width: 220px; height: 205px; }
+.seal-state-success .hanko-seal { top: 0; }
+.seal-state-success .seal-shadow { top: 0; width: 176px; height: 176px; }
+.seal-state-success .seal-impression { top: 176px; width: 150px; height: 17px; }
+.seal-state-success .ink-particle { top: 76px; }
+.phase-success .particle-one { --particle-x: -76px; --particle-y: -29px; }
+.phase-success .particle-two { --particle-x: 72px; --particle-y: -36px; animation-delay: .025s; }
+.phase-success .particle-three { --particle-x: -64px; --particle-y: 35px; animation-delay: .045s; }
+.phase-success .particle-four { --particle-x: 78px; --particle-y: 30px; animation-delay: .015s; }
 
 .phase-error .hanko-seal { opacity: .58; transform: translate(-50%, -3px) rotate(-2deg); }
 
