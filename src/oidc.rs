@@ -1076,6 +1076,7 @@ async fn issue_tokens(
     let attributes: Value =
         serde_json::from_str(&attributes).map_err(|_| OAuthError::server_error())?;
     let groups = user_groups(state, user_id).await?;
+    let group_custom_claims = group_custom_claims(state, user_id, scopes).await?;
     let custom_claims = custom_claims(state, client_id, &attributes, scopes).await?;
 
     let scope_string = scopes.join(" ");
@@ -1101,6 +1102,9 @@ async fn issue_tokens(
         email.as_deref(),
         &groups,
     );
+    for (claim, value) in &group_custom_claims {
+        access_claims.insert(claim.clone(), value.clone());
+    }
     for (claim, value) in &custom_claims {
         access_claims.insert(claim.clone(), value.clone());
     }
@@ -1137,6 +1141,9 @@ async fn issue_tokens(
         email.as_deref(),
         &groups,
     );
+    for (claim, value) in group_custom_claims {
+        id_claims.insert(claim, value);
+    }
     for (claim, value) in custom_claims {
         id_claims.insert(claim, value);
     }
@@ -1714,6 +1721,7 @@ async fn preview_user_claims(
     let attributes: Value =
         serde_json::from_str(&attributes).map_err(|_| OAuthError::server_error())?;
     let groups = user_groups(state, user_id).await?;
+    let group_custom_claims = group_custom_claims(state, user_id, scopes).await?;
 
     let mut claims = Map::new();
     add_user_claims(
@@ -1724,6 +1732,9 @@ async fn preview_user_claims(
         email.as_deref(),
         &groups,
     );
+    for (claim, value) in group_custom_claims {
+        claims.insert(claim, value);
+    }
     for (claim, value) in custom_claims(state, client_id, &attributes, scopes).await? {
         claims.insert(claim, value);
     }
@@ -1760,6 +1771,62 @@ async fn custom_claims(
         }
         if let Some(value) = attributes.pointer(&path) {
             claims.insert(name, value.clone());
+        }
+    }
+    Ok(claims)
+}
+
+async fn group_custom_claims(
+    state: &AppState,
+    user_id: &str,
+    scopes: &[String],
+) -> Result<Map<String, Value>, OAuthError> {
+    let rows = sqlx::query("SELECT mappings.claim_name, mappings.claim_value, mappings.required_scope FROM group_claim_mappings mappings JOIN groups ON groups.id = mappings.group_id JOIN user_groups ON user_groups.group_id = mappings.group_id WHERE user_groups.user_id = ? ORDER BY mappings.claim_name, groups.name")
+        .bind(user_id)
+        .fetch_all(&state.database.pool)
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+    let mut contributions = std::collections::BTreeMap::<String, Vec<Value>>::new();
+    for row in rows {
+        let required_scope: String = row
+            .try_get("required_scope")
+            .map_err(|_| OAuthError::server_error())?;
+        if !scopes.iter().any(|scope| scope == &required_scope) {
+            continue;
+        }
+        let claim_name: String = row
+            .try_get("claim_name")
+            .map_err(|_| OAuthError::server_error())?;
+        let encoded_value: String = row
+            .try_get("claim_value")
+            .map_err(|_| OAuthError::server_error())?;
+        let value: Value =
+            serde_json::from_str(&encoded_value).map_err(|_| OAuthError::server_error())?;
+        contributions.entry(claim_name).or_default().push(value);
+    }
+
+    let mut claims = Map::new();
+    for (name, mut values) in contributions {
+        match values.len() {
+            0 => {}
+            1 => {
+                claims.insert(name, values.remove(0));
+            }
+            _ => {
+                let mut merged = Vec::new();
+                for value in values {
+                    let items = match value {
+                        Value::Array(items) => items,
+                        value => vec![value],
+                    };
+                    for item in items {
+                        if !merged.contains(&item) {
+                            merged.push(item);
+                        }
+                    }
+                }
+                claims.insert(name, Value::Array(merged));
+            }
         }
     }
     Ok(claims)

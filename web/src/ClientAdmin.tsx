@@ -25,7 +25,8 @@ type Client = {
   claims: { claim_name: string; user_attribute_path: string; required_scope: string | null }[];
   user_count: number;
 };
-type Group = { id: string; name: string; display_name: string; member_count: number };
+type GroupClaimMapping = { claim_name: string; claim_value: unknown; required_scope: Scope };
+type Group = { id: string; name: string; display_name: string; member_count: number; claims?: GroupClaimMapping[] };
 type AdminUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
 type Invitation = { id: string; label: string; email: string | null; max_uses: number; use_count: number; created_at: number; expires_at: number; revoked: boolean };
 type CreatedInvitation = { id: string; label: string; email: string | null; enrollment_url: string; expires_at: number };
@@ -33,6 +34,7 @@ type SigningKey = { kid: string; algorithm: string; status: string; created_at: 
 type AccountPasskey = { id: string; label: string; created_at: number; last_used_at: number | null };
 type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys";
 type ClaimDraft = { claim_name: string; user_attribute_path: string; required_scope: string };
+type GroupClaimDraft = { claim_name: string; claim_value: string; required_scope: Scope };
 type CreatedClient = {
   client_id: string;
   client_secret: string | null;
@@ -105,6 +107,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [clientFormMode, setClientFormMode] = useState<"create" | "edit" | null>(previewScreen === "client-form" ? "create" : null);
   const [userFormOpen, setUserFormOpen] = useState(previewScreen === "invite" || previewScreen === "invite-ready");
   const [groupFormOpen, setGroupFormOpen] = useState(false);
+  const [editingGroupId, setEditingGroupId] = useState("");
   const [editingClientId, setEditingClientId] = useState("");
   const [deletingClientId, setDeletingClientId] = useState("");
   const [created, setCreated] = useState<CreatedClient | null>(null);
@@ -138,6 +141,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   } : null);
   const [groupName, setGroupName] = useState("");
   const [groupDisplayName, setGroupDisplayName] = useState("");
+  const [groupClaims, setGroupClaims] = useState<GroupClaimDraft[]>([]);
   const [adminActionBusy, setAdminActionBusy] = useState(false);
   const [adminActionMessage, setAdminActionMessage] = useState("");
 
@@ -207,10 +211,10 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   }, [activeTab, isAdmin]);
 
   useEffect(() => {
-    if (clientFormMode !== null || userFormOpen) {
+    if (clientFormMode !== null || userFormOpen || groupFormOpen) {
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
-  }, [clientFormMode, userFormOpen]);
+  }, [clientFormMode, userFormOpen, groupFormOpen]);
 
   function toggleScope(scope: (typeof AVAILABLE_SCOPES)[number]) {
     setScopes((current) => current.includes(scope)
@@ -227,6 +231,15 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   function updateClaim(index: number, key: keyof ClaimDraft, value: string) {
     setClaims((current) => current.map((claim, claimIndex) =>
       claimIndex === index ? { ...claim, [key]: value } : claim));
+  }
+
+  function updateGroupClaim(index: number, key: keyof GroupClaimDraft, value: string) {
+    setGroupClaims((current) => current.map((claim, claimIndex) =>
+      claimIndex !== index
+        ? claim
+        : key === "required_scope"
+          ? { ...claim, required_scope: value as Scope }
+          : { ...claim, [key]: value }));
   }
 
   function openCreateClient() {
@@ -289,12 +302,28 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   function openCreateGroup() {
     setGroupName("");
     setGroupDisplayName("");
+    setGroupClaims([]);
+    setEditingGroupId("");
+    setAdminActionMessage("");
+    setGroupFormOpen(true);
+  }
+
+  function openEditGroup(group: Group) {
+    setGroupName(group.name);
+    setGroupDisplayName(group.display_name);
+    setGroupClaims((group.claims ?? []).map((claim) => ({
+      claim_name: claim.claim_name,
+      claim_value: JSON.stringify(claim.claim_value) ?? "null",
+      required_scope: claim.required_scope,
+    })));
+    setEditingGroupId(group.id);
     setAdminActionMessage("");
     setGroupFormOpen(true);
   }
 
   function closeGroupForm() {
     setGroupFormOpen(false);
+    setEditingGroupId("");
     setAdminActionMessage("");
   }
 
@@ -414,19 +443,37 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
 
   async function createGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setAdminActionBusy(true);
     setAdminActionMessage("");
+    let claimMappings: { claim_name: string; claim_value: unknown; required_scope: Scope }[];
     try {
-      await api("/api/admin/groups", {
-        method: "POST",
-        body: json({ name: groupName.trim(), display_name: groupDisplayName.trim() }),
+      claimMappings = groupClaims
+        .filter((claim) => claim.claim_name.trim() || claim.claim_value.trim())
+        .map((claim) => ({
+          claim_name: claim.claim_name.trim(),
+          claim_value: JSON.parse(claim.claim_value),
+          required_scope: claim.required_scope,
+        }));
+    } catch {
+      setAdminActionMessage("Each group claim value must be valid JSON, such as \"member\" or [\"read\"].");
+      return;
+    }
+
+    setAdminActionBusy(true);
+    try {
+      await api(editingGroupId ? `/api/admin/groups/${encodeURIComponent(editingGroupId)}` : "/api/admin/groups", {
+        method: editingGroupId ? "PUT" : "POST",
+        body: json(editingGroupId
+          ? { display_name: groupDisplayName.trim(), claims: claimMappings }
+          : { name: groupName.trim(), display_name: groupDisplayName.trim(), claims: claimMappings }),
       });
       setGroupName("");
       setGroupDisplayName("");
+      setGroupClaims([]);
       setGroups(await api<Group[]>("/api/admin/groups"));
       setGroupFormOpen(false);
-    } catch (createError) {
-      setAdminActionMessage(errorMessage(createError));
+      setEditingGroupId("");
+    } catch (saveError) {
+      setAdminActionMessage(errorMessage(saveError));
     } finally {
       setAdminActionBusy(false);
     }
@@ -583,7 +630,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const tabTitles: Record<Tab, [string, string]> = {
     clients: ["OIDC clients", "Connect applications to Hanko."],
     users: ["Users", "Create labeled invite links and review their accounts."],
-    groups: ["Groups", "Organize access to OIDC clients."],
+    groups: ["Groups", "Organize client access and add scoped claims for members."],
     keys: ["Signing keys", "Manage the keys used to sign tokens."],
     hanko: ["Your Hanko", "Your personal seal."],
     passkeys: ["Passkeys", "Manage the devices that can sign in to your account."],
@@ -593,11 +640,11 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const title = activeTab === "clients" && clientFormMode !== null
     ? clientFormMode === "edit" ? "Edit OIDC client" : "Add an OIDC client"
     : activeTab === "users" && userFormOpen ? "Invite a user"
-      : activeTab === "groups" && groupFormOpen ? "Create a group" : tabTitle;
+      : activeTab === "groups" && groupFormOpen ? editingGroupId ? "Edit a group" : "Create a group" : tabTitle;
   const description = activeTab === "clients" && clientFormMode !== null
     ? "Configure how this application connects to Hanko."
     : activeTab === "users" && userFormOpen ? "Create an invitation for someone to set up an account."
-      : activeTab === "groups" && groupFormOpen ? "Add a group to organize access to OIDC clients." : tabDescription;
+      : activeTab === "groups" && groupFormOpen ? "Set group details and the claims shared with its members." : tabDescription;
 
   return <AdminScene>
     <div className="admin-layout">
@@ -751,21 +798,34 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           </>}
 
           {activeTab === "groups" && isAdmin && groupFormOpen && <form className="client-form admin-create-form user-create-page" onSubmit={createGroup}>
-              <label className="admin-field"><span>Group name</span><input autoComplete="off" maxLength={80} value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="media-users" required /></label>
+              <label className="admin-field"><span>Group name</span><input autoComplete="off" maxLength={80} value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="media-users" required disabled={Boolean(editingGroupId)} /></label>
               <label className="admin-field"><span>Display name</span><input maxLength={120} value={groupDisplayName} onChange={(event) => setGroupDisplayName(event.target.value)} placeholder="Media users" required /></label>
+              <fieldset className="admin-options admin-claims">
+                <legend>Claims added for members <em>Optional</em></legend>
+                <p className="admin-hint">These JSON values are added to matching members’ ID and access tokens when the required scope is requested. Quote string values, such as "media-user". If several groups provide the same claim, their values merge into a deduplicated array. Client-specific claim mappings take precedence.</p>
+                {groupClaims.map((claim, index) => <div className="claim-editor group-claim-editor" key={index}>
+                  <label className="admin-field"><span>Claim name</span><input value={claim.claim_name} onChange={(event) => updateGroupClaim(index, "claim_name", event.target.value)} placeholder="role" /></label>
+                  <label className="admin-field"><span>JSON value</span><textarea value={claim.claim_value} onChange={(event) => updateGroupClaim(index, "claim_value", event.target.value)} placeholder='"media-user"' rows={2} /></label>
+                  <label className="admin-field"><span>Required scope</span><select value={claim.required_scope} onChange={(event) => updateGroupClaim(index, "required_scope", event.target.value)}>{(["openid", ...AVAILABLE_SCOPES] as const).map((scope) => <option value={scope} key={scope}>{scope}</option>)}</select></label>
+                  <button className="claim-remove" type="button" aria-label="Remove group claim" onClick={() => setGroupClaims((current) => current.filter((_, claimIndex) => claimIndex !== index))}><Trash2 aria-hidden="true" /></button>
+                </div>)}
+                <button className="add-claim" type="button" onClick={() => setGroupClaims((current) => [...current, { claim_name: "", claim_value: "", required_scope: "groups" }])}><Plus aria-hidden="true" /> Add group claim</button>
+              </fieldset>
               {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
-              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !groupName.trim() || !groupDisplayName.trim()}>{adminActionBusy ? "Creating…" : "Create group"}</button><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={closeGroupForm}>Cancel</button></div>
+              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !groupName.trim() || !groupDisplayName.trim()}>{adminActionBusy ? "Saving…" : editingGroupId ? "Save group" : "Create group"}</button><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={closeGroupForm}>Cancel</button></div>
             </form>}
 
           {activeTab === "groups" && isAdmin && !groupFormOpen && <>
             <div className="client-list-heading user-list-heading"><h2>Groups <span>{groups.length}</span></h2><button className="client-add-action" type="button" onClick={openCreateGroup}><Plus aria-hidden="true" /> Add a group</button></div>
             {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
             <section className="registered-clients admin-records user-records">{groups.length === 0 ? <p className="admin-hint">No groups have been created.</p> : <div className="admin-table-scroll"><table className="admin-table group-table">
-              <thead><tr><th scope="col">Group name</th><th scope="col">Display name</th><th scope="col">Members</th></tr></thead>
+              <thead><tr><th scope="col">Group name</th><th scope="col">Display name</th><th scope="col">Claims</th><th scope="col">Members</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>{groups.map((group) => <tr key={group.id}>
                 <td><code className="table-id"><PrivateValue>{group.name}</PrivateValue></code></td>
                 <td><strong><PrivateValue>{group.display_name}</PrivateValue></strong></td>
+                <td>{(group.claims ?? []).length ? <span>{(group.claims ?? []).map((claim) => claim.claim_name).join(", ")}</span> : <span className="table-muted">—</span>}</td>
                 <td><PrivateValue>{group.member_count}</PrivateValue></td>
+                <td><div className="table-actions"><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={() => openEditGroup(group)}><Pencil aria-hidden="true" /><span>Edit</span></button></div></td>
               </tr>)}</tbody>
             </table></div>}</section>
           </>}
