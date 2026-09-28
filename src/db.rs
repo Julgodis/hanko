@@ -5,6 +5,11 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate::Migrator {
+    ignore_missing: true,
+    ..sqlx::migrate!("./migrations")
+};
+
 #[derive(Clone)]
 pub struct Database {
     pub pool: SqlitePool,
@@ -26,9 +31,39 @@ impl Database {
             .max_connections(max_connections)
             .connect_with(options)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        validate_migration_history(&pool).await?;
+        MIGRATOR.run(&pool).await?;
         Ok(Self { pool })
     }
+}
+
+async fn validate_migration_history(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let has_migrations_table: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !has_migrations_table {
+        return Ok(());
+    }
+
+    let latest_known_version = MIGRATOR.iter().map(|migration| migration.version).max();
+    let Some(latest_known_version) = latest_known_version else {
+        return Ok(());
+    };
+    let applied_versions: Vec<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = 1")
+            .fetch_all(pool)
+            .await?;
+
+    if let Some(missing_version) = applied_versions
+        .into_iter()
+        .find(|version| *version <= latest_known_version && !MIGRATOR.version_exists(*version))
+    {
+        return Err(sqlx::migrate::MigrateError::VersionMissing(missing_version).into());
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
