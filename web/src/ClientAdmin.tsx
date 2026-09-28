@@ -1,4 +1,5 @@
 import { Check, Copy, Fingerprint, KeyRound, Mail, Pencil, Plus, Shield, ShieldCheck, Users, UserRound, Stamp, Trash2 } from "lucide-react";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
@@ -44,6 +45,16 @@ const EMPTY_OIDC_ADDRESS: OidcAddress = { street_address: "", locality: "", regi
 type OidcProfileDraft = Required<Omit<OidcProfileClaims, "app_roles">>;
 const EMPTY_OIDC_PROFILE: OidcProfileDraft = { profile: "", given_name: "", family_name: "", nickname: "", website: "", locale: "", zoneinfo: "" };
 type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys" | "consents";
+type AdminRoute = {
+  tab: Tab;
+  canonicalPath: string;
+  clientFormMode: "create" | "edit" | null;
+  clientId: string;
+  userFormOpen: boolean;
+  userId: string;
+  groupFormOpen: boolean;
+  groupId: string;
+};
 type ClaimDraft = { claim_name: string; user_attribute_path: string; required_scope: string };
 type GroupClaimDraft = { claim_name: string; claim_value: string; required_scope: Scope };
 type CreatedClient = {
@@ -64,6 +75,78 @@ type AuthenticationStart = {
   publicKey: Parameters<typeof startAuthentication>[0]["optionsJSON"];
 };
 type CredentialChangeApproval = { approval_token: string };
+
+const TAB_PATHS: Record<Tab, string> = {
+  clients: "/admin/clients/clients",
+  users: "/admin/clients/users",
+  groups: "/admin/clients/groups",
+  keys: "/admin/clients/keys",
+  hanko: "/account/profile",
+  passkeys: "/account/passkeys",
+  consents: "/account/applications",
+};
+
+function decodeSegment(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function parseAdminRoute(pathname: string): AdminRoute {
+  const parts = pathname.split("/").filter(Boolean);
+  const route: AdminRoute = {
+    tab: "clients",
+    canonicalPath: TAB_PATHS.clients,
+    clientFormMode: null,
+    clientId: "",
+    userFormOpen: false,
+    userId: "",
+    groupFormOpen: false,
+    groupId: "",
+  };
+
+  if (parts[0] === "account") {
+    const accountTab: Record<string, Tab> = { profile: "hanko", passkeys: "passkeys", applications: "consents" };
+    route.tab = accountTab[parts[1] ?? ""] ?? "hanko";
+    route.canonicalPath = TAB_PATHS[route.tab];
+    return route;
+  }
+
+  const adminTabs: Record<string, Tab> = { clients: "clients", users: "users", groups: "groups", keys: "keys" };
+  route.tab = adminTabs[parts[2] ?? ""] ?? "clients";
+  route.canonicalPath = TAB_PATHS[route.tab];
+  const detail = parts.slice(3);
+  if (route.tab === "clients") {
+    if (detail.length === 1 && detail[0] === "new") {
+      route.clientFormMode = "create";
+      route.canonicalPath = `${TAB_PATHS.clients}/new`;
+    } else if (detail.length === 2 && detail[1] === "edit") {
+      route.clientFormMode = "edit";
+      route.clientId = decodeSegment(detail[0]);
+      route.canonicalPath = `${TAB_PATHS.clients}/${encodeURIComponent(route.clientId)}/edit`;
+    }
+  } else if (route.tab === "users") {
+    if (detail.length === 1 && detail[0] === "invite") {
+      route.userFormOpen = true;
+      route.canonicalPath = `${TAB_PATHS.users}/invite`;
+    } else if (detail.length === 2 && detail[1] === "edit") {
+      route.userId = decodeSegment(detail[0]);
+      route.canonicalPath = `${TAB_PATHS.users}/${encodeURIComponent(route.userId)}/edit`;
+    }
+  } else if (route.tab === "groups") {
+    if (detail.length === 1 && detail[0] === "new") {
+      route.groupFormOpen = true;
+      route.canonicalPath = `${TAB_PATHS.groups}/new`;
+    } else if (detail.length === 2 && detail[1] === "edit") {
+      route.groupFormOpen = true;
+      route.groupId = decodeSegment(detail[0]);
+      route.canonicalPath = `${TAB_PATHS.groups}/${encodeURIComponent(route.groupId)}/edit`;
+    }
+  }
+  return route;
+}
 
 function splitLines(value: string) {
   return [...new Set(value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
@@ -89,6 +172,12 @@ function invitationStatus(invitation: Invitation) {
 }
 
 export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = "", requiredUserClaims = [] }: { isAdmin?: boolean; defaultTab?: Tab; accountName?: string; requiredUserClaims?: string[] }) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const route = parseAdminRoute(location.pathname);
+  const routeState = location.state as { returnToGroup?: boolean; groupId?: string } | null;
+  const userClaimsReturnGroup = Boolean(routeState?.returnToGroup);
+  const userClaimsReturnGroupId = routeState?.groupId ?? "";
   const canEditUserClaim = (claim: string) => canEditConfiguredUserClaim(claim, requiredUserClaims);
   const fieldRequirement = (claim: string) => isRequiredUserClaim(claim, requiredUserClaims) ? "Required" : "Optional";
   const previewScreen = import.meta.env.DEV && new URLSearchParams(window.location.search).get("ui-preview") === "1"
@@ -103,7 +192,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     if (previewScreen === "hanko") return "hanko";
     return defaultTab ?? (isAdmin ? "clients" : "hanko");
   };
-  const [activeTab, setActiveTab] = useState<Tab>(previewTab);
+  const activeTab = previewScreen ? previewTab() : userClaimsReturnGroup ? "users" : route.tab;
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [users, setUsers] = useState<AdminUser[]>([]);
@@ -121,12 +210,12 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [claims, setClaims] = useState<ClaimDraft[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [clientFormMode, setClientFormMode] = useState<"create" | "edit" | null>(previewScreen === "client-form" ? "create" : null);
+  const clientFormMode = previewScreen === "client-form" ? "create" : route.clientFormMode;
   const [credentialsUpdated, setCredentialsUpdated] = useState(false);
-  const [userFormOpen, setUserFormOpen] = useState(previewScreen === "invite" || previewScreen === "invite-ready");
-  const [groupFormOpen, setGroupFormOpen] = useState(false);
-  const [editingGroupId, setEditingGroupId] = useState("");
-  const [editingClientId, setEditingClientId] = useState("");
+  const userFormOpen = previewScreen === "invite" || previewScreen === "invite-ready" || route.userFormOpen;
+  const groupFormOpen = route.groupFormOpen;
+  const editingGroupId = route.groupId;
+  const editingClientId = route.clientId;
   const [deletingClientId, setDeletingClientId] = useState("");
   const [created, setCreated] = useState<CreatedClient | null>(null);
   const [copied, setCopied] = useState("");
@@ -185,13 +274,21 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [groupMembersMessage, setGroupMembersMessage] = useState("");
   const groupMemberLoadId = useRef(0);
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
-  const [userClaimsReturnGroup, setUserClaimsReturnGroup] = useState(false);
   const [userClaimDrafts, setUserClaimDrafts] = useState<UserClaimDraft[]>([]);
   const [userClaimsLoading, setUserClaimsLoading] = useState(false);
   const [userClaimsReady, setUserClaimsReady] = useState(false);
   const [userClaimsBusy, setUserClaimsBusy] = useState(false);
   const [userEditorError, setUserEditorError] = useState("");
   const [userEditorMessage, setUserEditorMessage] = useState("");
+  const initializedClientEdit = useRef("");
+  const initializedGroupEdit = useRef("");
+  const initializedUserEdit = useRef("");
+
+  useEffect(() => {
+    if (!previewScreen && route.canonicalPath !== location.pathname) {
+      navigate(route.canonicalPath, { replace: true });
+    }
+  }, [location.pathname, navigate, previewScreen, route.canonicalPath]);
 
   async function refreshClients() {
     setClients(await api<Client[]>("/api/admin/clients"));
@@ -335,11 +432,11 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     setScopes(["openid", "profile", "email"]);
     setAllowedGroups([]);
     setClaims([]);
-    setEditingClientId("");
     setCreated(null);
     setCredentialsUpdated(false);
     setError("");
-    setClientFormMode("create");
+    initializedClientEdit.current = "";
+    navigate(`${TAB_PATHS.clients}/new`);
   }
 
   function openEditClient(client: Client) {
@@ -356,17 +453,17 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       user_attribute_path: claim.user_attribute_path,
       required_scope: claim.required_scope ?? "",
     })));
-    setEditingClientId(client.client_id);
     setCreated(null);
     setCredentialsUpdated(false);
     setError("");
-    setClientFormMode("edit");
+    initializedClientEdit.current = client.client_id;
+    navigate(`${TAB_PATHS.clients}/${encodeURIComponent(client.client_id)}/edit`);
   }
 
   function closeClientForm() {
-    setClientFormMode(null);
-    setEditingClientId("");
     setError("");
+    initializedClientEdit.current = "";
+    navigate(TAB_PATHS.clients);
   }
 
   function openCreateUser() {
@@ -379,12 +476,12 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     setUserGroups([]);
     setCreatedInvitation(null);
     setAdminActionMessage("");
-    setUserFormOpen(true);
+    navigate(`${TAB_PATHS.users}/invite`);
   }
 
   function closeUserForm() {
-    setUserFormOpen(false);
     setAdminActionMessage("");
+    navigate(TAB_PATHS.users);
   }
 
   function openCreateGroup() {
@@ -392,14 +489,14 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     setGroupName("");
     setGroupDisplayName("");
     setGroupClaims([]);
-    setEditingGroupId("");
     setGroupMemberSelection([]);
     setGroupMemberSearch("");
     setGroupMembersReady(false);
     setGroupMembersError("");
     setGroupMembersMessage("");
+    initializedGroupEdit.current = "";
     setAdminActionMessage("");
-    setGroupFormOpen(true);
+    navigate(`${TAB_PATHS.groups}/new`);
   }
 
   async function openEditGroup(group: Group) {
@@ -411,16 +508,15 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       claim_value: JSON.stringify(claim.claim_value) ?? "null",
       required_scope: claim.required_scope,
     })));
-    setEditingGroupId(group.id);
+    initializedGroupEdit.current = group.id;
     setGroupMemberSelection([]);
     setGroupMemberSearch("");
-    setUsers([]);
     setGroupMembersReady(false);
     setGroupMembersError("");
     setGroupMembersMessage("");
     setGroupMembersLoading(true);
     setAdminActionMessage("");
-    setGroupFormOpen(true);
+    navigate(`${TAB_PATHS.groups}/${encodeURIComponent(group.id)}/edit`);
     try {
       const userList = await api<AdminUser[]>("/api/admin/users");
       if (groupMemberLoadId.current !== loadId) return;
@@ -436,25 +532,27 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
 
   function closeGroupForm() {
     groupMemberLoadId.current += 1;
-    setGroupFormOpen(false);
-    setEditingGroupId("");
     setGroupMemberSelection([]);
     setGroupMemberSearch("");
     setGroupMembersReady(false);
     setGroupMembersError("");
     setGroupMembersMessage("");
+    initializedGroupEdit.current = "";
     setAdminActionMessage("");
+    navigate(TAB_PATHS.groups);
   }
 
   async function openEditUser(user: AdminUser, returnToGroup = false) {
     setEditingUser(user);
-    setUserClaimsReturnGroup(returnToGroup);
-    if (returnToGroup) setActiveTab("users");
     setUserClaimDrafts([]);
     setUserClaimsLoading(true);
     setUserClaimsReady(false);
     setUserEditorError("");
     setUserEditorMessage("");
+    initializedUserEdit.current = user.id;
+    navigate(`${TAB_PATHS.users}/${encodeURIComponent(user.id)}/edit`, {
+      state: returnToGroup ? { returnToGroup: true, groupId: editingGroupId } : null,
+    });
     try {
       const claims = await api<UserClaim[]>(`/api/admin/users/${encodeURIComponent(user.id)}/claims`);
       setUserClaimDrafts(claims.map((claim) => ({
@@ -471,14 +569,16 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   }
 
   function closeUserEditor() {
-    const returnToGroup = userClaimsReturnGroup;
     setEditingUser(null);
-    setUserClaimsReturnGroup(false);
     setUserClaimDrafts([]);
+    setUserClaimsLoading(false);
     setUserClaimsReady(false);
     setUserEditorError("");
     setUserEditorMessage("");
-    if (returnToGroup) setActiveTab("groups");
+    initializedUserEdit.current = "";
+    navigate(userClaimsReturnGroup && userClaimsReturnGroupId
+      ? `${TAB_PATHS.groups}/${encodeURIComponent(userClaimsReturnGroupId)}/edit`
+      : TAB_PATHS.users);
   }
 
   function updateUserClaim(index: number, key: keyof UserClaimDraft, value: string) {
@@ -599,8 +699,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
         setCreated(client);
         setCredentialsUpdated(clientFormMode === "edit");
       }
-      setClientFormMode(null);
-      setEditingClientId("");
+      navigate(TAB_PATHS.clients);
       await refreshClients();
     } catch (saveError) {
       setError(errorMessage(saveError, "save OIDC client"));
@@ -704,8 +803,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       setGroupDisplayName("");
       setGroupClaims([]);
       setGroups(await api<Group[]>("/api/admin/groups"));
-      setGroupFormOpen(false);
-      setEditingGroupId("");
+      navigate(TAB_PATHS.groups);
     } catch (saveError) {
       setAdminActionMessage(errorMessage(saveError, "save group"));
     } finally {
@@ -924,11 +1022,28 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     }
   }
 
-  function selectTab(tab: Tab) {
+  function resetTabState() {
     setAdminActionMessage("");
     setLoadError("");
-    closeUserEditor();
-    setActiveTab(tab);
+    groupMemberLoadId.current += 1;
+    setEditingUser(null);
+    setUserClaimDrafts([]);
+    setUserClaimsLoading(false);
+    setUserClaimsReady(false);
+    setUserEditorError("");
+    setUserEditorMessage("");
+    setError("");
+    initializedUserEdit.current = "";
+    initializedClientEdit.current = "";
+    initializedGroupEdit.current = "";
+    setGroupMembersReady(false);
+    setGroupMembersError("");
+    setGroupMembersMessage("");
+  }
+
+  function selectTab(tab: Tab) {
+    resetTabState();
+    navigate(TAB_PATHS[tab]);
   }
 
   const tabs: { id: Tab; label: string; icon: ReactNode }[] = [
@@ -956,6 +1071,102 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const normalizedGroupMemberSearch = groupMemberSearch.trim().toLocaleLowerCase();
   const filteredGroupMembers = users.filter((user) => [user.display_name, user.username, user.email ?? "", user.invitation_label ?? ""]
     .some((value) => value.toLocaleLowerCase().includes(normalizedGroupMemberSearch)));
+
+  useEffect(() => {
+    if (clientFormMode !== "edit" || !editingClientId) {
+      initializedClientEdit.current = "";
+      return;
+    }
+    if (initializedClientEdit.current === editingClientId || !clientBeingEdited) return;
+    setName(clientBeingEdited.name);
+    setTokenAuthMethod(clientBeingEdited.token_endpoint_auth_method);
+    setPkcePolicy(clientBeingEdited.pkce_policy);
+    setClientEnabled(clientBeingEdited.enabled);
+    setRedirectUris(clientBeingEdited.redirect_uris.join("\n"));
+    setLogoutUris(clientBeingEdited.post_logout_redirect_uris.join("\n"));
+    setScopes(clientBeingEdited.scopes);
+    setAllowedGroups(clientBeingEdited.allowed_groups);
+    setClaims(clientBeingEdited.claims.map((claim) => ({
+      claim_name: claim.claim_name,
+      user_attribute_path: claim.user_attribute_path,
+      required_scope: claim.required_scope ?? "",
+    })));
+    initializedClientEdit.current = editingClientId;
+  }, [clientBeingEdited, clientFormMode, editingClientId]);
+
+  useEffect(() => {
+    if (!editingGroupId) {
+      if (!userClaimsReturnGroup) initializedGroupEdit.current = "";
+      return;
+    }
+    if (initializedGroupEdit.current === editingGroupId) return;
+    const group = groups.find((candidate) => candidate.id === editingGroupId);
+    if (!group) return;
+    setGroupName(group.name);
+    setGroupDisplayName(group.display_name);
+    setGroupClaims((group.claims ?? []).map((claim) => ({
+      claim_name: claim.claim_name,
+      claim_value: JSON.stringify(claim.claim_value) ?? "null",
+      required_scope: claim.required_scope,
+    })));
+    initializedGroupEdit.current = editingGroupId;
+    const loadId = ++groupMemberLoadId.current;
+    setGroupMemberSelection([]);
+    setGroupMemberSearch("");
+    setGroupMembersReady(false);
+    setGroupMembersError("");
+    setGroupMembersMessage("");
+    setGroupMembersLoading(true);
+    void api<AdminUser[]>("/api/admin/users").then((userList) => {
+      if (groupMemberLoadId.current !== loadId) return;
+      setUsers(userList);
+      setGroupMemberSelection(userList.filter((user) => user.groups.includes(group.name)).map((user) => user.id));
+      setGroupMembersReady(true);
+    }).catch((loadError) => {
+      if (groupMemberLoadId.current === loadId) setGroupMembersError(errorMessage(loadError, "load group members"));
+    }).finally(() => {
+      if (groupMemberLoadId.current === loadId) setGroupMembersLoading(false);
+    });
+  }, [editingGroupId, groups]);
+
+  useEffect(() => {
+    if (!route.userId) {
+      initializedUserEdit.current = "";
+      setEditingUser(null);
+      setUserClaimDrafts([]);
+      setUserClaimsLoading(false);
+      setUserClaimsReady(false);
+      setUserEditorError("");
+      setUserEditorMessage("");
+      return;
+    }
+    if (initializedUserEdit.current === route.userId) return;
+    const user = users.find((candidate) => candidate.id === route.userId);
+    if (!user) return;
+
+    initializedUserEdit.current = route.userId;
+    setEditingUser(user);
+    setUserClaimDrafts([]);
+    setUserClaimsLoading(true);
+    setUserClaimsReady(false);
+    setUserEditorError("");
+    setUserEditorMessage("");
+    let active = true;
+    void api<UserClaim[]>(`/api/admin/users/${encodeURIComponent(user.id)}/claims`).then((claims) => {
+      if (!active) return;
+      setUserClaimDrafts(claims.map((claim) => ({
+        claim_name: claim.claim_name,
+        claim_value: JSON.stringify(claim.claim_value) ?? "null",
+        required_scope: claim.required_scope ?? "",
+      })));
+      setUserClaimsReady(true);
+    }).catch((loadError) => {
+      if (active) setUserEditorError(errorMessage(loadError, "load user claims"));
+    }).finally(() => {
+      if (active) setUserClaimsLoading(false);
+    });
+    return () => { active = false; };
+  }, [location.state, route.userId, users]);
   const title = activeTab === "clients" && clientFormMode !== null
     ? clientFormMode === "edit" ? "Edit OIDC client" : "Add an OIDC client"
     : activeTab === "users" && editingUser ? "Edit user"
@@ -977,11 +1188,11 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
         </select></label>
         {isAdmin && <div className="admin-nav-group">
           <p>Administration</p>
-          {tabs.filter((tab) => ["clients", "users", "groups", "keys"].includes(tab.id)).map((tab) => <button key={tab.id} type="button" className="admin-nav-tab" aria-current={activeTab === tab.id ? "page" : undefined} onClick={() => selectTab(tab.id)}>{tab.icon}<span>{tab.label}</span></button>)}
+          {tabs.filter((tab) => ["clients", "users", "groups", "keys"].includes(tab.id)).map((tab) => <NavLink key={tab.id} to={TAB_PATHS[tab.id]} className="admin-nav-tab" onClick={resetTabState}>{tab.icon}<span>{tab.label}</span></NavLink>)}
         </div>}
         <div className="admin-nav-group admin-nav-account">
           <p>Account</p>
-          {tabs.filter((tab) => tab.id === "hanko" || tab.id === "passkeys" || tab.id === "consents").map((tab) => <button key={tab.id} type="button" className="admin-nav-tab" aria-current={activeTab === tab.id ? "page" : undefined} onClick={() => selectTab(tab.id)}>{tab.icon}<span>{tab.label}</span></button>)}
+          {tabs.filter((tab) => tab.id === "hanko" || tab.id === "passkeys" || tab.id === "consents").map((tab) => <NavLink key={tab.id} to={TAB_PATHS[tab.id]} className="admin-nav-tab" onClick={resetTabState}>{tab.icon}<span>{tab.label}</span></NavLink>)}
         </div>
       </nav>
 

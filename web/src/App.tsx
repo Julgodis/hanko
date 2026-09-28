@@ -1,11 +1,12 @@
 import { startAuthentication } from "@simplewebauthn/browser";
 import { ArrowRight, Clock3, Fingerprint, Mail, MapPin, Phone, ShieldCheck, UserRound, Users, type LucideIcon } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import ClientAdmin from "./ClientAdmin";
 import FirstRun from "./FirstRun";
 import { HankoSeal, type HankoState } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
-import { ApiError, api, appPath, json, logUiIssue } from "./lib/utils";
+import { ApiError, api, json, logUiIssue } from "./lib/utils";
 import type { OidcProfileClaims } from "./lib/userClaims";
 
 type Phase = "idle" | "preparing" | "authenticating" | "success" | "error";
@@ -90,21 +91,14 @@ function signInFailure(cause: unknown, passkeyVerified: boolean, hasAuthorizatio
 }
 
 function App() {
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
   const requestId = useMemo(() => new URLSearchParams(window.location.search).get("request_id"), []);
   const authorizationPageError = useMemo(() => new URLSearchParams(window.location.search).get("hanko_error"), []);
   const enrollmentToken = useMemo(() => new URLSearchParams(window.location.search).get("enroll"), []);
-  const clientsRoute = useMemo(() => {
-    const routePath = appPath("admin/clients").replace(/\/+$/, "");
-    return window.location.pathname.replace(/\/+$/, "") === routePath;
-  }, []);
-  const accountRoute = useMemo(() => {
-    const routePath = appPath("account").replace(/\/+$/, "");
-    return window.location.pathname.replace(/\/+$/, "") === routePath;
-  }, []);
-  const homeRoute = useMemo(() => {
-    const routePath = appPath("").replace(/\/+$/, "");
-    return window.location.pathname.replace(/\/+$/, "") === routePath;
-  }, []);
+  const clientsRoute = pathname === "/admin/clients" || pathname.startsWith("/admin/clients/");
+  const accountRoute = pathname === "/account" || pathname.startsWith("/account/");
+  const homeRoute = pathname === "/";
   const [session, setSession] = useState<Session | null>(null);
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [request, setRequest] = useState<AuthorizationRequest | null>(null);
@@ -113,9 +107,9 @@ function App() {
 
   useEffect(() => {
     if (homeRoute && session?.authenticated && !session.setup_only && !requestId) {
-      window.location.replace(appPath("account"));
+      navigate("/account/profile", { replace: true });
     }
-  }, [homeRoute, requestId, session]);
+  }, [homeRoute, navigate, requestId, session]);
 
   async function loadAuthorizationRequest(id: string): Promise<AuthorizationRequest> {
     let authorizationRequest = await api<AuthorizationRequest>(
