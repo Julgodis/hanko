@@ -1,6 +1,6 @@
 use axum::{
     Form, Json, Router,
-    extract::{ConnectInfo, Extension, Query, State},
+    extract::{ConnectInfo, Extension, Query, RawQuery, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use subtle::ConstantTimeEq;
 use url::Url;
@@ -31,18 +32,81 @@ const ID_SECONDS: i64 = 5 * 60;
 const REFRESH_SECONDS: i64 = 30 * 24 * 60 * 60;
 const AUTH_REQUEST_SECONDS: i64 = 5 * 60;
 
-#[derive(Deserialize)]
 struct AuthorizeRequest {
     response_type: String,
     client_id: String,
     redirect_uri: String,
     scope: String,
     state: String,
+    state_parameter_present: bool,
     nonce: Option<String>,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
     prompt: Option<String>,
     max_age: Option<i64>,
+}
+
+struct AuthorizeParameters {
+    values: HashMap<String, Vec<String>>,
+}
+
+impl AuthorizeParameters {
+    fn parse(query: Option<&str>) -> Self {
+        let mut values = HashMap::<String, Vec<String>>::new();
+        if let Some(query) = query {
+            for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+                values
+                    .entry(key.into_owned())
+                    .or_default()
+                    .push(value.into_owned());
+            }
+        }
+        Self { values }
+    }
+
+    fn single(&self, key: &str) -> Option<&str> {
+        let values = self.values.get(key)?;
+        (values.len() == 1).then(|| values[0].as_str())
+    }
+
+    fn into_request(self, client_id: String, redirect_uri: String) -> Result<AuthorizeRequest, ()> {
+        const REQUEST_PARAMETERS: &[&str] = &[
+            "response_type",
+            "scope",
+            "state",
+            "nonce",
+            "code_challenge",
+            "code_challenge_method",
+            "prompt",
+            "max_age",
+        ];
+        if REQUEST_PARAMETERS.iter().any(|key| {
+            self.values
+                .get(*key)
+                .is_some_and(|values| values.len() != 1)
+        }) {
+            return Err(());
+        }
+        let max_age = self
+            .single("max_age")
+            .map(|value| value.parse::<i64>())
+            .transpose()
+            .map_err(|_| ())?;
+        let state = self.single("state").map(str::to_owned);
+        Ok(AuthorizeRequest {
+            response_type: self.single("response_type").unwrap_or_default().to_owned(),
+            client_id,
+            redirect_uri,
+            scope: self.single("scope").unwrap_or_default().to_owned(),
+            state: state.clone().unwrap_or_default(),
+            state_parameter_present: state.is_some(),
+            nonce: self.single("nonce").map(str::to_owned),
+            code_challenge: self.single("code_challenge").map(str::to_owned),
+            code_challenge_method: self.single("code_challenge_method").map(str::to_owned),
+            prompt: self.single("prompt").map(str::to_owned),
+            max_age,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -120,6 +184,21 @@ impl OAuthError {
             description: "client authentication failed".to_owned(),
         }
     }
+    fn invalid_scope(description: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: "invalid_scope",
+            description: description.into(),
+        }
+    }
+    fn access_denied() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            error: "access_denied",
+            description: "Your account is not a member of a group allowed to access this application. Ask an administrator to add your account to an allowed group."
+                .to_owned(),
+        }
+    }
     fn invalid_grant() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -184,11 +263,30 @@ pub fn router() -> Router<AppState> {
 
 async fn authorize(
     State(state): State<AppState>,
-    Query(input): Query<AuthorizeRequest>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+) -> Response {
+    match authorize_request(state.clone(), raw_query, headers, peer).await {
+        Ok(response) => response,
+        Err(error) if error.status.is_server_error() => {
+            tracing::error!(error = error.error, "OIDC authorization request failed");
+            authorization_page_error(&state, "temporarily_unavailable")
+                .unwrap_or_else(|page_error| page_error.into_response())
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn authorize_request(
+    state: AppState,
+    raw_query: Option<String>,
     headers: HeaderMap,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Result<Response, OAuthError> {
-    let _slot = crate::security::try_anonymous_state_slot().ok_or_else(OAuthError::rate_limited)?;
+    let Some(_slot) = crate::security::try_anonymous_state_slot() else {
+        return authorization_page_error(&state, "temporarily_unavailable");
+    };
     let source = crate::security::source_ip(
         peer.map(|Extension(ConnectInfo(address))| address),
         &headers,
@@ -198,10 +296,105 @@ async fn authorize(
         .await
         .map_err(|_| OAuthError::server_error())?
     {
-        return Err(OAuthError::rate_limited());
+        return authorization_page_error(&state, "temporarily_unavailable");
     }
-    let scopes = validate_authorize_request(&state, &input).await?;
-    let prompts = authorize_prompts(&input)?;
+
+    let parameters = AuthorizeParameters::parse(raw_query.as_deref());
+    let Some(client_id) = parameters.single("client_id").map(str::to_owned) else {
+        tracing::warn!(
+            endpoint = "/authorize",
+            "OIDC request rejected: client_id is missing or repeated"
+        );
+        return authorization_page_error(&state, "invalid_client");
+    };
+    let client_type = match sqlx::query_scalar::<_, String>(
+        "SELECT client_type FROM oidc_clients WHERE client_id = ? AND enabled = 1",
+    )
+    .bind(&client_id)
+    .fetch_optional(&state.database.pool)
+    .await
+    {
+        Ok(Some(client_type)) => client_type,
+        Ok(None) => {
+            tracing::warn!(
+                endpoint = "/authorize",
+                client_id = %client_id,
+                "OIDC request rejected: client is unknown or disabled"
+            );
+            return authorization_page_error(&state, "invalid_client");
+        }
+        Err(error) => {
+            tracing::error!(%error, endpoint = "/authorize", "failed to load OIDC client");
+            return authorization_page_error(&state, "temporarily_unavailable");
+        }
+    };
+    let Some(redirect_uri) = parameters.single("redirect_uri").map(str::to_owned) else {
+        tracing::warn!(
+            endpoint = "/authorize",
+            client_id = %client_id,
+            "OIDC request rejected: redirect_uri is missing or repeated"
+        );
+        return authorization_page_error(&state, "invalid_redirect_uri");
+    };
+    match validate_redirect(&state.database, &client_id, &redirect_uri).await {
+        Ok(()) => {}
+        Err(error) if error.error == "invalid_request" => {
+            tracing::warn!(
+                endpoint = "/authorize",
+                client_id = %client_id,
+                "OIDC request rejected: redirect_uri is invalid or not registered"
+            );
+            return authorization_page_error(&state, "invalid_redirect_uri");
+        }
+        Err(error) => {
+            tracing::error!(
+                endpoint = "/authorize",
+                client_id = %client_id,
+                error = error.error,
+                "failed to validate OIDC redirect_uri"
+            );
+            return authorization_page_error(&state, "temporarily_unavailable");
+        }
+    }
+
+    let state_value = parameters.single("state").map(str::to_owned);
+    let input = match parameters.into_request(client_id.clone(), redirect_uri.clone()) {
+        Ok(input) => input,
+        Err(()) => {
+            let input = AuthorizeRequest {
+                response_type: String::new(),
+                client_id,
+                redirect_uri,
+                scope: String::new(),
+                state: state_value.clone().unwrap_or_default(),
+                state_parameter_present: state_value.is_some(),
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                prompt: None,
+                max_age: None,
+            };
+            return authorization_protocol_error(&input, "invalid_request");
+        }
+    };
+    let scopes = match validate_authorize_request(&state, &input, &client_type).await {
+        Ok(scopes) => scopes,
+        Err(error) if error.status.is_client_error() => {
+            return authorization_protocol_error(&input, error.error);
+        }
+        Err(error) => {
+            tracing::error!(
+                endpoint = "/authorize",
+                error = error.error,
+                "failed to validate OIDC request"
+            );
+            return authorization_page_error(&state, "temporarily_unavailable");
+        }
+    };
+    let prompts = match authorize_prompts(&input) {
+        Ok(prompts) => prompts,
+        Err(error) => return authorization_protocol_error(&input, error.error),
+    };
     if prompts.iter().any(|prompt| *prompt == "select_account") {
         return authorization_protocol_error(&input, "account_selection_required");
     }
@@ -237,6 +430,7 @@ async fn authorize(
             return authorization_protocol_error(&input, "login_required");
         };
         if !user_allowed_for_client(&state, &input.client_id, &session.user_id).await? {
+            log_group_access_denial(&input.client_id, &session.user_id);
             return authorization_protocol_error(&input, "access_denied");
         }
         return authorization_protocol_error(
@@ -286,7 +480,7 @@ async fn authorize(
         .await
         .map_err(|_| OAuthError::server_error())?;
     if inserted.rows_affected() != 1 {
-        return Err(OAuthError::rate_limited());
+        return authorization_page_error(&state, "temporarily_unavailable");
     }
     let location = format!(
         "{}/?request_id={}",
@@ -360,9 +554,8 @@ async fn authorize_request_info(
             .try_get("client_id")
             .map_err(|_| OAuthError::server_error())?;
         if !user_allowed_for_client(&state, &client_id, &session.user_id).await? {
-            return Err(OAuthError::invalid_request(
-                "user is not allowed to access this client",
-            ));
+            log_group_access_denial(&client_id, &session.user_id);
+            return Err(OAuthError::access_denied());
         }
         let claims = preview_user_claims(&state, &client_id, &session.user_id, &scopes).await?;
         let authenticated_at_ms = sqlx::query_scalar::<_, i64>(
@@ -436,9 +629,8 @@ async fn continue_authorize(
         .try_get("created_at_ms")
         .map_err(|_| OAuthError::server_error())?;
     if !user_allowed_for_client(&state, &client_id, &session.user_id).await? {
-        return Err(OAuthError::invalid_request(
-            "user is not allowed to access this client",
-        ));
+        log_group_access_denial(&client_id, &session.user_id);
+        return Err(OAuthError::access_denied());
     }
     validate_redirect(&state.database, &client_id, &redirect_uri).await?;
     ensure_scopes_still_allowed(&state, &client_id, &scopes).await?;
@@ -884,7 +1076,17 @@ async fn issue_tokens(
         .map_err(|_| OAuthError::server_error())?;
     let attributes: Value =
         serde_json::from_str(&attributes).map_err(|_| OAuthError::server_error())?;
+    let picture = attributes
+        .get("picture")
+        .and_then(Value::as_str)
+        .filter(|picture| !picture.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::stamp::picture_url(&state.config.issuer(), user_id));
+    let phone_number = attributes.get("phone_number").and_then(Value::as_str);
+    let address = attributes.get("address");
+    let profile_claims = crate::security::oidc_profile_claims(&attributes);
     let groups = user_groups(state, user_id).await?;
+    let group_custom_claims = group_custom_claims(state, user_id, scopes).await?;
     let custom_claims = custom_claims(state, client_id, &attributes, scopes).await?;
 
     let scope_string = scopes.join(" ");
@@ -907,9 +1109,16 @@ async fn issue_tokens(
         scopes,
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
+        &profile_claims,
         email.as_deref(),
+        Some(picture.as_str()),
+        phone_number,
+        address,
         &groups,
     );
+    for (claim, value) in &group_custom_claims {
+        access_claims.insert(claim.clone(), value.clone());
+    }
     for (claim, value) in &custom_claims {
         access_claims.insert(claim.clone(), value.clone());
     }
@@ -943,9 +1152,16 @@ async fn issue_tokens(
         scopes,
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
+        &profile_claims,
         email.as_deref(),
+        Some(picture.as_str()),
+        phone_number,
+        address,
         &groups,
     );
+    for (claim, value) in group_custom_claims {
+        id_claims.insert(claim, value);
+    }
     for (claim, value) in custom_claims {
         id_claims.insert(claim, value);
     }
@@ -1125,10 +1341,43 @@ async fn userinfo(
         if expose_preferred_username {
             result.insert("preferred_username".into(), Value::String(username));
         }
+        for claim in [
+            "profile",
+            "given_name",
+            "family_name",
+            "nickname",
+            "website",
+            "locale",
+            "zoneinfo",
+        ] {
+            if let Some(value) = claims.additional.get(claim) {
+                result.insert(claim.to_owned(), value.clone());
+            }
+        }
+    }
+    if scopes
+        .iter()
+        .any(|scope| matches!(*scope, "profile" | "picture"))
+    {
+        if let Some(picture) = claims.additional.get("picture") {
+            result.insert("picture".into(), picture.clone());
+        }
     }
     if scopes.contains(&"email") {
         if let Some(email) = email {
             result.insert("email".into(), Value::String(email));
+            result.insert("email_verified".into(), Value::Bool(false));
+        }
+    }
+    if scopes.contains(&"address") {
+        if let Some(address) = claims.additional.get("address") {
+            result.insert("address".into(), address.clone());
+        }
+    }
+    if scopes.contains(&"phone") {
+        if let Some(phone_number) = claims.additional.get("phone_number") {
+            result.insert("phone_number".into(), phone_number.clone());
+            result.insert("phone_number_verified".into(), Value::Bool(false));
         }
     }
     if scopes.contains(&"groups") {
@@ -1156,7 +1405,19 @@ async fn userinfo(
                 | "scope"
                 | "name"
                 | "preferred_username"
+                | "profile"
+                | "given_name"
+                | "family_name"
+                | "nickname"
+                | "website"
+                | "locale"
+                | "zoneinfo"
                 | "email"
+                | "email_verified"
+                | "picture"
+                | "address"
+                | "phone_number"
+                | "phone_number_verified"
         ) {
             result.insert(claim, value);
         }
@@ -1237,6 +1498,7 @@ async fn end_session(
 async fn validate_authorize_request(
     state: &AppState,
     input: &AuthorizeRequest,
+    client_type: &str,
 ) -> Result<Vec<String>, OAuthError> {
     if input.response_type != "code"
         || input.state.is_empty()
@@ -1251,16 +1513,6 @@ async fn validate_authorize_request(
             "required authorization parameters are invalid",
         ));
     }
-    let client =
-        sqlx::query("SELECT client_type FROM oidc_clients WHERE client_id = ? AND enabled = 1")
-            .bind(&input.client_id)
-            .fetch_optional(&state.database.pool)
-            .await
-            .map_err(|_| OAuthError::server_error())?
-            .ok_or_else(|| OAuthError::invalid_request("unknown client"))?;
-    let client_type: String = client
-        .try_get("client_type")
-        .map_err(|_| OAuthError::server_error())?;
     let pkce_present = match (
         input.code_challenge.as_deref(),
         input.code_challenge_method.as_deref(),
@@ -1281,7 +1533,6 @@ async fn validate_authorize_request(
             "public clients require PKCE S256; confidential clients may omit PKCE or use S256",
         ));
     }
-    validate_redirect(&state.database, &input.client_id, &input.redirect_uri).await?;
     let scopes = parse_scopes(&input.scope)?;
     ensure_scopes_still_allowed(state, &input.client_id, &scopes).await?;
     Ok(scopes)
@@ -1310,10 +1561,15 @@ fn authorization_protocol_error(
 ) -> Result<Response, OAuthError> {
     let mut url = Url::parse(&input.redirect_uri)
         .map_err(|_| OAuthError::invalid_request("redirect_uri is invalid"))?;
-    url.query_pairs_mut()
-        .append_pair("error", error)
-        .append_pair("state", &input.state);
+    url.query_pairs_mut().append_pair("error", error);
+    if input.state_parameter_present {
+        url.query_pairs_mut().append_pair("state", &input.state);
+    }
     redirect(url.as_str())
+}
+
+fn authorization_page_error(state: &AppState, error: &str) -> Result<Response, OAuthError> {
+    redirect(&format!("{}/?hanko_error={error}", state.config.issuer()))
 }
 
 async fn validate_redirect(
@@ -1364,9 +1620,7 @@ async fn ensure_scopes_still_allowed(
     {
         Ok(())
     } else {
-        Err(OAuthError::invalid_request(
-            "requested scope is not allowed",
-        ))
+        Err(OAuthError::invalid_scope("requested scope is not allowed"))
     }
 }
 
@@ -1378,7 +1632,14 @@ fn parse_scopes(scope: &str) -> Result<Vec<String>, OAuthError> {
         .filter(|scope| {
             !matches!(
                 scope.as_str(),
-                "openid" | "profile" | "email" | "groups" | "offline_access"
+                "openid"
+                    | "profile"
+                    | "email"
+                    | "picture"
+                    | "address"
+                    | "phone"
+                    | "groups"
+                    | "offline_access"
             )
         })
         .map(String::as_str)
@@ -1393,14 +1654,14 @@ fn parse_scopes(scope: &str) -> Result<Vec<String>, OAuthError> {
         } else {
             reasons.push(format!("unsupported scopes: {}", unsupported.join(", ")));
         }
-        return Err(OAuthError::invalid_request(format!(
+        return Err(OAuthError::invalid_scope(format!(
             "requested scope \"{scope}\" is invalid: {}",
             reasons.join("; ")
         )));
     }
     let unique: std::collections::HashSet<_> = scopes.iter().collect();
     if unique.len() != scopes.len() {
-        return Err(OAuthError::invalid_request("scope values must be unique"));
+        return Err(OAuthError::invalid_scope("scope values must be unique"));
     }
     Ok(scopes)
 }
@@ -1425,6 +1686,16 @@ async fn user_allowed_for_client(
         .fetch_one(&state.database.pool)
         .await
         .map_err(|_| OAuthError::server_error())
+}
+
+fn log_group_access_denial(client_id: &str, user_id: &str) {
+    tracing::warn!(
+        event = "authorization_denied",
+        reason = "group_policy",
+        client_id = %client_id,
+        user_id = %user_id,
+        "OIDC authorization denied by client group policy"
+    );
 }
 
 fn callback_with_code(uri: &str, code: &str, state: &str) -> Result<String, OAuthError> {
@@ -1519,7 +1790,17 @@ async fn preview_user_claims(
         .map_err(|_| OAuthError::server_error())?;
     let attributes: Value =
         serde_json::from_str(&attributes).map_err(|_| OAuthError::server_error())?;
+    let picture = attributes
+        .get("picture")
+        .and_then(Value::as_str)
+        .filter(|picture| !picture.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::stamp::picture_url(&state.config.issuer(), user_id));
+    let phone_number = attributes.get("phone_number").and_then(Value::as_str);
+    let address = attributes.get("address");
+    let profile_claims = crate::security::oidc_profile_claims(&attributes);
     let groups = user_groups(state, user_id).await?;
+    let group_custom_claims = group_custom_claims(state, user_id, scopes).await?;
 
     let mut claims = Map::new();
     add_user_claims(
@@ -1527,9 +1808,16 @@ async fn preview_user_claims(
         scopes,
         expose_preferred_username.then_some(username.as_str()),
         expose_name.then_some(display_name.as_str()),
+        &profile_claims,
         email.as_deref(),
+        Some(picture.as_str()),
+        phone_number,
+        address,
         &groups,
     );
+    for (claim, value) in group_custom_claims {
+        claims.insert(claim, value);
+    }
     for (claim, value) in custom_claims(state, client_id, &attributes, scopes).await? {
         claims.insert(claim, value);
     }
@@ -1552,6 +1840,25 @@ async fn custom_claims(
         let name: String = row
             .try_get("claim_name")
             .map_err(|_| OAuthError::server_error())?;
+        if matches!(
+            name.as_str(),
+            "name"
+                | "preferred_username"
+                | "profile"
+                | "given_name"
+                | "family_name"
+                | "nickname"
+                | "website"
+                | "locale"
+                | "zoneinfo"
+                | "picture"
+                | "address"
+                | "email_verified"
+                | "phone_number"
+                | "phone_number_verified"
+        ) {
+            continue;
+        }
         let path: String = row
             .try_get("user_attribute_path")
             .map_err(|_| OAuthError::server_error())?;
@@ -1566,6 +1873,62 @@ async fn custom_claims(
         }
         if let Some(value) = attributes.pointer(&path) {
             claims.insert(name, value.clone());
+        }
+    }
+    Ok(claims)
+}
+
+async fn group_custom_claims(
+    state: &AppState,
+    user_id: &str,
+    scopes: &[String],
+) -> Result<Map<String, Value>, OAuthError> {
+    let rows = sqlx::query("SELECT mappings.claim_name, mappings.claim_value, mappings.required_scope FROM group_claim_mappings mappings JOIN groups ON groups.id = mappings.group_id JOIN user_groups ON user_groups.group_id = mappings.group_id WHERE user_groups.user_id = ? ORDER BY mappings.claim_name, groups.name")
+        .bind(user_id)
+        .fetch_all(&state.database.pool)
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+    let mut contributions = std::collections::BTreeMap::<String, Vec<Value>>::new();
+    for row in rows {
+        let required_scope: String = row
+            .try_get("required_scope")
+            .map_err(|_| OAuthError::server_error())?;
+        if !scopes.iter().any(|scope| scope == &required_scope) {
+            continue;
+        }
+        let claim_name: String = row
+            .try_get("claim_name")
+            .map_err(|_| OAuthError::server_error())?;
+        let encoded_value: String = row
+            .try_get("claim_value")
+            .map_err(|_| OAuthError::server_error())?;
+        let value: Value =
+            serde_json::from_str(&encoded_value).map_err(|_| OAuthError::server_error())?;
+        contributions.entry(claim_name).or_default().push(value);
+    }
+
+    let mut claims = Map::new();
+    for (name, mut values) in contributions {
+        match values.len() {
+            0 => {}
+            1 => {
+                claims.insert(name, values.remove(0));
+            }
+            _ => {
+                let mut merged = Vec::new();
+                for value in values {
+                    let items = match value {
+                        Value::Array(items) => items,
+                        value => vec![value],
+                    };
+                    for item in items {
+                        if !merged.contains(&item) {
+                            merged.push(item);
+                        }
+                    }
+                }
+                claims.insert(name, Value::Array(merged));
+            }
         }
     }
     Ok(claims)
@@ -1597,7 +1960,11 @@ fn add_user_claims(
     scopes: &[String],
     username: Option<&str>,
     display_name: Option<&str>,
+    profile_claims: &Value,
     email: Option<&str>,
+    picture: Option<&str>,
+    phone_number: Option<&str>,
+    address: Option<&Value>,
     groups: &[String],
 ) {
     if scopes.iter().any(|scope| scope == "profile") {
@@ -1610,10 +1977,32 @@ fn add_user_claims(
                 Value::String(username.to_owned()),
             );
         }
+        for claim in [
+            "profile",
+            "given_name",
+            "family_name",
+            "nickname",
+            "website",
+            "locale",
+            "zoneinfo",
+        ] {
+            if let Some(value) = profile_claims.get(claim) {
+                claims.insert(claim.to_owned(), value.clone());
+            }
+        }
     }
     if scopes.iter().any(|scope| scope == "email") {
         if let Some(email) = email {
             claims.insert("email".into(), Value::String(email.to_owned()));
+            claims.insert("email_verified".into(), Value::Bool(false));
+        }
+    }
+    if scopes
+        .iter()
+        .any(|scope| matches!(scope.as_str(), "profile" | "picture"))
+    {
+        if let Some(picture) = picture {
+            claims.insert("picture".into(), Value::String(picture.to_owned()));
         }
     }
     if scopes.iter().any(|scope| scope == "groups") {
@@ -1621,6 +2010,24 @@ fn add_user_claims(
             "groups".into(),
             serde_json::to_value(groups).unwrap_or(Value::Array(vec![])),
         );
+    }
+    if scopes.iter().any(|scope| scope == "address") {
+        if let Some(address) = address.filter(|address| {
+            address
+                .as_object()
+                .is_some_and(|address| !address.is_empty())
+        }) {
+            claims.insert("address".into(), address.clone());
+        }
+    }
+    if scopes.iter().any(|scope| scope == "phone") {
+        if let Some(phone_number) = phone_number {
+            claims.insert(
+                "phone_number".into(),
+                Value::String(phone_number.to_owned()),
+            );
+            claims.insert("phone_number_verified".into(), Value::Bool(false));
+        }
     }
 }
 
@@ -1791,11 +2198,33 @@ mod tests {
     fn profile_claims_are_independently_optional() {
         let scopes = vec!["openid".to_owned(), "profile".to_owned()];
         let mut claims = Map::new();
-        add_user_claims(&mut claims, &scopes, None, None, None, &[]);
+        add_user_claims(
+            &mut claims,
+            &scopes,
+            None,
+            None,
+            &Value::Null,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        );
         assert!(claims.get("name").is_none());
         assert!(claims.get("preferred_username").is_none());
 
-        add_user_claims(&mut claims, &scopes, Some("alice"), None, None, &[]);
+        add_user_claims(
+            &mut claims,
+            &scopes,
+            Some("alice"),
+            None,
+            &Value::Null,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        );
         assert_eq!(claims["preferred_username"], "alice");
         assert!(claims.get("name").is_none());
     }
@@ -1974,6 +2403,13 @@ mod tests {
             .to_str()
             .unwrap()
             .to_owned();
+        let redirect_url = Url::parse(&location).unwrap();
+        if redirect_url
+            .query_pairs()
+            .any(|(key, value)| key == "error" && value == "invalid_request")
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
         let preauth = response
             .headers()
             .get_all(header::SET_COOKIE)
@@ -1988,8 +2424,7 @@ mod tests {
                     .map(str::to_owned)
             })
             .unwrap();
-        let request_id = Url::parse(&location)
-            .unwrap()
+        let request_id = redirect_url
             .query_pairs()
             .find(|(key, _)| key == "request_id")
             .unwrap()

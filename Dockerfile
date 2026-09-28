@@ -7,7 +7,9 @@ COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
 ARG VITE_BASE_PATH=/
-ENV VITE_BASE_PATH=${VITE_BASE_PATH}
+ARG VITE_HIDDEN_USER_CLAIMS=
+ENV VITE_BASE_PATH=${VITE_BASE_PATH} \
+    VITE_HIDDEN_USER_CLAIMS=${VITE_HIDDEN_USER_CLAIMS}
 RUN npm run build
 
 # This stage follows the requested target platform. The publishing workflow
