@@ -28,6 +28,7 @@ type AuthorizationRequest = {
   client_name: string;
   scopes: string[];
   requires_fresh_authentication: boolean;
+  consent_required: boolean;
   claims?: Record<string, unknown> | null;
 };
 type PasskeyStart = {
@@ -105,6 +106,27 @@ function App() {
   const [loading, setLoading] = useState(!authorizationPageError);
   const [loadError, setLoadError] = useState<UserFacingError | null>(null);
 
+  async function loadAuthorizationRequest(id: string): Promise<AuthorizationRequest> {
+    let authorizationRequest = await api<AuthorizationRequest>(
+      `/api/authorize/request?request_id=${encodeURIComponent(id)}`,
+    );
+    if (!authorizationRequest.consent_required && !authorizationRequest.requires_fresh_authentication) {
+      try {
+        const result = await api<{ redirect_to: string }>("/api/authorize/continue", {
+          method: "POST",
+          body: json({ request_id: id, consent: false }),
+        });
+        window.location.assign(result.redirect_to);
+      } catch (cause) {
+        if (!(cause instanceof ApiError) || cause.code !== "consent_required") throw cause;
+        authorizationRequest = await api<AuthorizationRequest>(
+          `/api/authorize/request?request_id=${encodeURIComponent(id)}`,
+        );
+      }
+    }
+    return authorizationRequest;
+  }
+
   useEffect(() => {
     let active = true;
     async function load() {
@@ -126,9 +148,7 @@ function App() {
         }
         let authorizationRequest: AuthorizationRequest | null = null;
         if (requestId && !setupStage) {
-          authorizationRequest = await api<AuthorizationRequest>(
-            `/api/authorize/request?request_id=${encodeURIComponent(requestId)}`,
-          );
+          authorizationRequest = await loadAuthorizationRequest(requestId);
         }
         if (active) {
           setRequest(authorizationRequest);
@@ -150,7 +170,7 @@ function App() {
     const [identity, authorizationRequest] = await Promise.all([
       api<Session>("/api/session"),
       requestId
-        ? api<AuthorizationRequest>(`/api/authorize/request?request_id=${encodeURIComponent(requestId)}`)
+        ? loadAuthorizationRequest(requestId)
         : Promise.resolve(null),
     ]);
     setSession(identity);
@@ -162,7 +182,7 @@ function App() {
       api<Session>("/api/session"),
       api<SetupStatus>("/api/setup-status"),
       requestId
-        ? api<AuthorizationRequest>(`/api/authorize/request?request_id=${encodeURIComponent(requestId)}`)
+        ? loadAuthorizationRequest(requestId)
         : Promise.resolve(null),
     ]);
     setSession(identity);
@@ -368,7 +388,7 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
       const [result] = await Promise.all([
         api<{ redirect_to: string }>(endpoint, {
           method: "POST",
-          body: json({ request_id: requestId }),
+          body: json({ request_id: requestId, consent: allow }),
         }),
         animation,
       ]);

@@ -81,6 +81,10 @@ Use comma-separated claim names such as `given_name,family_name,address,phone_nu
 
 To require profile fields during account setup and profile updates, set the runtime variable `REQUIRED_USER_CLAIMS`. For example, `REQUIRED_USER_CLAIMS=preferred_username` requires users to choose a username that is shared as the OIDC `preferred_username` claim. Separate multiple fields with commas. Supported fields are defined in [`shared/user_claims.json`](shared/user_claims.json). Requiring `address` means at least one address component must be filled in. Required fields stay visible even when also listed in `VITE_HIDDEN_USER_CLAIMS`.
 
+OIDC consent is stored per user and application. Grants persist until the user revokes them by default. Set `OIDC_CONSENT_LIFETIME_SECONDS` to a positive integer to expire grants after that many seconds; `0` keeps them persistent. Existing grants cover requests for the same or a subset of their scopes. Adding scopes or using `prompt=consent` asks the user again. Users review and revoke grants under **Account → Applications**.
+
+The optional `OIDC_REVOKE_CONSENTS_ON_IDENTITY_CHANGE` and `OIDC_REVOKE_SESSIONS_ON_IDENTITY_CHANGE` settings default to `false`. When enabled, changes to the account's OIDC profile (name, exposed username, picture, phone, address, or profile claims) revoke the user's consent grants and/or sessions. Email is currently set by the invitation and cannot be changed in the self-service account page, so there is no email-change action to trigger these policies.
+
 ## Scope
 
 Hanko focuses on passkey-first OIDC. It does not implement password sign-in, SAML, LDAP, or workflow automation. Recovery methods and SCIM are not implemented.

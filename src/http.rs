@@ -311,6 +311,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/session", get(session_info))
         .route("/api/account/profile", axum::routing::put(update_profile))
         .route("/api/account/hanko", axum::routing::put(update_hanko))
+        .route("/api/account/consents", get(list_account_consents))
+        .route(
+            "/api/account/consents/{client_id}",
+            axum::routing::delete(revoke_account_consent),
+        )
         .route("/api/setup-status", get(setup_status))
         .route("/api/bootstrap", post(bootstrap))
         .route("/api/passkeys/login/options", post(login_options))
@@ -620,7 +625,7 @@ async fn update_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<OidcProfileInput>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     require_origin(&headers, &state.config)?;
     let session = require_session(&headers, &state.database).await?;
     require_csrf(&headers, &session)?;
@@ -633,7 +638,7 @@ async fn update_profile(
     }
 
     let current = sqlx::query(
-        "SELECT username, display_name, attributes FROM users WHERE id = ? AND disabled_at IS NULL",
+        "SELECT username, display_name, expose_preferred_username, expose_name, attributes FROM users WHERE id = ? AND disabled_at IS NULL",
     )
     .bind(&session.user_id)
     .fetch_optional(&state.database.pool)
@@ -646,11 +651,18 @@ async fn update_profile(
     let current_display_name: String = current
         .try_get("display_name")
         .map_err(|_| ApiError::internal())?;
+    let current_exposes_username: bool = current
+        .try_get("expose_preferred_username")
+        .map_err(|_| ApiError::internal())?;
+    let current_exposes_name: bool = current
+        .try_get("expose_name")
+        .map_err(|_| ApiError::internal())?;
     let attributes_json: String = current
         .try_get("attributes")
         .map_err(|_| ApiError::internal())?;
     let mut attributes: serde_json::Value =
         serde_json::from_str(&attributes_json).map_err(|_| ApiError::internal())?;
+    let original_attributes = attributes.clone();
 
     let raw_username = input
         .username
@@ -744,15 +756,28 @@ async fn update_profile(
     ) {
         return Err(ApiError::bad_request("a required profile field is missing"));
     }
+    let identity_changed = username != current_username
+        || display_name != current_display_name
+        || oidc_username.is_some() != current_exposes_username
+        || raw_name.is_some() != current_exposes_name
+        || attributes != original_attributes;
+    let serialized_attributes =
+        serde_json::to_string(&attributes).map_err(|_| ApiError::internal())?;
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| ApiError::internal())?;
     let updated = sqlx::query("UPDATE users SET username = ?, display_name = ?, attributes = ?, expose_preferred_username = ?, expose_name = ?, updated_at = ? WHERE id = ? AND disabled_at IS NULL")
         .bind(username)
         .bind(display_name)
-        .bind(serde_json::to_string(&attributes).map_err(|_| ApiError::internal())?)
+        .bind(serialized_attributes)
         .bind(oidc_username.is_some())
         .bind(raw_name.is_some())
         .bind(unix_now())
         .bind(&session.user_id)
-        .execute(&state.database.pool)
+        .execute(&mut *transaction)
         .await;
     if let Err(error) = updated {
         if error
@@ -767,14 +792,55 @@ async fn update_profile(
         return Err(ApiError::internal());
     }
 
-    Ok(Json(serde_json::json!({
+    if identity_changed && state.config.revoke_consents_on_identity_change {
+        let now = unix_now();
+        sqlx::query("UPDATE refresh_token_families SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ? AND revoked_at IS NULL")
+            .bind(now)
+            .bind(&session.user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ApiError::internal())?;
+        sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ? AND consumed_at IS NULL")
+            .bind(&session.user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ApiError::internal())?;
+        sqlx::query("DELETE FROM authorization_codes WHERE user_id = ?")
+            .bind(&session.user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ApiError::internal())?;
+        sqlx::query("DELETE FROM oidc_consents WHERE user_id = ?")
+            .bind(&session.user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ApiError::internal())?;
+    }
+    if identity_changed && state.config.revoke_sessions_on_identity_change {
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(&session.user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ApiError::internal())?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| ApiError::internal())?;
+
+    let mut response = Json(serde_json::json!({
         "username": oidc_username,
         "display_name": raw_name,
         "picture": attributes.get("picture").and_then(serde_json::Value::as_str),
         "phone_number": attributes.get("phone_number").and_then(serde_json::Value::as_str),
         "address": attributes.get("address"),
         "profile_claims": crate::security::oidc_profile_claims(&attributes),
-    })))
+    }))
+    .into_response();
+    if identity_changed && state.config.revoke_sessions_on_identity_change {
+        clear_session_cookies(&mut response, &state.config);
+    }
+    Ok(response)
 }
 
 fn required_user_claims_present(
@@ -1337,6 +1403,89 @@ async fn list_passkeys(
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
     Ok(Json(passkeys))
+}
+
+async fn list_account_consents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let session = require_session(&headers, &state.database).await?;
+    if session.setup_only {
+        return Err(ApiError::forbidden());
+    }
+    let rows = sqlx::query("SELECT c.client_id, c.name AS client_name, g.scopes, g.granted_at, g.expires_at FROM oidc_consents g JOIN oidc_clients c ON c.client_id = g.client_id WHERE g.user_id = ? AND (g.expires_at IS NULL OR g.expires_at > ?) ORDER BY c.name COLLATE NOCASE, c.client_id")
+        .bind(&session.user_id)
+        .bind(unix_now())
+        .fetch_all(&state.database.pool)
+        .await
+        .map_err(|_| ApiError::internal())?;
+    rows.into_iter()
+        .map(|row| {
+            let scopes_json: String = row.try_get("scopes").map_err(|_| ApiError::internal())?;
+            let scopes: Vec<String> =
+                serde_json::from_str(&scopes_json).map_err(|_| ApiError::internal())?;
+            Ok(serde_json::json!({
+                "client_id": row.try_get::<String, _>("client_id").map_err(|_| ApiError::internal())?,
+                "client_name": row.try_get::<String, _>("client_name").map_err(|_| ApiError::internal())?,
+                "scopes": scopes,
+                "granted_at": row.try_get::<i64, _>("granted_at").map_err(|_| ApiError::internal())?,
+                "expires_at": row.try_get::<Option<i64>, _>("expires_at").map_err(|_| ApiError::internal())?,
+            }))
+        })
+        .collect::<Result<Vec<_>, ApiError>>()
+        .map(Json)
+}
+
+async fn revoke_account_consent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_origin(&headers, &state.config)?;
+    let session = require_session(&headers, &state.database).await?;
+    require_csrf(&headers, &session)?;
+    if session.setup_only {
+        return Err(ApiError::forbidden());
+    }
+    let now = unix_now();
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    sqlx::query("UPDATE refresh_token_families SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ? AND client_id = ? AND revoked_at IS NULL")
+        .bind(now)
+        .bind(&session.user_id)
+        .bind(&client_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ApiError::internal())?;
+    sqlx::query(
+        "DELETE FROM refresh_tokens WHERE user_id = ? AND client_id = ? AND consumed_at IS NULL",
+    )
+    .bind(&session.user_id)
+    .bind(&client_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| ApiError::internal())?;
+    sqlx::query("DELETE FROM authorization_codes WHERE user_id = ? AND client_id = ?")
+        .bind(&session.user_id)
+        .bind(&client_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ApiError::internal())?;
+    sqlx::query("DELETE FROM oidc_consents WHERE user_id = ? AND client_id = ?")
+        .bind(&session.user_id)
+        .bind(&client_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ApiError::internal())?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn rename_passkey(
