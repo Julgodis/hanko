@@ -7,8 +7,8 @@ use chacha20poly1305::{
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use p256::{
-    elliptic_curve::Generate,
     ecdsa::SigningKey,
+    elliptic_curve::Generate,
     pkcs8::{EncodePrivateKey, LineEnding},
 };
 use serde::Serialize;
@@ -91,8 +91,8 @@ impl SigningKeys {
     /// Creates a new ES256 key and retires the previous one after the maximum token lifetime.
     pub async fn rotate(&self, now: i64) -> Result<String, KeyError> {
         let mut rng = getrandom::SysRng;
-        let signing_key = SigningKey::try_generate_from_rng(&mut rng)
-            .map_err(|_| KeyError::KeyGeneration)?;
+        let signing_key =
+            SigningKey::try_generate_from_rng(&mut rng).map_err(|_| KeyError::KeyGeneration)?;
         let pem = signing_key
             .to_pkcs8_pem(LineEnding::LF)
             .map_err(|_| KeyError::KeyGeneration)?;
