@@ -190,6 +190,19 @@ impl AdminError {
 
 impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
+        if self.0.is_server_error() {
+            tracing::error!(
+                status = %self.0,
+                error = self.1,
+                "admin API request failed"
+            );
+        } else {
+            tracing::warn!(
+                status = %self.0,
+                error = self.1,
+                "admin API request returned an error"
+            );
+        }
         (self.0, Json(ErrorBody { error: self.1 })).into_response()
     }
 }
@@ -1484,6 +1497,12 @@ async fn validate_invitation(
     } else {
         (false, false)
     };
+    if !valid && !in_progress {
+        tracing::warn!(
+            endpoint = "/api/invitations/validate",
+            "invitation is invalid, expired, revoked, or unavailable"
+        );
+    }
     Ok(Json(InvitationValidation { valid, in_progress }))
 }
 

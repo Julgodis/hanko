@@ -4,7 +4,7 @@ import { startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal, type HankoState } from "./components/HankoSeal";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { generateHankoPalette, makeHankoSeed, ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
-import { ApiError, api, defaultPasskeyLabel, json } from "./lib/utils";
+import { ApiError, api, defaultPasskeyLabel, json, logUiIssue } from "./lib/utils";
 import { canEditConfiguredUserClaim, isRequiredUserClaim, missingRequiredUserClaims, type OidcProfileClaims } from "./lib/userClaims";
 
 type RegistrationStart = {
@@ -89,9 +89,17 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
       method: "POST",
       body: json({ token: invitationToken }),
     }).then(({ valid, in_progress }) => {
-      if (active) setInvitationStatus(valid ? "valid" : in_progress ? "in_progress" : "invalid");
-    }).catch(() => {
-      if (active) setInvitationStatus("error");
+      if (active) {
+        if (!valid && !in_progress) {
+          logUiIssue("validate invitation", new Error("Invitation is invalid or unavailable"));
+        }
+        setInvitationStatus(valid ? "valid" : in_progress ? "in_progress" : "invalid");
+      }
+    }).catch((cause) => {
+      if (active) {
+        logUiIssue("validate invitation", cause);
+        setInvitationStatus("error");
+      }
     });
     return () => { active = false; };
   }, [invitationToken, hasSetupSession, invitationCheckAttempt]);
@@ -215,6 +223,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
         setError("");
         setPhase("idle");
       } else {
+        logUiIssue("complete account setup", registrationError);
         setError(registrationError instanceof ApiError && registrationError.code === "too many active registration requests; try again shortly"
           ? registrationCapacityMessage(registrationError.retryAfterSeconds, inviteReserved)
           : getError(registrationError));
