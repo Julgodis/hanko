@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import "./styles.css";
 
 type PreviewScreen = "signin" | "consent" | "welcome" | "setup" | "join-invite" | "clients" | "users" | "invite" | "invite-ready" | "groups" | "keys" | "passkeys" | "hanko" | "client-form";
+type PreviewUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; groups: string[] };
+type PreviewGroup = { id: string; name: string; display_name: string; member_count: number; claims: { claim_name: string; claim_value: string; required_scope: string }[] };
 
 const previewScreens: { id: PreviewScreen; label: string }[] = [
   { id: "signin", label: "Sign in" },
@@ -68,7 +70,7 @@ const clients = [
   },
 ];
 
-const users = [
+const users: PreviewUser[] = [
   { id: "usr_01", username: "admin", display_name: "Hanko Administrator", email: "admin@example.com", invitation_label: null, is_admin: true, disabled: false, groups: ["administrators"] },
   { id: "usr_02", username: "sana.lee", display_name: "Sana Lee", email: "sana.lee@example.com", invitation_label: "Design team", is_admin: false, disabled: false, groups: ["media-users", "staff"] },
   { id: "usr_03", username: "tom.rivers", display_name: "Tom Rivers", email: null, invitation_label: "Community event", is_admin: false, disabled: false, groups: [] },
@@ -80,7 +82,7 @@ const invitations = [
   { id: "inv_02", label: "Community event", email: null, max_uses: 10, use_count: 3, created_at: 1_790_517_600, expires_at: 1_791_122_400, revoked: false },
 ];
 
-const groups = [
+const groups: PreviewGroup[] = [
   { id: "grp_01", name: "media-users", display_name: "Media users", member_count: 4, claims: [{ claim_name: "role", claim_value: "media-user", required_scope: "groups" }] },
   { id: "grp_02", name: "administrators", display_name: "Administrators", member_count: 1, claims: [{ claim_name: "role", claim_value: "administrator", required_scope: "groups" }] },
   { id: "grp_03", name: "staff", display_name: "Staff", member_count: 6, claims: [] },
