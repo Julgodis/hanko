@@ -6,6 +6,7 @@ WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
+COPY shared /app/shared
 ARG VITE_BASE_PATH=/
 ARG VITE_HIDDEN_USER_CLAIMS=
 ENV VITE_BASE_PATH=${VITE_BASE_PATH} \
@@ -22,6 +23,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
+COPY shared ./shared
 COPY --from=web-build /app/web/dist ./web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git/db \

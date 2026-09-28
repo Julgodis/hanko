@@ -5,7 +5,7 @@ import { HankoSeal, type HankoState } from "./components/HankoSeal";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { generateHankoPalette, makeHankoSeed, ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
 import { ApiError, api, defaultPasskeyLabel, json } from "./lib/utils";
-import { canEditUserClaim, type OidcProfileClaims } from "./lib/userClaims";
+import { canEditConfiguredUserClaim, isRequiredUserClaim, missingRequiredUserClaims, type OidcProfileClaims } from "./lib/userClaims";
 
 type RegistrationStart = {
   ceremony_id: string;
@@ -22,6 +22,7 @@ type Props = {
   initialColor?: string;
   initialSeed?: string;
   initialProfile?: { username?: string; displayName?: string; pictureUrl?: string; phoneNumber?: string; address?: Partial<OidcAddress>; profileClaims?: OidcProfileClaims };
+  requiredUserClaims: string[];
   onComplete: () => Promise<void>;
 };
 type Phase = "idle" | "preparing" | "authenticating" | "success" | "error";
@@ -50,8 +51,10 @@ const INK_WASH = <svg className="ink-wash" viewBox="0 0 1440 190" preserveAspect
   <path d="M0 153 C74 143 112 127 167 138 C218 148 242 164 307 150 C361 139 394 121 451 140 C510 160 535 167 594 145 C646 125 683 91 733 111 C784 132 819 151 876 144 C933 137 967 111 1025 128 C1083 145 1127 168 1181 154 C1246 136 1284 121 1338 140 C1382 156 1406 164 1440 151 L1440 190 L0 190 Z" />
 </svg>;
 
-export default function FirstRun({ hasSetupSession, invitationToken, initialColor, initialSeed, initialProfile, onComplete }: Props) {
+export default function FirstRun({ hasSetupSession, invitationToken, initialColor, initialSeed, initialProfile, requiredUserClaims, onComplete }: Props) {
   const isAdminSetup = !hasSetupSession && !invitationToken;
+  const canEditUserClaim = (claim: string) => canEditConfiguredUserClaim(claim, requiredUserClaims);
+  const fieldRequirement = (claim: string) => isRequiredUserClaim(claim, requiredUserClaims) ? "Required" : "Optional";
   const [setupSession, setSetupSession] = useState(hasSetupSession);
   const [pendingInvitation, setPendingInvitation] = useState(invitationToken ?? null);
   const [step, setStep] = useState<Step>(hasSetupSession || invitationToken ? "profile" : "bootstrap");
@@ -109,6 +112,19 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
 
   function continueProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const missing = missingRequiredUserClaims(requiredUserClaims, {
+      preferred_username: username,
+      name: displayName,
+      picture: pictureUrl,
+      phone_number: phoneNumber,
+      address,
+      ...address,
+      ...profileClaims,
+    });
+    if (missing.length) {
+      setError(`Complete the required fields: ${missing.join(", ")}.`);
+      return;
+    }
     setError("");
     setStep("hanko");
   }
@@ -285,41 +301,41 @@ export default function FirstRun({ hasSetupSession, invitationToken, initialColo
         {invitationToken && invitationStatus === "invalid" && <p className="admin-message admin-message-error" role="alert">{INVALID_INVITATION_MESSAGE}</p>}
         {invitationToken && invitationStatus === "error" && <div className="setup-invitation-check-error"><p className="admin-message admin-message-error" role="alert">We couldn’t check this invite right now. Try again when you’re back online.</p><button className="setup-back" type="button" onClick={() => setInvitationCheckAttempt((attempt) => attempt + 1)}>Check invite again</button></div>}
         {canEditUserClaim("preferred_username") && <label className="admin-field">
-          <span>Username <em>Optional</em></span>
-          <input autoComplete="username" autoCapitalize="none" maxLength={64} pattern={"[A-Za-z0-9._\\-]+"} value={username} onChange={(event) => setUsername(event.target.value.toLowerCase())} placeholder="Used as preferred_username" />
+          <span>Username <em>{fieldRequirement("preferred_username")}</em></span>
+          <input autoComplete="username" autoCapitalize="none" maxLength={64} pattern={"[A-Za-z0-9._\\-]+"} value={username} onChange={(event) => setUsername(event.target.value.toLowerCase())} placeholder="Used as preferred_username" required={isRequiredUserClaim("preferred_username", requiredUserClaims)} />
           <small>Passkey sign-in never asks for it. Leave blank to keep it private.</small>
         </label>}
         {canEditUserClaim("name") && <label className="admin-field">
-          <span>Name <em>Optional</em></span>
-          <input autoComplete="name" maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="How apps should know you" />
+          <span>Name <em>{fieldRequirement("name")}</em></span>
+          <input autoComplete="name" maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="How apps should know you" required={isRequiredUserClaim("name", requiredUserClaims)} />
           <small>Shared as the OIDC name claim when provided.</small>
         </label>}
         {canEditUserClaim("picture") && <label className="admin-field">
-          <span>Picture URL <em>Optional</em></span>
-          <input type="url" maxLength={2048} value={pictureUrl} onChange={(event) => setPictureUrl(event.target.value)} placeholder="Generated from your Hanko stamp" />
+          <span>Picture URL <em>{fieldRequirement("picture")}</em></span>
+          <input type="url" maxLength={2048} value={pictureUrl} onChange={(event) => setPictureUrl(event.target.value)} placeholder="Generated from your Hanko stamp" required={isRequiredUserClaim("picture", requiredUserClaims)} />
           <small>Leave blank to use a generated image matching your Hanko stamp. A custom HTTPS image URL overrides it.</small>
         </label>}
         {canEditUserClaim("phone_number") && <label className="admin-field">
-          <span>Phone number <em>Optional</em></span>
-          <input type="tel" autoComplete="tel" maxLength={64} value={phoneNumber} onChange={(event) => setPhoneNumber(event.target.value)} placeholder="+1 555 123 4567" />
+          <span>Phone number <em>{fieldRequirement("phone_number")}</em></span>
+          <input type="tel" autoComplete="tel" maxLength={64} value={phoneNumber} onChange={(event) => setPhoneNumber(event.target.value)} placeholder="+1 555 123 4567" required={isRequiredUserClaim("phone_number", requiredUserClaims)} />
           <small>Shared with apps that request the phone scope. Hanko does not verify phone ownership.</small>
         </label>}
         {canEditUserClaim("address") && canEditUserClaim("street_address") && <label className="admin-field">
-          <span>Street address <em>Optional</em></span>
-          <textarea autoComplete="street-address" maxLength={500} rows={2} value={address.street_address} onChange={(event) => setAddress((current) => ({ ...current, street_address: event.target.value }))} placeholder="Street, apartment or floor" />
+          <span>Street address <em>{isRequiredUserClaim("address", requiredUserClaims) ? "Address required" : fieldRequirement("street_address")}</em></span>
+          <textarea autoComplete="street-address" maxLength={500} rows={2} value={address.street_address} onChange={(event) => setAddress((current) => ({ ...current, street_address: event.target.value }))} placeholder="Street, apartment or floor" required={isRequiredUserClaim("street_address", requiredUserClaims)} />
           <small>Apartment and floor details can go here. Shared with apps that request the address scope.</small>
         </label>}
-        {canEditUserClaim("address") && canEditUserClaim("locality") && <label className="admin-field"><span>City or locality <em>Optional</em></span><input autoComplete="address-level2" maxLength={500} value={address.locality} onChange={(event) => setAddress((current) => ({ ...current, locality: event.target.value }))} /></label>}
-        {canEditUserClaim("address") && canEditUserClaim("region") && <label className="admin-field"><span>Region or state <em>Optional</em></span><input autoComplete="address-level1" maxLength={500} value={address.region} onChange={(event) => setAddress((current) => ({ ...current, region: event.target.value }))} /></label>}
-        {canEditUserClaim("address") && canEditUserClaim("postal_code") && <label className="admin-field"><span>Postal code <em>Optional</em></span><input autoComplete="postal-code" maxLength={500} value={address.postal_code} onChange={(event) => setAddress((current) => ({ ...current, postal_code: event.target.value }))} /></label>}
-        {canEditUserClaim("address") && canEditUserClaim("country") && <label className="admin-field"><span>Country <em>Optional</em></span><input autoComplete="country-name" maxLength={500} value={address.country} onChange={(event) => setAddress((current) => ({ ...current, country: event.target.value }))} /></label>}
-        {canEditUserClaim("profile") && <label className="admin-field"><span>Profile URL <em>Optional</em></span><input type="url" maxLength={2048} value={profileClaims.profile} onChange={(event) => setProfileClaims((claims) => ({ ...claims, profile: event.target.value }))} placeholder="https://example.com/about" /></label>}
-        {canEditUserClaim("given_name") && <label className="admin-field"><span>Given name <em>Optional</em></span><input autoComplete="given-name" maxLength={120} value={profileClaims.given_name} onChange={(event) => setProfileClaims((claims) => ({ ...claims, given_name: event.target.value }))} /></label>}
-        {canEditUserClaim("family_name") && <label className="admin-field"><span>Family name <em>Optional</em></span><input autoComplete="family-name" maxLength={120} value={profileClaims.family_name} onChange={(event) => setProfileClaims((claims) => ({ ...claims, family_name: event.target.value }))} /></label>}
-        {canEditUserClaim("nickname") && <label className="admin-field"><span>Nickname <em>Optional</em></span><input autoComplete="nickname" maxLength={120} value={profileClaims.nickname} onChange={(event) => setProfileClaims((claims) => ({ ...claims, nickname: event.target.value }))} /></label>}
-        {canEditUserClaim("website") && <label className="admin-field"><span>Website <em>Optional</em></span><input type="url" maxLength={2048} value={profileClaims.website} onChange={(event) => setProfileClaims((claims) => ({ ...claims, website: event.target.value }))} placeholder="https://example.com" /></label>}
-        {canEditUserClaim("locale") && <label className="admin-field"><span>Locale <em>Optional</em></span><input maxLength={128} value={profileClaims.locale} onChange={(event) => setProfileClaims((claims) => ({ ...claims, locale: event.target.value }))} placeholder="en-US" /></label>}
-        {canEditUserClaim("zoneinfo") && <label className="admin-field"><span>Time zone <em>Optional</em></span><input maxLength={128} value={profileClaims.zoneinfo} onChange={(event) => setProfileClaims((claims) => ({ ...claims, zoneinfo: event.target.value }))} placeholder="Europe/Stockholm" /></label>}
+        {canEditUserClaim("locality") && canEditUserClaim("address") && <label className="admin-field"><span>City or locality <em>{fieldRequirement("locality")}</em></span><input autoComplete="address-level2" maxLength={500} value={address.locality} onChange={(event) => setAddress((current) => ({ ...current, locality: event.target.value }))} required={isRequiredUserClaim("locality", requiredUserClaims)} /></label>}
+        {canEditUserClaim("region") && canEditUserClaim("address") && <label className="admin-field"><span>Region or state <em>{fieldRequirement("region")}</em></span><input autoComplete="address-level1" maxLength={500} value={address.region} onChange={(event) => setAddress((current) => ({ ...current, region: event.target.value }))} required={isRequiredUserClaim("region", requiredUserClaims)} /></label>}
+        {canEditUserClaim("postal_code") && canEditUserClaim("address") && <label className="admin-field"><span>Postal code <em>{fieldRequirement("postal_code")}</em></span><input autoComplete="postal-code" maxLength={500} value={address.postal_code} onChange={(event) => setAddress((current) => ({ ...current, postal_code: event.target.value }))} required={isRequiredUserClaim("postal_code", requiredUserClaims)} /></label>}
+        {canEditUserClaim("country") && canEditUserClaim("address") && <label className="admin-field"><span>Country <em>{fieldRequirement("country")}</em></span><input autoComplete="country-name" maxLength={500} value={address.country} onChange={(event) => setAddress((current) => ({ ...current, country: event.target.value }))} required={isRequiredUserClaim("country", requiredUserClaims)} /></label>}
+        {canEditUserClaim("profile") && <label className="admin-field"><span>Profile URL <em>{fieldRequirement("profile")}</em></span><input type="url" maxLength={2048} value={profileClaims.profile} onChange={(event) => setProfileClaims((claims) => ({ ...claims, profile: event.target.value }))} placeholder="https://example.com/about" required={isRequiredUserClaim("profile", requiredUserClaims)} /></label>}
+        {canEditUserClaim("given_name") && <label className="admin-field"><span>Given name <em>{fieldRequirement("given_name")}</em></span><input autoComplete="given-name" maxLength={120} value={profileClaims.given_name} onChange={(event) => setProfileClaims((claims) => ({ ...claims, given_name: event.target.value }))} required={isRequiredUserClaim("given_name", requiredUserClaims)} /></label>}
+        {canEditUserClaim("family_name") && <label className="admin-field"><span>Family name <em>{fieldRequirement("family_name")}</em></span><input autoComplete="family-name" maxLength={120} value={profileClaims.family_name} onChange={(event) => setProfileClaims((claims) => ({ ...claims, family_name: event.target.value }))} required={isRequiredUserClaim("family_name", requiredUserClaims)} /></label>}
+        {canEditUserClaim("nickname") && <label className="admin-field"><span>Nickname <em>{fieldRequirement("nickname")}</em></span><input autoComplete="nickname" maxLength={120} value={profileClaims.nickname} onChange={(event) => setProfileClaims((claims) => ({ ...claims, nickname: event.target.value }))} required={isRequiredUserClaim("nickname", requiredUserClaims)} /></label>}
+        {canEditUserClaim("website") && <label className="admin-field"><span>Website <em>{fieldRequirement("website")}</em></span><input type="url" maxLength={2048} value={profileClaims.website} onChange={(event) => setProfileClaims((claims) => ({ ...claims, website: event.target.value }))} placeholder="https://example.com" required={isRequiredUserClaim("website", requiredUserClaims)} /></label>}
+        {canEditUserClaim("locale") && <label className="admin-field"><span>Locale <em>{fieldRequirement("locale")}</em></span><input maxLength={128} value={profileClaims.locale} onChange={(event) => setProfileClaims((claims) => ({ ...claims, locale: event.target.value }))} placeholder="en-US" required={isRequiredUserClaim("locale", requiredUserClaims)} /></label>}
+        {canEditUserClaim("zoneinfo") && <label className="admin-field"><span>Time zone <em>{fieldRequirement("zoneinfo")}</em></span><input maxLength={128} value={profileClaims.zoneinfo} onChange={(event) => setProfileClaims((claims) => ({ ...claims, zoneinfo: event.target.value }))} placeholder="Europe/Stockholm" required={isRequiredUserClaim("zoneinfo", requiredUserClaims)} /></label>}
         {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
         <StepActions onBack={isAdminSetup && !setupSession ? () => { setError(""); setStep("bootstrap"); } : undefined} busy={false} disabled={Boolean(invitationToken && !setupSession && invitationStatus !== "valid")} label="Continue" />
       </form>}

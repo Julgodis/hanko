@@ -21,6 +21,7 @@ type Session = {
   oidc_phone?: string | null;
   oidc_address?: { street_address?: string; locality?: string; region?: string; postal_code?: string; country?: string } | null;
   oidc_profile_claims?: OidcProfileClaims | null;
+  required_user_claims?: string[];
 };
 type SetupStatus = { initialized: boolean; bootstrap_enabled: boolean };
 type AuthorizationRequest = {
@@ -194,6 +195,7 @@ function App() {
       initialColor={session?.hanko_color ?? undefined}
       initialSeed={session?.hanko_seed ?? undefined}
       initialProfile={{ username: session?.oidc_username ?? "", displayName: session?.oidc_name ?? "", pictureUrl: session?.oidc_picture ?? "", phoneNumber: session?.oidc_phone ?? "", address: session?.oidc_address ?? undefined, profileClaims: session?.oidc_profile_claims ?? undefined }}
+      requiredUserClaims={session?.required_user_claims ?? []}
       onComplete={completeSetup}
     />;
   }
@@ -205,7 +207,7 @@ function App() {
     if (clientsRoute && !session.is_admin) {
       return <Scene phase="error"><Seal phase="error" /><Copy title="Administrator access required" text="Sign in with an administrator account to manage OIDC clients." /></Scene>;
     }
-    return <ClientAdmin isAdmin={session.is_admin} />;
+    return <ClientAdmin isAdmin={session.is_admin} requiredUserClaims={session.required_user_claims ?? []} />;
   }
 
   if (requestId && request?.requires_fresh_authentication) {
