@@ -29,14 +29,61 @@ type PasskeyStart = {
   publicKey: Parameters<typeof startAuthentication>[0]["optionsJSON"];
 };
 
+type UserFacingError = { title: string; text: string; retry?: boolean };
+
 const GROUP_ACCESS_DENIED_MESSAGE = "Your account is not a member of a group allowed to access this application. Ask an administrator to add your account to an allowed group.";
 
 function isGroupAccessDenied(cause: unknown): boolean {
   return cause instanceof ApiError && cause.code === "access_denied";
 }
 
+function isTemporaryFailure(cause: unknown): boolean {
+  return cause instanceof TypeError
+    || (cause instanceof ApiError && (cause.status >= 500 || cause.code === "temporarily_unavailable"));
+}
+
+function authorizationPageErrorCopy(code: string | null): UserFacingError {
+  switch (code) {
+    case "invalid_client":
+      return { title: "Application not recognized", text: "This sign-in request doesn’t match a registered application. Return to the application and start again." };
+    case "invalid_redirect_uri":
+      return { title: "Callback address not registered", text: "The application’s callback address isn’t registered with Hanko. Contact the application administrator." };
+    case "temporarily_unavailable":
+      return { title: "Hanko is temporarily unavailable", text: "Hanko couldn’t start this sign-in. Return to the application and try again in a moment." };
+    default:
+      return { title: "Sign-in request couldn’t be completed", text: "This request is incomplete or invalid. Return to the application and start again." };
+  }
+}
+
+function loadErrorCopy(cause: unknown, hasAuthorizationRequest: boolean): UserFacingError {
+  if (isGroupAccessDenied(cause)) {
+    return { title: "Access not allowed", text: GROUP_ACCESS_DENIED_MESSAGE };
+  }
+  if (cause instanceof ApiError && cause.code === "invalid_grant" && hasAuthorizationRequest) {
+    return { title: "This sign-in has expired", text: "Return to the application and start again." };
+  }
+  if (isTemporaryFailure(cause)) {
+    return { title: "Hanko is temporarily unavailable", text: "Please try again in a moment.", retry: true };
+  }
+  return hasAuthorizationRequest
+    ? { title: "Sign-in request couldn’t be completed", text: "Return to the application and start again." }
+    : { title: "Hanko is unavailable", text: "Please try again in a moment.", retry: true };
+}
+
+type SignInFailure = "passkey" | "access_denied" | "expired" | "temporarily_unavailable" | "completion";
+
+function signInFailure(cause: unknown, passkeyVerified: boolean, hasAuthorizationRequest: boolean): SignInFailure {
+  if (isGroupAccessDenied(cause)) return "access_denied";
+  if (passkeyVerified && hasAuthorizationRequest && cause instanceof ApiError && cause.code === "invalid_grant") {
+    return "expired";
+  }
+  if (isTemporaryFailure(cause)) return "temporarily_unavailable";
+  return passkeyVerified ? "completion" : "passkey";
+}
+
 function App() {
   const requestId = useMemo(() => new URLSearchParams(window.location.search).get("request_id"), []);
+  const authorizationPageError = useMemo(() => new URLSearchParams(window.location.search).get("hanko_error"), []);
   const enrollmentToken = useMemo(() => new URLSearchParams(window.location.search).get("enroll"), []);
   const clientsRoute = useMemo(() => {
     const routePath = appPath("admin/clients").replace(/\/+$/, "");
@@ -49,12 +96,13 @@ function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [request, setRequest] = useState<AuthorizationRequest | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<{ accessDenied: boolean } | null>(null);
+  const [loading, setLoading] = useState(!authorizationPageError);
+  const [loadError, setLoadError] = useState<UserFacingError | null>(null);
 
   useEffect(() => {
     let active = true;
     async function load() {
+      if (authorizationPageError) return;
       try {
         if (enrollmentToken) {
           const cleanUrl = new URL(window.location.href);
@@ -77,14 +125,14 @@ function App() {
           setRequest(authorizationRequest);
         }
       } catch (cause) {
-        if (active) setLoadError({ accessDenied: isGroupAccessDenied(cause) });
+        if (active) setLoadError(loadErrorCopy(cause, Boolean(requestId)));
       } finally {
         if (active) setLoading(false);
       }
     }
     void load();
     return () => { active = false; };
-  }, [enrollmentToken, requestId]);
+  }, [authorizationPageError, enrollmentToken, requestId]);
 
   async function refreshSession() {
     const [identity, authorizationRequest] = await Promise.all([
@@ -116,15 +164,19 @@ function App() {
       : current);
   }
 
+  if (authorizationPageError) {
+    const pageError = authorizationPageErrorCopy(authorizationPageError);
+    return <Scene phase="error"><Seal phase="error" /><Copy title={pageError.title} text={pageError.text} /></Scene>;
+  }
+
   if (loading) {
     return <Scene phase="idle"><Seal phase="idle" /><Copy title="Hanko" text="Preparing your sign-in…" /></Scene>;
   }
 
   if (loadError) {
-    return <Scene phase="error"><Seal phase="error" /><Copy
-      title={loadError.accessDenied ? "Access not allowed" : requestId ? "This sign-in has expired" : "Hanko is unavailable"}
-      text={loadError.accessDenied ? GROUP_ACCESS_DENIED_MESSAGE : requestId ? "Return to the application and start again." : "Please try again in a moment."}
-    /></Scene>;
+    return <Scene phase="error"><Seal phase="error" /><Copy title={loadError.title} text={loadError.text} />
+      {loadError.retry && <button className="primary-action" onClick={() => window.location.reload()}>Try again</button>}
+    </Scene>;
   }
 
   if (setupStatus && (!setupStatus.initialized || session?.setup_only || enrollmentToken)) {
@@ -193,11 +245,12 @@ function SignIn({
   onAuthenticated: () => Promise<void>;
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
-  const [accessDenied, setAccessDenied] = useState(false);
+  const [failure, setFailure] = useState<SignInFailure | null>(null);
 
   async function signIn() {
-    setAccessDenied(false);
+    setFailure(null);
     setPhase("preparing");
+    let passkeyVerified = false;
     try {
       const start = await api<PasskeyStart>("/api/passkeys/login/options", {
         method: "POST",
@@ -210,18 +263,19 @@ function SignIn({
         method: "POST",
         body: json({ ceremony_id: start.ceremony_id, credential }),
       });
+      passkeyVerified = true;
       setPhase("success");
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       await new Promise(resolve => window.setTimeout(resolve, reducedMotion ? 120 : 820));
       await onAuthenticated();
     } catch (cause) {
-      if (isGroupAccessDenied(cause)) setAccessDenied(true);
+      setFailure(signInFailure(cause, passkeyVerified, Boolean(requestId)));
       setPhase("error");
     }
   }
 
   function retry() {
-    setAccessDenied(false);
+    setFailure(null);
     setPhase("idle");
   }
 
@@ -239,8 +293,22 @@ function SignIn({
     title = "Welcome back";
     text = `You’re signed in to ${clientName}.`;
   } else if (phase === "error") {
-    title = accessDenied ? "Access not allowed" : "Passkey wasn’t accepted";
-    text = accessDenied ? GROUP_ACCESS_DENIED_MESSAGE : "Please try again.";
+    if (failure === "access_denied") {
+      title = "Access not allowed";
+      text = GROUP_ACCESS_DENIED_MESSAGE;
+    } else if (failure === "expired") {
+      title = "This sign-in has expired";
+      text = "Your passkey was accepted, but this request is no longer valid. Return to the application and start again.";
+    } else if (failure === "temporarily_unavailable") {
+      title = "Hanko is temporarily unavailable";
+      text = "Your sign-in couldn’t be completed. Please try again in a moment.";
+    } else if (failure === "completion") {
+      title = "Sign-in couldn’t be completed";
+      text = "Your passkey was accepted, but Hanko couldn’t finish loading this sign-in request. Please try again.";
+    } else {
+      title = "Passkey wasn’t accepted";
+      text = "Please try again.";
+    }
   }
 
   return <Scene phase={phase}>
@@ -251,7 +319,7 @@ function SignIn({
       <span>{freshAuthentication ? "Confirm with passkey" : "Sign in with passkey"}</span>
     </button>}
     {phase === "success" && <span className="success-check" aria-label="Signed in"><Check aria-hidden="true" /></span>}
-    {phase === "error" && !accessDenied && <button className="primary-action" onClick={retry}>
+    {phase === "error" && failure !== "access_denied" && failure !== "expired" && <button className="primary-action" onClick={retry}>
       <span>Try again</span><ArrowRight aria-hidden="true" className="size-4" />
     </button>}
     {requestId && phase === "idle" && <p className="device-note"><LockKeyhole aria-hidden="true" /> Your passkey stays on your device.</p>}
@@ -292,15 +360,21 @@ function Consent({ request, requestId, hankoColor, hankoSeed, onFreshAuthenticat
       ]);
       window.location.assign(result.redirect_to);
     } catch (cause) {
-      if (cause instanceof Error && cause.message === "a fresh user authentication is required") {
+      if (cause instanceof ApiError && cause.code === "login_required") {
         setDecision("idle");
         onFreshAuthenticationRequired();
         return;
       }
       setDecision("idle");
-      setError(isGroupAccessDenied(cause)
-        ? GROUP_ACCESS_DENIED_MESSAGE
-        : "This request could not be completed. Please return to the application and try again.");
+      if (isGroupAccessDenied(cause)) {
+        setError(GROUP_ACCESS_DENIED_MESSAGE);
+      } else if (cause instanceof ApiError && cause.code === "invalid_grant") {
+        setError("This sign-in has expired. Return to the application and start again.");
+      } else if (isTemporaryFailure(cause)) {
+        setError("Hanko is temporarily unavailable. Please try again in a moment.");
+      } else {
+        setError("This request could not be completed. Please return to the application and try again.");
+      }
     }
   }
 
