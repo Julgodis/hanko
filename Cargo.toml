@@ -16,7 +16,7 @@ jsonwebtoken = { version = "11.1.0", features = ["use_pem", "rust_crypto"] }
 p256 = { version = "0.14.0", features = ["pem", "pkcs8"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite", "migrate", "macros", "uuid", "chrono", "json"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
