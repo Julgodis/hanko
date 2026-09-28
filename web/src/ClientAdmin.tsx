@@ -221,6 +221,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [created, setCreated] = useState<CreatedClient | null>(null);
   const [copied, setCopied] = useState("");
   const [addingPasskey, setAddingPasskey] = useState(false);
+  const [passkeyAddStage, setPasskeyAddStage] = useState<"confirming" | "creating">("confirming");
   const [passkeyError, setPasskeyError] = useState("");
   const [passkeyMessage, setPasskeyMessage] = useState("");
   const [passkeys, setPasskeys] = useState<AccountPasskey[]>([]);
@@ -852,6 +853,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
 
   async function addPasskey() {
     setAddingPasskey(true);
+    setPasskeyAddStage("confirming");
     setPasskeyError("");
     setPasskeyMessage("");
     try {
@@ -864,6 +866,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
         method: "POST",
         body: json({ ceremony_id: confirmation.ceremony_id, credential: assertion }),
       });
+      setPasskeyAddStage("creating");
       const start = await api<RegistrationStart>("/api/passkeys/register/options", {
         method: "POST",
         body: json({ approval_token }),
@@ -880,6 +883,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       setPasskeyError(errorMessage(cause, "add passkey"));
     } finally {
       setAddingPasskey(false);
+      setPasskeyAddStage("confirming");
     }
   }
 
@@ -1520,7 +1524,8 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
 
           {activeTab === "passkeys" && <section className="account-passkeys">
             <section className="passkey-list" aria-labelledby="passkey-list-title">
-              <div className="client-list-heading"><h2 id="passkey-list-title">Registered devices <span>{passkeys.length}</span></h2><button className="client-add-action" type="button" onClick={() => void addPasskey()} disabled={addingPasskey}><Plus aria-hidden="true" /> {addingPasskey ? "Follow your device prompt…" : "Add passkey"}</button></div>
+              <div className="client-list-heading"><h2 id="passkey-list-title">Registered devices <span>{passkeys.length}</span></h2><button className="client-add-action" type="button" onClick={() => void addPasskey()} disabled={addingPasskey}><Plus aria-hidden="true" /> {addingPasskey ? passkeyAddStage === "confirming" ? "Confirm with an existing passkey…" : "Create a new passkey…" : "Add passkey"}</button></div>
+              <p className="admin-hint">Adding a passkey takes two prompts: first, use an existing passkey to confirm it’s you. Then register the new passkey when your device prompts again.</p>
               {accountName && <p className="admin-hint">Sign-in account name: <PrivateValue>{accountName}</PrivateValue>. Save this name in case an older passkey needs account-specific sign-in.</p>}
               {passkeys.length < 2 && !passkeysLoading && <p className="admin-hint">Add a second passkey stored independently, then test signing in with it in a separate browser session.</p>}
               {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
