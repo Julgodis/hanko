@@ -6,6 +6,7 @@ import FirstRun from "./FirstRun";
 import { HankoSeal, type HankoState } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
 import { ApiError, api, appPath, json } from "./lib/utils";
+import type { OidcProfileClaims } from "./lib/userClaims";
 
 type Phase = "idle" | "preparing" | "authenticating" | "success" | "error";
 type Session = {
@@ -19,6 +20,7 @@ type Session = {
   oidc_picture?: string | null;
   oidc_phone?: string | null;
   oidc_address?: { street_address?: string; locality?: string; region?: string; postal_code?: string; country?: string } | null;
+  oidc_profile_claims?: OidcProfileClaims | null;
 };
 type SetupStatus = { initialized: boolean; bootstrap_enabled: boolean };
 type AuthorizationRequest = {
@@ -191,7 +193,7 @@ function App() {
       invitationToken={enrollmentToken}
       initialColor={session?.hanko_color ?? undefined}
       initialSeed={session?.hanko_seed ?? undefined}
-      initialProfile={{ username: session?.oidc_username ?? "", displayName: session?.oidc_name ?? "", pictureUrl: session?.oidc_picture ?? "", phoneNumber: session?.oidc_phone ?? "", address: session?.oidc_address ?? undefined }}
+      initialProfile={{ username: session?.oidc_username ?? "", displayName: session?.oidc_name ?? "", pictureUrl: session?.oidc_picture ?? "", phoneNumber: session?.oidc_phone ?? "", address: session?.oidc_address ?? undefined, profileClaims: session?.oidc_profile_claims ?? undefined }}
       onComplete={completeSetup}
     />;
   }
@@ -443,9 +445,9 @@ function valuesForScope(scope: string, claims: Record<string, unknown> | null = 
     return [["Address", "No postal address is set"]];
   }
   const keys = scope === "profile"
-    ? [["name", "Name"], ["preferred_username", "Username"], ["picture", "Picture"]] as const
+    ? [["name", "Name"], ["preferred_username", "Username"], ["profile", "Profile URL"], ["given_name", "Given name"], ["family_name", "Family name"], ["nickname", "Nickname"], ["website", "Website"], ["locale", "Locale"], ["zoneinfo", "Time zone"], ["picture", "Picture"]] as const
       : scope === "email"
-        ? [["email", "Email"]] as const
+        ? [["email", "Email"], ["email_verified", "Email verified"]] as const
         : scope === "phone"
           ? [["phone_number", "Phone number"]] as const
       : scope === "picture"
@@ -456,7 +458,7 @@ function valuesForScope(scope: string, claims: Record<string, unknown> | null = 
   const values = keys.flatMap(([key, label]) => {
     const value = claimData[key];
     if (value === undefined || value === null || value === "") return [];
-    const display = Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : String(value);
+    const display = typeof value === "boolean" ? (value ? "Yes" : "No") : Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : String(value);
     return display ? [[label, display] as [string, string]] : [];
   });
   if (values.length > 0) return values;
@@ -470,7 +472,7 @@ function valuesForScope(scope: string, claims: Record<string, unknown> | null = 
 
 function customClaimValues(claims: Record<string, unknown> | null = {}): [string, string][] {
   const claimData = claims ?? {};
-  const standardClaims = new Set(["name", "preferred_username", "email", "email_verified", "picture", "groups", "address", "phone_number", "phone_number_verified"]);
+  const standardClaims = new Set(["name", "preferred_username", "profile", "given_name", "family_name", "nickname", "website", "locale", "zoneinfo", "email", "email_verified", "picture", "groups", "address", "phone_number", "phone_number_verified"]);
   return Object.entries(claimData).flatMap(([label, value]) => {
     if (standardClaims.has(label) || value === undefined || value === null || value === "") return [];
     const display = Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : String(value);

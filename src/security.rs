@@ -236,6 +236,7 @@ pub struct SessionIdentity {
     pub oidc_picture: Option<String>,
     pub oidc_phone: Option<String>,
     pub oidc_address: Option<serde_json::Value>,
+    pub oidc_profile_claims: serde_json::Value,
     pub hanko_color: String,
     pub hanko_seed: String,
     pub is_admin: bool,
@@ -257,6 +258,51 @@ pub fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+pub(crate) fn oidc_profile_claims(attributes: &serde_json::Value) -> serde_json::Value {
+    let mut claims = serde_json::Map::new();
+    for claim in [
+        "profile",
+        "given_name",
+        "family_name",
+        "nickname",
+        "website",
+        "locale",
+        "zoneinfo",
+    ] {
+        if let Some(value) = attributes
+            .get(claim)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            claims.insert(claim.to_owned(), serde_json::Value::String(value.to_owned()));
+        }
+    }
+    if let Some(app_roles) = attributes
+        .get("app_roles")
+        .and_then(serde_json::Value::as_object)
+    {
+        let app_roles: serde_json::Map<String, serde_json::Value> = app_roles
+            .iter()
+            .filter_map(|(client_id, roles)| {
+                let roles: Vec<_> = roles
+                    .as_array()?
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|role| !role.is_empty())
+                    .map(|role| serde_json::Value::String(role.to_owned()))
+                    .collect();
+                (!roles.is_empty()).then(|| {
+                    (client_id.clone(), serde_json::Value::Array(roles))
+                })
+            })
+            .collect();
+        if !app_roles.is_empty() {
+            claims.insert("app_roles".to_owned(), serde_json::Value::Object(app_roles));
+        }
+    }
+    serde_json::Value::Object(claims)
 }
 
 pub fn unix_now_millis() -> i64 {
@@ -471,6 +517,10 @@ pub async fn load_identity(
                     .is_some_and(|address| address.is_empty())
         })
         .cloned();
+    let oidc_profile_claims = attributes
+        .as_ref()
+        .map(oidc_profile_claims)
+        .unwrap_or_else(|| serde_json::json!({}));
     Ok(Some(SessionIdentity {
         username: row.try_get("username")?,
         display_name: row.try_get("display_name")?,
@@ -479,6 +529,7 @@ pub async fn load_identity(
         oidc_picture,
         oidc_phone,
         oidc_address,
+        oidc_profile_claims,
         hanko_color: row.try_get("hanko_color")?,
         hanko_seed: row.try_get("hanko_seed")?,
         is_admin: session.is_admin,
