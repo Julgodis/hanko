@@ -701,6 +701,21 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 
 .client-form { display: grid; gap: 23px; }
 
+.client-logo-link {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 14px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper-raised), transparent 30%);
+}
+.client-logo-link > img { width: 48px; height: 48px; flex: 0 0 auto; border: 1px solid var(--rule); border-radius: 7px; background: var(--paper-raised); }
+.client-logo-link-content { display: grid; flex: 1; min-width: 0; gap: 10px; }
+.client-logo-link-content > div:first-child { display: grid; gap: 3px; }
+.client-logo-link-content strong { color: var(--ink); font-size: 15px; font-weight: 600; }
+.client-logo-link-content p { margin: 0; color: var(--ink-muted); font-size: 13px; line-height: 1.45; }
+
 .admin-field { display: grid; min-width: 0; gap: 8px; }
 .admin-field > span,
 .admin-options legend { color: var(--ink); font-size: 17px; font-weight: 570; }
