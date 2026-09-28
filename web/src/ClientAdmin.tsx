@@ -1,4 +1,4 @@
-import { Check, Copy, Fingerprint, KeyRound, Mail, Pencil, Plus, Shield, ShieldCheck, Users, UserRound, Stamp, Trash2 } from "lucide-react";
+import { Check, Copy, Fingerprint, KeyRound, LogOut, Mail, Pencil, Plus, Shield, ShieldCheck, Users, UserRound, Stamp, Trash2 } from "lucide-react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
@@ -211,6 +211,8 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [claims, setClaims] = useState<ClaimDraft[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState("");
   const clientFormMode = previewScreen === "client-form" ? "create" : route.clientFormMode;
   const [credentialsUpdated, setCredentialsUpdated] = useState(false);
   const userFormOpen = previewScreen === "invite" || previewScreen === "invite-ready" || route.userFormOpen;
@@ -1051,6 +1053,18 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     navigate(TAB_PATHS[tab]);
   }
 
+  async function logout() {
+    setLoggingOut(true);
+    setLogoutError("");
+    try {
+      await api("/logout", { method: "POST", body: json({}) });
+      window.location.assign(appPath());
+    } catch (cause) {
+      setLogoutError(errorMessage(cause, "log out"));
+      setLoggingOut(false);
+    }
+  }
+
   const tabs: { id: Tab; label: string; icon: ReactNode }[] = [
     ...(isAdmin ? [
       { id: "clients" as const, label: "Clients", icon: <KeyRound aria-hidden="true" /> },
@@ -1198,6 +1212,12 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
         <div className="admin-nav-group admin-nav-account">
           <p>Account</p>
           {tabs.filter((tab) => tab.id === "hanko" || tab.id === "passkeys" || tab.id === "consents").map((tab) => <NavLink key={tab.id} to={TAB_PATHS[tab.id]} className="admin-nav-tab" onClick={resetTabState}>{tab.icon}<span>{tab.label}</span></NavLink>)}
+        </div>
+        <div className="admin-nav-actions">
+          <button className="admin-nav-tab admin-nav-logout" type="button" onClick={() => void logout()} disabled={loggingOut}>
+            <LogOut aria-hidden="true" /><span>{loggingOut ? "Logging out…" : "Log out"}</span>
+          </button>
+          {logoutError && <p className="admin-message admin-message-error" role="alert">{logoutError}</p>}
         </div>
       </nav>
 
