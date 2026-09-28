@@ -96,7 +96,7 @@ function App() {
   const navigate = useNavigate();
   const requestId = useMemo(() => new URLSearchParams(window.location.search).get("request_id"), []);
   const authorizationPageError = useMemo(() => new URLSearchParams(window.location.search).get("hanko_error"), []);
-  const enrollmentToken = useMemo(() => new URLSearchParams(window.location.search).get("enroll"), []);
+  const [enrollmentToken, setEnrollmentToken] = useState(() => new URLSearchParams(window.location.search).get("enroll"));
   const clientsRoute = pathname === "/admin/clients" || pathname.startsWith("/admin/clients/");
   const accountRoute = pathname === "/account" || pathname.startsWith("/account/");
   const homeRoute = pathname === "/";
@@ -108,7 +108,7 @@ function App() {
 
   useEffect(() => {
     if (homeRoute && session?.authenticated && !session.setup_only && !requestId) {
-      navigate("/account/profile", { replace: true });
+      navigate("/account", { replace: true });
     }
   }, [homeRoute, navigate, requestId, session]);
 
@@ -193,6 +193,7 @@ function App() {
     ]);
     setSession(identity);
     setSetupStatus(setup);
+    setEnrollmentToken(null);
     if (requestId) setRequest(authorizationRequest);
   }
 
