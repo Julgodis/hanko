@@ -9,7 +9,7 @@ description = "A small self-hosted passkey-first OIDC identity provider"
 [dependencies]
 axum = { version = "0.8.4", features = ["json", "query", "form"] }
 base64 = "0.22"
-chacha20poly1305 = "0.10.1"
+chacha20poly1305 = "0.11.0"
 dotenvy = "0.15"
 getrandom = { version = "0.4", features = ["sys_rng"] }
 jsonwebtoken = { version = "9.3.1", features = ["use_pem"] }
