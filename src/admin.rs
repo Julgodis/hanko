@@ -154,6 +154,9 @@ impl AdminError {
     fn group_not_found() -> Self {
         Self(StatusCode::NOT_FOUND, "group not found")
     }
+    fn invitation_not_found() -> Self {
+        Self(StatusCode::NOT_FOUND, "invitation not found")
+    }
     fn internal() -> Self {
         Self(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
     }
@@ -178,6 +181,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/admin/invitations",
             get(list_invitations).post(create_invitation),
+        )
+        .route(
+            "/api/admin/invitations/{id}",
+            axum::routing::delete(delete_invitation),
         )
         .route(
             "/api/admin/invitations/{id}/revoke",
@@ -451,6 +458,23 @@ async fn revoke_invitation(
         return Err(AdminError::conflict(
             "invitation is already revoked or unavailable",
         ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AdminError> {
+    let _admin = require_admin(&state, &headers, true).await?;
+    let result = sqlx::query("DELETE FROM invitation_links WHERE id = ?")
+        .bind(id)
+        .execute(&state.database.pool)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    if result.rows_affected() == 0 {
+        return Err(AdminError::invitation_not_found());
     }
     Ok(StatusCode::NO_CONTENT)
 }

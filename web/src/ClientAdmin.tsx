@@ -148,9 +148,9 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [invitationLabel, setInvitationLabel] = useState("");
   const [invitationEmail, setInvitationEmail] = useState("");
-  const [invitationMaxUses, setInvitationMaxUses] = useState("10");
-  const [invitationExpiry, setInvitationExpiry] = useState("7");
-  const [invitationExpiryUnit, setInvitationExpiryUnit] = useState<ExpiryUnit>("days");
+  const [invitationMaxUses, setInvitationMaxUses] = useState("1");
+  const [invitationExpiry, setInvitationExpiry] = useState("15");
+  const [invitationExpiryUnit, setInvitationExpiryUnit] = useState<ExpiryUnit>("minutes");
   const [userGroups, setUserGroups] = useState<string[]>([]);
   const [createdInvitation, setCreatedInvitation] = useState<CreatedInvitation | null>(previewScreen === "invite-ready" ? {
     id: "inv_preview_ready",
@@ -327,9 +327,9 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   function openCreateUser() {
     setInvitationLabel("");
     setInvitationEmail("");
-    setInvitationMaxUses("10");
-    setInvitationExpiry("7");
-    setInvitationExpiryUnit("days");
+    setInvitationMaxUses("1");
+    setInvitationExpiry("15");
+    setInvitationExpiryUnit("minutes");
     setUserGroups([]);
     setCreatedInvitation(null);
     setAdminActionMessage("");
@@ -530,9 +530,9 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       setCreatedInvitation({ ...invitation, label, email });
       setInvitationLabel("");
       setInvitationEmail("");
-      setInvitationMaxUses("10");
-      setInvitationExpiry("7");
-      setInvitationExpiryUnit("days");
+      setInvitationMaxUses("1");
+      setInvitationExpiry("15");
+      setInvitationExpiryUnit("minutes");
       setUserGroups([]);
       setInvitations(await api<Invitation[]>("/api/admin/invitations"));
     } catch (createError) {
@@ -542,14 +542,16 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     }
   }
 
-  async function revokeInvitation(invitationId: string) {
+  async function removeInvitation(invitation: Invitation) {
+    const confirmed = window.confirm("Remove this invite? This permanently deletes the invite link and makes it unusable.");
+    if (!confirmed) return;
     setAdminActionBusy(true);
     setAdminActionMessage("");
     try {
-      await api(`/api/admin/invitations/${encodeURIComponent(invitationId)}/revoke`, { method: "POST" });
+      await api(`/api/admin/invitations/${encodeURIComponent(invitation.id)}`, { method: "DELETE" });
       setInvitations(await api<Invitation[]>("/api/admin/invitations"));
-    } catch (revokeError) {
-      setAdminActionMessage(errorMessage(revokeError));
+    } catch (removeError) {
+      setAdminActionMessage(errorMessage(removeError));
     } finally {
       setAdminActionBusy(false);
     }
@@ -1000,7 +1002,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
                     <td><PrivateValue>{invitation.use_count} of {invitation.max_uses}</PrivateValue></td>
                     <td><PrivateValue>{new Date(invitation.expires_at * 1000).toLocaleDateString()}</PrivateValue></td>
                     <td><span className={`client-status${status === "Active" ? "" : " disabled"}`}>{status}</span></td>
-                    <td>{status === "Active" ? <button className="invitation-revoke" type="button" onClick={() => revokeInvitation(invitation.id)} disabled={adminActionBusy}>Revoke</button> : <span className="table-muted">—</span>}</td>
+                    <td><button className="invitation-remove" type="button" onClick={() => removeInvitation(invitation)} disabled={adminActionBusy}>Remove</button></td>
                   </tr>;
                 })}</tbody>
               </table></div>}
@@ -1010,10 +1012,10 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           {activeTab === "users" && isAdmin && userFormOpen && <>
       {createdInvitation ? <section className="created-client" role="status"><div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Invite link ready</h2><p>Anyone with this link can join until it expires or reaches its user limit.</p></div></div><Credential label={<>Invite link · <PrivateValue>{createdInvitation.label}</PrivateValue></>} value={createdInvitation.enrollment_url} copied={copied === "invitation"} onCopy={() => copyValue("invitation", createdInvitation.enrollment_url)} />{createdInvitation.email && <a className="secondary-action invitation-email-action" href={invitationEmailHref(createdInvitation)}><Mail aria-hidden="true" />Email this invite</a>}<p className="created-footnote">Expires {new Date(createdInvitation.expires_at * 1000).toLocaleString()}. The link is shown only now, so copy it before leaving this page.</p><button className="client-list-action create-another-invite" type="button" onClick={openCreateUser}><Plus aria-hidden="true" /> Create another invite</button></section> : <form className="client-form admin-create-form user-create-page" onSubmit={createInvitation}>
               <label className="admin-field"><span>Admin-only user label</span><input autoComplete="off" maxLength={80} value={invitationLabel} onChange={(event) => setInvitationLabel(event.target.value)} placeholder="Community event" required /><small>This label appears only in the administrator’s user list.</small></label>
-              <label className="admin-field"><span>Email recipient <em>Optional</em></span><input type="email" autoComplete="email" maxLength={320} value={invitationEmail} onChange={(event) => { setInvitationEmail(event.target.value); if (event.target.value.trim()) setInvitationMaxUses("1"); else setInvitationMaxUses("10"); }} placeholder="person@example.com" /><small>Add an address to make this a one-use email invitation. You can open a prefilled email after creating it.</small></label>
+              <label className="admin-field"><span>Email recipient <em>Optional</em></span><input type="email" autoComplete="email" maxLength={320} value={invitationEmail} onChange={(event) => { setInvitationEmail(event.target.value); setInvitationMaxUses("1"); }} placeholder="person@example.com" /><small>Add an address to make this a one-use email invitation. You can open a prefilled email after creating it.</small></label>
               <div className="invitation-settings">
                 <label className="admin-field"><span>User limit</span><input type="number" min={1} max={500} value={invitationMaxUses} onChange={(event) => setInvitationMaxUses(event.target.value)} disabled={Boolean(invitationEmail.trim())} required /><small>{invitationEmail.trim() ? "Email invitations are limited to one user." : "How many accounts can use this link?"}</small></label>
-                <div className="invitation-expiry-fields"><label className="admin-field"><span>Link expires in</span><input type="number" min={1} max={Math.floor((10 * 365 * 24 * 60 * 60) / EXPIRY_UNIT_SECONDS[invitationExpiryUnit])} value={invitationExpiry} onChange={(event) => setInvitationExpiry(event.target.value)} required /></label><label className="admin-field"><span>Unit</span><select value={invitationExpiryUnit} onChange={(event) => setInvitationExpiryUnit(event.target.value as ExpiryUnit)}><option value="seconds">Seconds</option><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select><small>Up to 10 years.</small></label></div>
+                <div className="invitation-expiry-setting"><div className="invitation-expiry-fields"><label className="admin-field"><span>Link expires in</span><input type="number" min={1} max={Math.floor((10 * 365 * 24 * 60 * 60) / EXPIRY_UNIT_SECONDS[invitationExpiryUnit])} value={invitationExpiry} onChange={(event) => setInvitationExpiry(event.target.value)} required /></label><label className="admin-field"><span>Unit</span><select value={invitationExpiryUnit} onChange={(event) => setInvitationExpiryUnit(event.target.value as ExpiryUnit)}><option value="seconds">Seconds</option><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select></label></div><small>Up to 10 years.</small></div>
               </div>
               {groups.length > 0 && <fieldset className="admin-options"><legend>Groups <em>Optional</em></legend><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check" key={group.id}><input type="checkbox" checked={userGroups.includes(group.name)} onChange={() => setUserGroups((current) => current.includes(group.name) ? current.filter((name) => name !== group.name) : [...current, group.name])} /><span><strong><PrivateValue>{group.display_name}</PrivateValue></strong></span></label>)}</div></fieldset>}
               {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
