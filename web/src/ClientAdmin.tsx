@@ -89,7 +89,7 @@ function invitationStatus(invitation: Invitation) {
   return "Active";
 }
 
-export default function ClientAdmin({ isAdmin = true, accountName = "", requiredUserClaims = [] }: { isAdmin?: boolean; accountName?: string; requiredUserClaims?: string[] }) {
+export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = "", requiredUserClaims = [] }: { isAdmin?: boolean; defaultTab?: Tab; accountName?: string; requiredUserClaims?: string[] }) {
   const canEditUserClaim = (claim: string) => canEditConfiguredUserClaim(claim, requiredUserClaims);
   const fieldRequirement = (claim: string) => isRequiredUserClaim(claim, requiredUserClaims) ? "Required" : "Optional";
   const previewScreen = import.meta.env.DEV && new URLSearchParams(window.location.search).get("ui-preview") === "1"
@@ -102,7 +102,7 @@ export default function ClientAdmin({ isAdmin = true, accountName = "", required
     if (previewScreen === "passkeys") return "passkeys";
     if (previewScreen === "consents") return "consents";
     if (previewScreen === "hanko") return "hanko";
-    return isAdmin ? "clients" : "hanko";
+    return defaultTab ?? (isAdmin ? "clients" : "hanko");
   };
   const [activeTab, setActiveTab] = useState<Tab>(previewTab);
   const [clients, setClients] = useState<Client[]>([]);
