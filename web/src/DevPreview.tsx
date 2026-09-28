@@ -208,6 +208,19 @@ function installPreviewApi() {
       previewGroups.push(createdGroup);
       return jsonResponse(createdGroup);
     }
+    if (url.pathname.startsWith("/api/admin/groups/") && method === "DELETE") {
+      const groupId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
+      const group = previewGroups.find((item) => item.id === groupId);
+      if (!group) return jsonResponse({ error: "group not found" }, 404);
+      if (previewClients.some((client) => client.allowed_groups.includes(group.name))) {
+        return jsonResponse({ error: "group is assigned to a client; remove it from client access policies first" }, 409);
+      }
+      previewGroups = previewGroups.filter((item) => item.id !== groupId);
+      const initialGroupIndex = groups.findIndex((item) => item.id === groupId);
+      if (initialGroupIndex >= 0) groups.splice(initialGroupIndex, 1);
+      for (const user of users) user.groups = user.groups.filter((name) => name !== group.name);
+      return jsonResponse({});
+    }
     if (url.pathname.startsWith("/api/admin/groups/") && method === "PUT") {
       const groupId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
       const groupIndex = previewGroups.findIndex((group) => group.id === groupId);
