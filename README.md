@@ -1,6 +1,10 @@
-# Hanko
+<p align="center">
+  <img src="web/public/hanko.svg" alt="Hanko logo" width="128">
+</p>
 
-### A personal, passkey-first OIDC identity provider
+<h1 align="center">Hanko</h1>
+
+<p align="center">A personal, passkey-first OIDC identity provider</p>
 
 Hanko is a self-hosted identity provider written in Rust, with a React admin and sign-in UI. It uses WebAuthn passkeys and supports OpenID Connect Authorization Code flow with PKCE. It is licensed under AGPL-3.0-only; see [LICENSE](LICENSE).
 
