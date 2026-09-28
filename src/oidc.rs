@@ -1165,6 +1165,7 @@ async fn issue_tokens(
     let profile_claims = crate::security::oidc_profile_claims(&attributes);
     let groups = user_groups(state, user_id).await?;
     let group_custom_claims = group_custom_claims(state, user_id, scopes).await?;
+    let user_custom_claims = user_custom_claims(state, user_id, scopes).await?;
     let custom_claims = custom_claims(state, client_id, &attributes, scopes).await?;
 
     let scope_string = scopes.join(" ");
@@ -1195,6 +1196,9 @@ async fn issue_tokens(
         &groups,
     );
     for (claim, value) in &group_custom_claims {
+        access_claims.insert(claim.clone(), value.clone());
+    }
+    for (claim, value) in &user_custom_claims {
         access_claims.insert(claim.clone(), value.clone());
     }
     for (claim, value) in &custom_claims {
@@ -1238,6 +1242,9 @@ async fn issue_tokens(
         &groups,
     );
     for (claim, value) in group_custom_claims {
+        id_claims.insert(claim, value);
+    }
+    for (claim, value) in user_custom_claims {
         id_claims.insert(claim, value);
     }
     for (claim, value) in custom_claims {
@@ -1880,6 +1887,7 @@ async fn preview_user_claims(
     let profile_claims = crate::security::oidc_profile_claims(&attributes);
     let groups = user_groups(state, user_id).await?;
     let group_custom_claims = group_custom_claims(state, user_id, scopes).await?;
+    let user_custom_claims = user_custom_claims(state, user_id, scopes).await?;
 
     let mut claims = Map::new();
     add_user_claims(
@@ -1895,6 +1903,9 @@ async fn preview_user_claims(
         &groups,
     );
     for (claim, value) in group_custom_claims {
+        claims.insert(claim, value);
+    }
+    for (claim, value) in user_custom_claims {
         claims.insert(claim, value);
     }
     for (claim, value) in custom_claims(state, client_id, &attributes, scopes).await? {
@@ -2009,6 +2020,40 @@ async fn group_custom_claims(
                 claims.insert(name, Value::Array(merged));
             }
         }
+    }
+    Ok(claims)
+}
+
+async fn user_custom_claims(
+    state: &AppState,
+    user_id: &str,
+    scopes: &[String],
+) -> Result<Map<String, Value>, OAuthError> {
+    let rows = sqlx::query("SELECT claim_name, claim_value, required_scope FROM user_claim_mappings WHERE user_id = ? ORDER BY claim_name")
+        .bind(user_id)
+        .fetch_all(&state.database.pool)
+        .await
+        .map_err(|_| OAuthError::server_error())?;
+    let mut claims = Map::new();
+    for row in rows {
+        let required_scope: Option<String> = row
+            .try_get("required_scope")
+            .map_err(|_| OAuthError::server_error())?;
+        if required_scope
+            .as_ref()
+            .is_some_and(|scope| !scopes.contains(scope))
+        {
+            continue;
+        }
+        let claim_name: String = row
+            .try_get("claim_name")
+            .map_err(|_| OAuthError::server_error())?;
+        let encoded_value: String = row
+            .try_get("claim_value")
+            .map_err(|_| OAuthError::server_error())?;
+        let value: Value =
+            serde_json::from_str(&encoded_value).map_err(|_| OAuthError::server_error())?;
+        claims.insert(claim_name, value);
     }
     Ok(claims)
 }
