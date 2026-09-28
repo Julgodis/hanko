@@ -229,20 +229,22 @@ impl WebauthnService {
                 return Err(WebauthnError::Authentication);
             }
         } else {
-            let bootstrap_still_valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 1 AND expires_at > ?) AND NOT EXISTS(SELECT 1 FROM passkeys WHERE user_id = ?) AND EXISTS(SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL AND (invitation_link_id IS NULL OR invitation_reserved_until > ?))")
+            let bootstrap_still_valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 1 AND expires_at > ?) AND NOT EXISTS(SELECT 1 FROM passkeys WHERE user_id = ?) AND EXISTS(SELECT 1 FROM users u WHERE u.id = ? AND u.disabled_at IS NULL AND (u.invitation_link_id IS NULL OR (u.invitation_reserved_until > ? AND EXISTS (SELECT 1 FROM invitation_links i WHERE i.id = u.invitation_link_id AND i.revoked_at IS NULL AND i.expires_at > ?))))")
                 .bind(session_hash)
                 .bind(user_id)
                 .bind(now)
                 .bind(user_id)
                 .bind(user_id)
                 .bind(now)
+                .bind(now)
                 .fetch_one(&mut *transaction)
                 .await?;
             if !bootstrap_session || !bootstrap_still_valid {
                 return Err(WebauthnError::Ceremony);
             }
-            let user = sqlx::query("SELECT invitation_link_id FROM users WHERE id = ? AND disabled_at IS NULL AND (invitation_link_id IS NULL OR invitation_reserved_until > ?)")
+            let user = sqlx::query("SELECT invitation_link_id FROM users u WHERE u.id = ? AND u.disabled_at IS NULL AND (u.invitation_link_id IS NULL OR (u.invitation_reserved_until > ? AND EXISTS (SELECT 1 FROM invitation_links i WHERE i.id = u.invitation_link_id AND i.revoked_at IS NULL AND i.expires_at > ?)))")
                 .bind(user_id)
+                .bind(now)
                 .bind(now)
                 .fetch_optional(&mut *transaction)
                 .await?
