@@ -1248,14 +1248,16 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             <p className="admin-hint">Applications listed here can use the scopes shown until access expires or you revoke it. Revoking also disables that application’s refresh tokens.</p>
             {consentMessage && <p className="admin-message" role="status">{consentMessage}</p>}
             {consentError && <p className="admin-message admin-message-error" role="alert">{consentError}</p>}
-            {consentsLoading ? <p className="admin-hint">Loading authorized applications…</p> : consents.length === 0 ? <p className="admin-hint">You haven’t authorized any applications.</p> : <div className="consent-grant-list">
-              {consents.map((grant) => <article className="consent-grant-card" key={grant.client_id}>
-                <div className="consent-grant-heading"><div><h3>{grant.client_name}</h3><p>Authorized {new Date(grant.granted_at * 1000).toLocaleString()}{grant.expires_at ? ` · expires ${new Date(grant.expires_at * 1000).toLocaleString()}` : " · no expiry"}</p></div>
-                  <button className="passkey-remove-button" type="button" onClick={() => void revokeConsent(grant)} disabled={Boolean(consentActionId)}><Trash2 aria-hidden="true" />{consentActionId === grant.client_id ? "Revoking…" : "Revoke access"}</button>
-                </div>
-                <div className="consent-grant-scopes"><span>Granted scopes</span><ul>{grant.scopes.map((scope) => <li key={scope}>{scope}</li>)}</ul></div>
-              </article>)}
-            </div>}
+            {consentsLoading ? <p className="admin-hint">Loading authorized applications…</p> : consents.length === 0 ? <p className="admin-hint">You haven’t authorized any applications.</p> : <div className="admin-table-scroll"><table className="admin-table consent-table">
+              <thead><tr><th scope="col">Application</th><th scope="col">Authorized</th><th scope="col">Expires</th><th scope="col">Granted scopes</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+              <tbody>{consents.map((grant) => <tr key={grant.client_id}>
+                <td><strong>{grant.client_name}</strong><small><code className="table-id"><PrivateValue>{grant.client_id}</PrivateValue></code></small></td>
+                <td><PrivateValue>{new Date(grant.granted_at * 1000).toLocaleDateString()}</PrivateValue></td>
+                <td>{grant.expires_at ? <PrivateValue>{new Date(grant.expires_at * 1000).toLocaleDateString()}</PrivateValue> : <span className="table-muted">No expiry</span>}</td>
+                <td><div className="client-scope-list" aria-label={`Granted scopes: ${grant.scopes.join(", ")}`}>{grant.scopes.map((scope) => <span className="client-scope-chip" key={scope}>{scope}</span>)}</div></td>
+                <td><div className="table-actions"><button className="client-list-action client-remove-action" type="button" onClick={() => void revokeConsent(grant)} disabled={Boolean(consentActionId)}><Trash2 aria-hidden="true" />{consentActionId === grant.client_id ? "Revoking…" : "Revoke access"}</button></div></td>
+              </tr>)}</tbody>
+            </table></div>}
           </section>}
 
           {activeTab === "passkeys" && <section className="account-passkeys">
