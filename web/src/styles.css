@@ -940,10 +940,23 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .table-actions .client-list-action svg { width: 13px; height: 13px; }
 .membership-action { min-height: 36px; padding-inline: 9px; font-size: 14px; white-space: nowrap; }
 .membership-action svg { width: 13px; height: 13px; }
-.membership-editor { display: grid; max-width: 740px; gap: 14px; padding: 4px 2px; }
-.membership-editor h3 { margin: 0; color: var(--ink); font-size: 16px; font-weight: 590; }
-.membership-editor .admin-options { padding-top: 12px; }
-.membership-editor .client-form-actions .primary-action { min-height: 40px; }
+.group-edit-page { display: grid; gap: 34px; }
+.group-edit-page > .client-form { max-width: 780px; }
+.group-members-panel { display: grid; gap: 14px; }
+.group-members-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 350px); align-items: end; gap: 20px; }
+.group-members-toolbar h2 { margin: 0; color: var(--ink); font-size: 20px; font-weight: 570; }
+.group-members-toolbar h2 span { margin-left: 4px; color: var(--ink-muted); font-size: 15px; font-weight: 450; }
+.group-members-toolbar p { margin: 5px 0 0; color: var(--ink-muted); font-size: 14px; line-height: 1.5; }
+.group-member-search { gap: 6px; }
+.group-member-search > span { font-size: 14px; }
+.group-member-table { min-width: 870px; }
+.group-member-table th:first-child,
+.group-member-table td:first-child { width: 52px; text-align: center; }
+.group-member-toggle { display: inline-grid; width: 24px; height: 24px; place-items: center; cursor: pointer; }
+.group-member-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--vermilion); }
+.group-member-table .client-status { white-space: nowrap; }
+.group-members-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.group-members-actions .client-submit { width: fit-content; min-height: 42px; margin: 0; }
 .user-edit-page { display: grid; max-width: 820px; gap: 26px; }
 .user-editor-form { max-width: none; }
 .user-claim-editor { align-items: start; }
@@ -1052,6 +1065,9 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
   .admin-mobile-select { display: grid; gap: 7px; }
   .admin-mobile-select > span { color: var(--ink-muted); font-size: 14px; }
   .admin-mobile-select select { width: 100%; min-height: 50px; padding: 10px 42px 10px 13px; border: 1px solid var(--rule); border-radius: 8px; color: var(--ink); background: var(--paper-raised); font: inherit; font-size: 16px; }
+  .group-members-toolbar { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .group-members-actions { align-items: stretch; flex-direction: column; }
+  .group-members-actions .client-submit { width: 100%; }
 }
 
 @media (max-width: 480px) {
