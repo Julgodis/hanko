@@ -45,6 +45,22 @@ struct CreatedInvitation {
 struct CreateGroup {
     name: String,
     display_name: String,
+    #[serde(default)]
+    claims: Vec<GroupClaimInput>,
+}
+
+#[derive(Deserialize)]
+struct UpdateGroup {
+    display_name: String,
+    #[serde(default)]
+    claims: Vec<GroupClaimInput>,
+}
+
+#[derive(Deserialize)]
+struct GroupClaimInput {
+    claim_name: String,
+    claim_value: Value,
+    required_scope: String,
 }
 
 #[derive(Deserialize)]
@@ -143,6 +159,7 @@ pub fn router() -> Router<AppState> {
             post(revoke_invitation),
         )
         .route("/api/admin/groups", get(list_groups).post(create_group))
+        .route("/api/admin/groups/{group_id}", put(update_group))
         .route("/api/admin/clients", get(list_clients).post(create_client))
         .route(
             "/api/admin/clients/{client_id}",
@@ -354,11 +371,30 @@ async fn list_groups(
                 .fetch_one(&state.database.pool)
                 .await
                 .map_err(|_| AdminError::internal())?;
+        let claim_rows = sqlx::query("SELECT claim_name, claim_value, required_scope FROM group_claim_mappings WHERE group_id = ? ORDER BY claim_name")
+            .bind(&id)
+            .fetch_all(&state.database.pool)
+            .await
+            .map_err(|_| AdminError::internal())?;
+        let claims = claim_rows
+            .into_iter()
+            .map(|claim| {
+                let value: String = claim
+                    .try_get("claim_value")
+                    .map_err(|_| AdminError::internal())?;
+                Ok(serde_json::json!({
+                    "claim_name": claim.try_get::<String, _>("claim_name").map_err(|_| AdminError::internal())?,
+                    "claim_value": serde_json::from_str::<Value>(&value).map_err(|_| AdminError::internal())?,
+                    "required_scope": claim.try_get::<String, _>("required_scope").map_err(|_| AdminError::internal())?,
+                }))
+            })
+            .collect::<Result<Vec<_>, AdminError>>()?;
         groups.push(serde_json::json!({
             "id": id,
             "name": row.try_get::<String, _>("name").map_err(|_| AdminError::internal())?,
             "display_name": row.try_get::<String, _>("display_name").map_err(|_| AdminError::internal())?,
             "member_count": members,
+            "claims": claims,
         }));
     }
     Ok(Json(Value::Array(groups)))
@@ -376,18 +412,98 @@ async fn create_group(
     if display_name.is_empty() || display_name.len() > 120 {
         return Err(AdminError::bad_request("invalid group display name"));
     }
+    validate_group_claims(&input.claims)?;
     let id = Uuid::new_v4().to_string();
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| AdminError::internal())?;
     sqlx::query("INSERT INTO groups (id, name, display_name, created_at) VALUES (?, ?, ?, ?)")
         .bind(&id)
         .bind(&name)
         .bind(display_name)
         .bind(unix_now())
-        .execute(&state.database.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| AdminError::conflict("group already exists"))?;
+    for claim in input.claims {
+        let value =
+            serde_json::to_string(&claim.claim_value).map_err(|_| AdminError::internal())?;
+        sqlx::query("INSERT INTO group_claim_mappings (group_id, claim_name, claim_value, required_scope) VALUES (?, ?, ?, ?)")
+            .bind(&id)
+            .bind(claim.claim_name)
+            .bind(value)
+            .bind(claim.required_scope)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| AdminError::internal())?;
     Ok(Json(
         serde_json::json!({ "id": id, "name": name, "display_name": display_name }),
     ))
+}
+
+async fn update_group(
+    State(state): State<AppState>,
+    Path(group_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateGroup>,
+) -> Result<StatusCode, AdminError> {
+    let _admin = require_admin(&state, &headers, true).await?;
+    let display_name = input.display_name.trim();
+    if display_name.is_empty() || display_name.len() > 120 {
+        return Err(AdminError::bad_request("invalid group display name"));
+    }
+    validate_group_claims(&input.claims)?;
+
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM groups WHERE id = ?)")
+        .bind(&group_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    if !exists {
+        return Err(AdminError(StatusCode::NOT_FOUND, "group not found"));
+    }
+    sqlx::query("UPDATE groups SET display_name = ? WHERE id = ?")
+        .bind(display_name)
+        .bind(&group_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    sqlx::query("DELETE FROM group_claim_mappings WHERE group_id = ?")
+        .bind(&group_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    for claim in input.claims {
+        let value =
+            serde_json::to_string(&claim.claim_value).map_err(|_| AdminError::internal())?;
+        sqlx::query("INSERT INTO group_claim_mappings (group_id, claim_name, claim_value, required_scope) VALUES (?, ?, ?, ?)")
+            .bind(&group_id)
+            .bind(claim.claim_name)
+            .bind(value)
+            .bind(claim.required_scope)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_clients(
@@ -1038,6 +1154,31 @@ fn valid_claim_name(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn validate_group_claims(claims: &[GroupClaimInput]) -> Result<(), AdminError> {
+    if claims.len() > 100 {
+        return Err(AdminError::bad_request("too many group claims"));
+    }
+    let mut seen_claims = std::collections::HashSet::new();
+    for claim in claims {
+        if !valid_claim_name(&claim.claim_name) || !seen_claims.insert(&claim.claim_name) {
+            return Err(AdminError::bad_request(
+                "invalid or duplicate group claim name",
+            ));
+        }
+        if !matches!(
+            claim.required_scope.as_str(),
+            "openid" | "profile" | "email" | "groups" | "offline_access"
+        ) {
+            return Err(AdminError::bad_request("unsupported group claim scope"));
+        }
+        let value = serde_json::to_vec(&claim.claim_value).map_err(|_| AdminError::internal())?;
+        if value.len() > 4096 {
+            return Err(AdminError::bad_request("group claim value is too large"));
+        }
+    }
+    Ok(())
 }
 
 fn valid_json_pointer(value: &str) -> bool {

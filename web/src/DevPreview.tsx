@@ -81,9 +81,9 @@ const invitations = [
 ];
 
 const groups = [
-  { id: "grp_01", name: "media-users", display_name: "Media users", member_count: 4 },
-  { id: "grp_02", name: "administrators", display_name: "Administrators", member_count: 1 },
-  { id: "grp_03", name: "staff", display_name: "Staff", member_count: 6 },
+  { id: "grp_01", name: "media-users", display_name: "Media users", member_count: 4, claims: [{ claim_name: "role", claim_value: "media-user", required_scope: "groups" }] },
+  { id: "grp_02", name: "administrators", display_name: "Administrators", member_count: 1, claims: [{ claim_name: "role", claim_value: "administrator", required_scope: "groups" }] },
+  { id: "grp_03", name: "staff", display_name: "Staff", member_count: 6, claims: [] },
 ];
 
 const signingKeys = [
@@ -93,6 +93,7 @@ const signingKeys = [
 
 let previewClients = [...clients];
 let previewInvitations = [...invitations];
+let previewGroups = [...groups];
 const originalFetch = window.fetch.bind(window);
 
 const previewPasskeys = [
@@ -128,6 +129,7 @@ function installPreviewApi() {
         preferred_username: "sana.lee",
         email: "sana.lee@example.com",
         groups: ["media-users", "staff"],
+        role: ["media-user"],
         department: "Product design",
       },
     });
@@ -156,7 +158,20 @@ function installPreviewApi() {
       previewClients = previewClients.filter((item) => item.client_id !== decodeURIComponent(url.pathname.split("/").at(-1) ?? ""));
       return jsonResponse({});
     }
-    if (url.pathname === "/api/admin/groups" && method === "GET") return jsonResponse(groups);
+    if (url.pathname === "/api/admin/groups" && method === "GET") return jsonResponse(previewGroups);
+    if (url.pathname === "/api/admin/groups" && method === "POST") {
+      const payload = JSON.parse(String(init?.body ?? "{}"));
+      const createdGroup = { id: `grp_preview_${previewGroups.length + 1}`, member_count: 0, ...payload };
+      previewGroups.push(createdGroup);
+      return jsonResponse(createdGroup);
+    }
+    if (url.pathname.startsWith("/api/admin/groups/") && method === "PUT") {
+      const groupId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
+      const groupIndex = previewGroups.findIndex((group) => group.id === groupId);
+      if (groupIndex < 0) return jsonResponse({}, 404);
+      previewGroups[groupIndex] = { ...previewGroups[groupIndex], ...JSON.parse(String(init?.body ?? "{}")) };
+      return jsonResponse({});
+    }
     if (url.pathname === "/api/admin/users" && method === "GET") return jsonResponse(users);
     if (url.pathname === "/api/admin/invitations" && method === "GET") return jsonResponse(previewInvitations);
     if (url.pathname === "/api/admin/invitations" && method === "POST") {

@@ -30,6 +30,7 @@ All times are Unix seconds in UTC. IDs are random UUIDs unless they are protocol
 | `invitation_links` | Hashed bearer token, admin-only label, optional email recipient, optional group list, user limit and use count, expiry and revocation timestamps. A conditional update enforces limits when a link is accepted. |
 | `passkeys` | User FK, globally unique WebAuthn credential ID, serialized `webauthn-rs` `Passkey`, label and timestamps. Credential IDs cannot be attached to multiple users. |
 | `groups` | Unique stable name and display metadata. |
+| `group_claim_mappings` | JSON-valued custom claims attached to groups. A user receives claims from their current groups only when the configured OIDC scope is requested. |
 | `user_groups` | `(user_id, group_id)` membership with cascading FKs. |
 | `oidc_clients` | Public/confidential type, client ID, registered token endpoint authentication method, optional hashed secret, name, enabled flag, JSON allowed scopes and claim mappings. |
 | `client_redirect_uris` | Exact URI strings, unique per client; never wildcard/prefix matched. |
@@ -74,9 +75,13 @@ JSON columns are validated at API boundaries. Migrations add constraints/indexes
 1. `GET /authorize` validates every protocol and client policy parameter before any redirect. Store the request and redirect to the local sign-in UI with an opaque request ID; bind that request to a pre-auth browser cookie.
 2. After passkey login, `GET /api/authorize/request` returns the application name, redirect, and requested scopes for the consent screen. An authenticated CSRF-protected continue action issues a high entropy code, stores only its digest plus redirect URI, scopes, optional nonce and PKCE challenge, user, client, and expiry, then redirects to the already-validated URI with `code` and the original `state`. Denial consumes the pending request and redirects with `access_denied` and the original state.
 3. `POST /token` validates the registered client authentication method and grant fields. If the code has a PKCE challenge, it checks S256 over the verifier before conditionally marking the code consumed. On success mint a signed ID token and access token. When the authorization includes `offline_access`, also issue a rotating refresh token; `grant_type=refresh_token` replaces it and returns fresh tokens.
-4. `/userinfo` validates signature, issuer, expiry and audience of the bearer access token and returns only claims authorized by its scopes/client claim mapping.
+4. `/userinfo` validates signature, issuer, expiry and audience of the bearer access token and returns only claims authorized by its scopes, client mappings, or group mappings.
 5. `/.well-known/openid-configuration` advertises only implemented endpoints/algorithms and token authentication methods; `/jwks` returns active and still-valid retiring public keys.
 6. `POST /logout` requires session CSRF, revokes the server-side session, and clears the cookie. OIDC RP-initiated logout may add `id_token_hint`, exact-allow-listed `post_logout_redirect_uri`, and round-tripped state; absent a valid allow-listed target it returns to the local signed-out page.
+
+### OIDC custom claims
+
+Client claim mappings read values from a user's JSON `attributes` with a JSON Pointer and can be gated by a client scope. Group claim mappings hold a JSON value directly and are included for users who belong to the group when the required scope is requested. The scope must also be enabled on the client, since authorization rejects scopes the client has not enabled. If one group contributes a claim, its JSON value is preserved. If multiple groups contribute the same claim, their top-level array values are flattened and deduplicated into an array. Client-specific mappings override group claims with the same name. Both kinds of custom claim appear in ID and access tokens and in the consent preview; `/userinfo` returns custom claims carried by the access token.
 
 ## Incremental implementation order
 
