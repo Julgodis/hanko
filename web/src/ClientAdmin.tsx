@@ -162,6 +162,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
   const [groupName, setGroupName] = useState("");
   const [groupDisplayName, setGroupDisplayName] = useState("");
   const [groupClaims, setGroupClaims] = useState<GroupClaimDraft[]>([]);
+  const [deletingGroupId, setDeletingGroupId] = useState("");
   const [adminActionBusy, setAdminActionBusy] = useState(false);
   const [adminActionMessage, setAdminActionMessage] = useState("");
   const [membershipEditor, setMembershipEditor] = useState<MembershipEditor | null>(null);
@@ -588,6 +589,31 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
     } catch (saveError) {
       setAdminActionMessage(errorMessage(saveError));
     } finally {
+      setAdminActionBusy(false);
+    }
+  }
+
+  async function deleteGroup(group: Group) {
+    const memberLabel = group.member_count === 1 ? "1 membership" : `${group.member_count} memberships`;
+    const confirmed = window.confirm(`Delete ${group.display_name}? This permanently removes its ${memberLabel} and scoped claims, and removes it from pending invite links. A group used by a client access policy must first be removed from that policy.`);
+    if (!confirmed) return;
+
+    setDeletingGroupId(group.id);
+    setAdminActionBusy(true);
+    setAdminActionMessage("");
+    try {
+      await api(`/api/admin/groups/${encodeURIComponent(group.id)}`, { method: "DELETE" });
+      if (membershipEditor?.kind === "group" && membershipEditor.id === group.id) closeMembershipEditor();
+      setGroups((current) => current.filter((item) => item.id !== group.id));
+      setUsers((current) => current.map((user) => ({
+        ...user,
+        groups: user.groups.filter((name) => name !== group.name),
+      })));
+      setUserGroups((current) => current.filter((name) => name !== group.name));
+    } catch (deleteError) {
+      setAdminActionMessage(errorMessage(deleteError));
+    } finally {
+      setDeletingGroupId("");
       setAdminActionBusy(false);
     }
   }
@@ -1024,7 +1050,7 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
                   <td><strong><PrivateValue>{group.display_name}</PrivateValue></strong></td>
                   <td>{(group.claims ?? []).length ? <span>{(group.claims ?? []).map((claim) => claim.claim_name).join(", ")}</span> : <span className="table-muted">—</span>}</td>
                   <td><PrivateValue>{group.member_count}</PrivateValue></td>
-                  <td><div className="table-actions"><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={() => openEditGroup(group)}><Pencil aria-hidden="true" /><span>Edit</span></button><button className="client-list-action membership-action" type="button" onClick={() => void openGroupMembers(group)} disabled={membershipBusy || membershipLoading}><Users aria-hidden="true" />Manage members</button></div></td>
+                  <td><div className="table-actions"><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={() => openEditGroup(group)}><Pencil aria-hidden="true" /><span>Edit</span></button><button className="client-list-action membership-action" type="button" onClick={() => void openGroupMembers(group)} disabled={adminActionBusy || membershipBusy || membershipLoading}><Users aria-hidden="true" />Manage members</button><button className="client-list-action client-remove-action" type="button" disabled={adminActionBusy} onClick={() => void deleteGroup(group)}><Trash2 aria-hidden="true" /><span>{deletingGroupId === group.id ? "Deleting…" : "Delete"}</span></button></div></td>
                 </tr>
                 {membershipEditor?.kind === "group" && membershipEditor.id === group.id && <tr key={`${group.id}-members`}><td colSpan={5}>
                   <form className="membership-editor" onSubmit={saveMembership}>

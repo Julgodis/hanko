@@ -184,7 +184,10 @@ pub fn router() -> Router<AppState> {
             post(revoke_invitation),
         )
         .route("/api/admin/groups", get(list_groups).post(create_group))
-        .route("/api/admin/groups/{group_id}", put(update_group))
+        .route(
+            "/api/admin/groups/{group_id}",
+            put(update_group).delete(delete_group),
+        )
         .route(
             "/api/admin/groups/{group_id}/members",
             put(update_group_members),
@@ -669,6 +672,85 @@ async fn update_group(
             .execute(&mut *transaction)
             .await
             .map_err(|_| AdminError::internal())?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_group(
+    State(state): State<AppState>,
+    Path(group_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AdminError> {
+    let _admin = require_admin(&state, &headers, true).await?;
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| AdminError::internal())?;
+
+    let group_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM groups WHERE id = ?")
+            .bind(&group_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| AdminError::internal())?;
+    let group_name = group_name.ok_or_else(AdminError::group_not_found)?;
+
+    let used_by_client: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM client_allowed_groups WHERE group_id = ?)",
+    )
+    .bind(&group_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(|_| AdminError::internal())?;
+    if used_by_client {
+        return Err(AdminError::conflict(
+            "group is assigned to a client; remove it from client access policies first",
+        ));
+    }
+
+    // Invitation links store group names rather than foreign keys. Remove the
+    // deleted name so an old invitation cannot assign a newly-created group
+    // with the same name in the future.
+    let invitations = sqlx::query("SELECT id, group_names FROM invitation_links")
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    for invitation in invitations {
+        let invitation_id: String = invitation
+            .try_get("id")
+            .map_err(|_| AdminError::internal())?;
+        let group_names_json: String = invitation
+            .try_get("group_names")
+            .map_err(|_| AdminError::internal())?;
+        let mut group_names: Vec<String> =
+            serde_json::from_str(&group_names_json).map_err(|_| AdminError::internal())?;
+        let original_len = group_names.len();
+        group_names.retain(|name| name != &group_name);
+        if group_names.len() != original_len {
+            let group_names_json =
+                serde_json::to_string(&group_names).map_err(|_| AdminError::internal())?;
+            sqlx::query("UPDATE invitation_links SET group_names = ? WHERE id = ?")
+                .bind(group_names_json)
+                .bind(invitation_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| AdminError::internal())?;
+        }
+    }
+
+    let result = sqlx::query("DELETE FROM groups WHERE id = ?")
+        .bind(&group_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    if result.rows_affected() == 0 {
+        return Err(AdminError::group_not_found());
     }
     transaction
         .commit()
