@@ -1,5 +1,5 @@
 import { startAuthentication } from "@simplewebauthn/browser";
-import { ArrowRight, Check, Clock3, Fingerprint, LockKeyhole, Mail, MapPin, Phone, ShieldCheck, UserRound, Users, type LucideIcon } from "lucide-react";
+import { ArrowRight, Check, Clock3, Fingerprint, Mail, MapPin, Phone, ShieldCheck, UserRound, Users, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import ClientAdmin from "./ClientAdmin";
 import FirstRun from "./FirstRun";
@@ -327,7 +327,6 @@ function SignIn({
     {phase === "error" && failure !== "access_denied" && failure !== "expired" && <button className="primary-action" onClick={retry}>
       <span>Try again</span><ArrowRight aria-hidden="true" className="size-4" />
     </button>}
-    {requestId && phase === "idle" && <p className="device-note"><LockKeyhole aria-hidden="true" /> Your passkey stays on your device.</p>}
   </Scene>;
 }
 
