@@ -74,7 +74,7 @@ services:
         VITE_HIDDEN_USER_CLAIMS: ${VITE_HIDDEN_USER_CLAIMS:-}
 ```
 
-Use comma-separated claim names such as `app_roles,given_name,family_name,address,phone_number`. This is a UI setting only: it hides form fields but does not enforce claim permissions in the API or revoke values already stored.
+Use comma-separated claim names such as `given_name,family_name,address,phone_number`. This setting only hides form fields; it does not enforce permissions in the API or revoke values already stored. Application roles cannot be edited through the self-service profile API. Provisioned `app_roles` values remain available in OIDC claims; use admin-managed groups and group claims to manage authorization roles in Hanko.
 
 ## Scope
 

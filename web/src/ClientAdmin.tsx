@@ -6,7 +6,7 @@ import { PrivateValue } from "./components/PrivacyMode";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
 import { api, defaultPasskeyLabel, json } from "./lib/utils";
-import { canEditUserClaim, formatAppRoles, parseAppRoles, type OidcProfileClaims } from "./lib/userClaims";
+import { canEditUserClaim, type OidcProfileClaims } from "./lib/userClaims";
 
 const AVAILABLE_SCOPES = ["profile", "email", "address", "phone", "picture", "groups", "offline_access"] as const;
 const EXPIRY_UNIT_SECONDS = { seconds: 1, minutes: 60, hours: 60 * 60, days: 24 * 60 * 60, years: 365 * 24 * 60 * 60 } as const;
@@ -39,8 +39,8 @@ type SigningKey = { kid: string; algorithm: string; status: string; created_at: 
 type AccountPasskey = { id: string; label: string; created_at: number; last_used_at: number | null };
 type OidcAddress = { street_address: string; locality: string; region: string; postal_code: string; country: string };
 const EMPTY_OIDC_ADDRESS: OidcAddress = { street_address: "", locality: "", region: "", postal_code: "", country: "" };
-type OidcProfileDraft = Required<Omit<OidcProfileClaims, "app_roles">> & { app_roles: string };
-const EMPTY_OIDC_PROFILE: OidcProfileDraft = { profile: "", given_name: "", family_name: "", nickname: "", website: "", locale: "", zoneinfo: "", app_roles: "" };
+type OidcProfileDraft = Required<Omit<OidcProfileClaims, "app_roles">>;
+const EMPTY_OIDC_PROFILE: OidcProfileDraft = { profile: "", given_name: "", family_name: "", nickname: "", website: "", locale: "", zoneinfo: "" };
 type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys";
 type ClaimDraft = { claim_name: string; user_attribute_path: string; required_scope: string };
 type GroupClaimDraft = { claim_name: string; claim_value: string; required_scope: Scope };
@@ -202,7 +202,6 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
           setOidcProfileClaims({
             ...EMPTY_OIDC_PROFILE,
             ...(session.oidc_profile_claims ?? {}),
-            app_roles: formatAppRoles(session.oidc_profile_claims?.app_roles),
           });
         }
       } catch (loadError) {
@@ -734,9 +733,6 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       for (const claim of ["profile", "given_name", "family_name", "nickname", "website", "locale", "zoneinfo"] as const) {
         if (canEditUserClaim(claim)) profileClaims[claim] = oidcProfileClaims[claim];
       }
-      if (canEditUserClaim("app_roles")) {
-        profileClaims.app_roles = parseAppRoles(oidcProfileClaims.app_roles);
-      }
       if (Object.keys(profileClaims).length > 0) body.profile_claims = profileClaims;
       const profile = await api<{ username: string | null; display_name: string | null; picture: string | null; phone_number: string | null; address: Partial<OidcAddress> | null; profile_claims: OidcProfileClaims }>("/api/account/profile", {
         method: "PUT",
@@ -750,7 +746,6 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
       setOidcProfileClaims({
         ...EMPTY_OIDC_PROFILE,
         ...profile.profile_claims,
-        app_roles: formatAppRoles(profile.profile_claims.app_roles),
       });
       setOidcProfileMessage("Your OIDC profile is saved.");
     } catch (saveError) {
@@ -1075,7 +1070,6 @@ export default function ClientAdmin({ isAdmin = true }: { isAdmin?: boolean }) {
               {canEditUserClaim("website") && <label className="admin-field"><span>Website <em>Optional</em></span><input type="url" maxLength={2048} value={oidcProfileClaims.website} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, website: event.target.value }))} placeholder="https://example.com" /></label>}
               {canEditUserClaim("locale") && <label className="admin-field"><span>Locale <em>Optional</em></span><input maxLength={128} value={oidcProfileClaims.locale} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, locale: event.target.value }))} placeholder="en-US" /></label>}
               {canEditUserClaim("zoneinfo") && <label className="admin-field"><span>Time zone <em>Optional</em></span><input maxLength={128} value={oidcProfileClaims.zoneinfo} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, zoneinfo: event.target.value }))} placeholder="Europe/Stockholm" /></label>}
-              {canEditUserClaim("app_roles") && <label className="admin-field"><span>Application roles <em>Optional</em></span><textarea maxLength={4096} rows={3} value={oidcProfileClaims.app_roles} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, app_roles: event.target.value }))} placeholder={"hnk_client_id: viewer\nhnk_client_id: editor"} /><small>Enter one <code>client-id: role</code> per line. In that client’s custom claims, map a claim such as <code>roles</code> to <code>/app_roles/client-id</code>.</small></label>}
               {oidcProfileMessage && <p className={`admin-message${oidcProfileMessage.includes("saved") ? "" : " admin-message-error"}`} role={oidcProfileMessage.includes("saved") ? "status" : "alert"}>{oidcProfileMessage}</p>}
               <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={savingOidcProfile}>{savingOidcProfile ? "Saving profile…" : "Save OIDC profile"}</button></div>
             </form>
