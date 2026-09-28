@@ -650,13 +650,15 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .user-create-page { margin-top: 0; }
 .invitation-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .invitation-settings .admin-field small { font-size: 13px; }
+.invitation-expiry-setting { display: grid; align-content: start; gap: 8px; }
+.invitation-expiry-setting > small { color: var(--ink-muted); font-size: 13px; line-height: 1.55; }
 .invitation-expiry-fields { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1fr); gap: 10px; }
 .invitation-expiry-fields .admin-field { min-width: 0; }
 .invitation-email-action { width: fit-content; min-height: 42px; margin: 0; color: var(--ink); font-size: 14px; text-decoration: none; }
 .invitation-email-action svg { width: 16px; height: 16px; color: var(--vermilion); }
 .invitation-user-label { display: inline-flex; width: fit-content; margin-top: 8px; padding: 4px 8px; border: 1px solid color-mix(in srgb, var(--vermilion), transparent 72%); border-radius: 99px; color: var(--vermilion-text); background: color-mix(in srgb, var(--vermilion), transparent 95%); font-size: 14px; }
-.invitation-revoke { margin-top: 9px; padding: 0; border: 0; color: var(--error); background: transparent; font: inherit; font-size: 14px; cursor: pointer; }
-.invitation-revoke:disabled { cursor: wait; opacity: .6; }
+.invitation-remove { margin-top: 9px; padding: 0; border: 0; color: var(--error); background: transparent; font: inherit; font-size: 14px; cursor: pointer; }
+.invitation-remove:disabled { cursor: wait; opacity: .6; }
 .key-management { display: grid; justify-items: start; gap: 16px; }
 .key-management-copy { display: grid; gap: 9px; max-width: 740px; }
 .key-management-copy .admin-hint { font-size: 16px; }
@@ -910,8 +912,8 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .table-muted { color: var(--ink-muted); }
 .table-actions { display: flex; flex-wrap: nowrap; gap: 6px; }
 .table-actions .client-list-action { min-height: 36px; padding-inline: 9px; font-size: 14px; white-space: nowrap; }
-.admin-table .invitation-revoke { margin: 0; padding: 5px 7px; border-radius: 5px; font-size: 14px; white-space: nowrap; }
-.admin-table .invitation-revoke:hover:not(:disabled) { background: color-mix(in srgb, var(--error), transparent 93%); }
+.admin-table .invitation-remove { margin: 0; padding: 5px 7px; border-radius: 5px; font-size: 14px; white-space: nowrap; }
+.admin-table .invitation-remove:hover:not(:disabled) { background: color-mix(in srgb, var(--error), transparent 93%); }
 .table-actions .client-list-action svg { width: 13px; height: 13px; }
 .membership-action { min-height: 36px; padding-inline: 9px; font-size: 14px; white-space: nowrap; }
 .membership-action svg { width: 13px; height: 13px; }
