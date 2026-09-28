@@ -868,7 +868,7 @@ async fn pending_authorization(
     request_id: &str,
 ) -> Result<(sqlx::sqlite::SqliteRow, String), OAuthError> {
     let preauth = cookie_value(headers, PREAUTH_COOKIE).ok_or_else(OAuthError::invalid_grant)?;
-    let row = sqlx::query("SELECT client_id, redirect_uri, state, nonce, code_challenge, scopes, max_age, force_reauthentication, prior_session_hash, created_at_ms FROM authorization_requests WHERE request_hash = ? AND browser_hash = ? AND expires_at > ?")
+    let row = sqlx::query("SELECT client_id, redirect_uri, state, nonce, code_challenge, scopes, max_age, force_reauthentication, prior_session_hash, created_at_ms, force_consent FROM authorization_requests WHERE request_hash = ? AND browser_hash = ? AND expires_at > ?")
         .bind(digest(request_id)).bind(digest(&preauth)).bind(unix_now())
         .fetch_optional(&state.database.pool).await.map_err(|_| OAuthError::server_error())?.ok_or_else(OAuthError::invalid_grant)?;
     let client_id: String = row

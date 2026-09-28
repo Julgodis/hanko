@@ -32,6 +32,8 @@ cargo run
 
 Keep `IDENTITY_MASTER_KEY` stable and back it up with the SQLite database; it encrypts private signing keys. Keep the WebAuthn RP ID (defaults to the origin hostname) stable after passkeys are registered. If using a reverse proxy, set `TRUSTED_PROXY_ADDRESSES` to its exact peer IPs and prevent direct public access to the server.
 
+Hanko records the configured WebAuthn RP ID in the database and refuses to start if it changes later. On the first start after this migration, verify `WEBAUTHN_RP_ID` is the same value used when existing passkeys were created; the database cannot infer an earlier value. Back up the SQLite database and `IDENTITY_MASTER_KEY` together.
+
 Open `PUBLIC_ORIGIN` and use the bootstrap token to create the first administrator and register a passkey. For development, the defaults use `http://localhost:3000`; run the backend there, set `PUBLIC_ORIGIN=http://localhost:5173`, then run `npm run dev` in `web`.
 
 ## Features
@@ -43,6 +45,14 @@ Open `PUBLIC_ORIGIN` and use the bootstrap token to create the first administrat
 - OIDC discovery, JWKS, authorization, token, userinfo, and logout endpoints
 
 Public clients must use PKCE S256. Authorization requests require `openid`, a nonempty `state`, and user review before redirect. Refresh tokens expire after 30 days of inactivity. See [docs/architecture.md](docs/architecture.md) for design details.
+
+## Passkey sign-in and access recovery
+
+New passkeys must be discoverable. Hanko requests a resident key and confirms the browser reports `credProps.rk=true` before storing it. If your provider cannot confirm this, registration stops with an error; remove any passkey it saved during the failed attempt before trying again.
+
+For a passkey registered by an older Hanko version that does not appear in the normal chooser, select **Passkey not listed? Use account name** on the sign-in page. Enter the account name saved with that passkey, or the account's email if one was assigned. This sends a credential allow-list for that account so a non-discoverable key can be used. Once signed in, add a new discoverable passkey and verify that it works in a separate browser session before removing the old one. An internal account name may begin with `user-`; an administrator with access to the database can find it in the `users.username` column. Do not share a passkey export or private key to troubleshoot this.
+
+There are currently no independent recovery codes or administrator reset flow. Keep at least two independently stored passkeys and a tested backup of the database and master key. If every passkey becomes unusable and no session remains, restoring a backup alone will not make those passkeys usable.
 
 ## Build and publish
 

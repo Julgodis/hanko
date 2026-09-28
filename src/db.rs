@@ -15,6 +15,16 @@ pub struct Database {
     pub pool: SqlitePool,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RpIdError {
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
+    #[error(
+        "WebAuthn RP ID changed from {stored} to {configured}; restore the original RP ID to preserve existing passkeys"
+    )]
+    Changed { stored: String, configured: String },
+}
+
 impl Database {
     pub async fn connect(database_url: &str) -> Result<Self, sqlx::Error> {
         let options = SqliteConnectOptions::from_str(database_url)?
@@ -34,6 +44,26 @@ impl Database {
         validate_migration_history(&pool).await?;
         MIGRATOR.run(&pool).await?;
         Ok(Self { pool })
+    }
+
+    pub async fn bind_webauthn_rp_id(&self, rp_id: &str) -> Result<(), RpIdError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("INSERT INTO webauthn_rp_binding (singleton, rp_id) VALUES (1, ?) ON CONFLICT(singleton) DO NOTHING")
+            .bind(rp_id)
+            .execute(&mut *transaction)
+            .await?;
+        let stored: String =
+            sqlx::query_scalar("SELECT rp_id FROM webauthn_rp_binding WHERE singleton = 1")
+                .fetch_one(&mut *transaction)
+                .await?;
+        if stored != rp_id {
+            return Err(RpIdError::Changed {
+                stored,
+                configured: rp_id.to_owned(),
+            });
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 }
 
@@ -71,6 +101,28 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn webauthn_rp_id_binding_rejects_changes() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        database
+            .bind_webauthn_rp_id("hanko.example.com")
+            .await
+            .unwrap();
+        database
+            .bind_webauthn_rp_id("hanko.example.com")
+            .await
+            .unwrap();
+        assert!(matches!(
+            database.bind_webauthn_rp_id("other.example.com").await,
+            Err(RpIdError::Changed { .. })
+        ));
+        let stored: String = sqlx::query_scalar("SELECT rp_id FROM webauthn_rp_binding")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "hanko.example.com");
+    }
+
+    #[tokio::test]
     async fn migration_creates_core_tables_and_relationship_constraints() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         let migration_versions: Vec<i64> =
@@ -80,7 +132,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             migration_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
 
         let tables: i64 = sqlx::query_scalar(

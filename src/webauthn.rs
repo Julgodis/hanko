@@ -44,6 +44,7 @@ enum CeremonyState {
         bootstrap_session: bool,
     },
     Authentication(DiscoverableAuthentication),
+    AccountAuthentication(PasskeyAuthentication),
     CredentialChange {
         state: PasskeyAuthentication,
         action: String,
@@ -63,6 +64,8 @@ pub enum WebauthnError {
     User,
     #[error("passkey authentication failed")]
     Authentication,
+    #[error("the authenticator did not create a discoverable passkey")]
+    NonDiscoverable,
     #[error("WebAuthn protocol validation failed")]
     Protocol,
     #[error("invalid WebAuthn configuration")]
@@ -140,7 +143,18 @@ impl WebauthnService {
             approval_hash,
             bootstrap_session,
         };
-        let options = credential_options(serde_json::to_value(options)?)?;
+        let mut options = credential_options(serde_json::to_value(options)?)?;
+        // The high-level passkey registration API discourages resident keys, while
+        // our default sign-in requires one. Require a discoverable credential here.
+        let selection = options
+            .get_mut("authenticatorSelection")
+            .and_then(Value::as_object_mut)
+            .ok_or(WebauthnError::Protocol)?;
+        selection.insert(
+            "residentKey".to_owned(),
+            Value::String("required".to_owned()),
+        );
+        selection.insert("requireResidentKey".to_owned(), Value::Bool(true));
         let ceremony_id = self
             .store_ceremony("registration", Some(user_id), Some(session_hash), &state)
             .await?;
@@ -208,6 +222,17 @@ impl WebauthnService {
             .webauthn
             .finish_passkey_registration(&credential, &state)
             .map_err(|_| WebauthnError::Protocol)?;
+        // credProps is a browser-supplied usability signal, not authentication
+        // evidence. Fail closed when the browser cannot confirm discoverability.
+        if credential
+            .extensions
+            .cred_props
+            .as_ref()
+            .and_then(|props| props.rk)
+            != Some(true)
+        {
+            return Err(WebauthnError::NonDiscoverable);
+        }
         let credential_id = passkey.cred_id().as_ref().to_vec();
         let now = unix_now();
         let mut transaction = self.database.pool.begin().await?;
@@ -477,23 +502,60 @@ impl WebauthnService {
         Ok((ceremony_id, options))
     }
 
+    pub async fn start_account_authentication(
+        &self,
+        account: &str,
+        browser_hash: &[u8],
+    ) -> Result<(String, Value), WebauthnError> {
+        let user_id: String = sqlx::query_scalar(
+            "SELECT id FROM users WHERE disabled_at IS NULL AND (username = ? OR lower(email) = ?) LIMIT 1",
+        )
+        .bind(account)
+        .bind(account)
+        .fetch_optional(&self.database.pool)
+        .await?
+        .ok_or(WebauthnError::Authentication)?;
+        let passkeys = self.load_passkeys(&user_id).await?;
+        if passkeys.is_empty() {
+            return Err(WebauthnError::Authentication);
+        }
+        let (options, state) = self
+            .webauthn
+            .start_passkey_authentication(&passkeys)
+            .map_err(|_| WebauthnError::Protocol)?;
+        let options = credential_options(serde_json::to_value(options)?)?;
+        let ceremony_id = self
+            .store_ceremony(
+                "authentication",
+                Some(&user_id),
+                Some(browser_hash),
+                &CeremonyState::AccountAuthentication(state),
+            )
+            .await?;
+        Ok((ceremony_id, options))
+    }
+
     pub async fn finish_authentication(
         &self,
         ceremony_id: &str,
         browser_hash: &[u8],
         credential: PublicKeyCredential,
     ) -> Result<String, WebauthnError> {
-        let state = self
-            .consume_ceremony(ceremony_id, "authentication", None, browser_hash)
+        let (account_user_id, state) = self
+            .consume_login_ceremony(ceremony_id, browser_hash)
             .await?;
-        let CeremonyState::Authentication(state) = state else {
-            return Err(WebauthnError::Ceremony);
+        let user_id = match &state {
+            CeremonyState::Authentication(_) if account_user_id.is_none() => self
+                .webauthn
+                .identify_discoverable_authentication(&credential)
+                .map_err(|_| WebauthnError::Authentication)?
+                .0
+                .to_string(),
+            CeremonyState::AccountAuthentication(_) => {
+                account_user_id.ok_or(WebauthnError::Ceremony)?
+            }
+            _ => return Err(WebauthnError::Ceremony),
         };
-        let (user_uuid, _) = self
-            .webauthn
-            .identify_discoverable_authentication(&credential)
-            .map_err(|_| WebauthnError::Authentication)?;
-        let user_id = user_uuid.to_string();
         let rows = sqlx::query(
             "SELECT p.id, p.passkey_json FROM passkeys p JOIN users u ON u.id = p.user_id WHERE u.id = ? AND u.disabled_at IS NULL",
         )
@@ -511,14 +573,22 @@ impl WebauthnService {
         if passkeys.is_empty() {
             return Err(WebauthnError::Authentication);
         }
-        let discoverable_keys = passkeys
-            .iter()
-            .map(|(_, passkey)| DiscoverableKey::from(passkey))
-            .collect::<Vec<_>>();
-        let result = self
-            .webauthn
-            .finish_discoverable_authentication(&credential, state, &discoverable_keys)
-            .map_err(|_| WebauthnError::Authentication)?;
+        let result = match state {
+            CeremonyState::Authentication(state) => {
+                let discoverable_keys = passkeys
+                    .iter()
+                    .map(|(_, passkey)| DiscoverableKey::from(passkey))
+                    .collect::<Vec<_>>();
+                self.webauthn
+                    .finish_discoverable_authentication(&credential, state, &discoverable_keys)
+                    .map_err(|_| WebauthnError::Authentication)?
+            }
+            CeremonyState::AccountAuthentication(state) => self
+                .webauthn
+                .finish_passkey_authentication(&credential, &state)
+                .map_err(|_| WebauthnError::Authentication)?,
+            _ => return Err(WebauthnError::Ceremony),
+        };
         if !result.user_verified() {
             return Err(WebauthnError::Authentication);
         }
@@ -653,6 +723,24 @@ impl WebauthnService {
         let state_json: String = row.try_get("state_json")?;
         serde_json::from_str(&state_json).map_err(WebauthnError::Json)
     }
+
+    async fn consume_login_ceremony(
+        &self,
+        raw_id: &str,
+        browser_hash: &[u8],
+    ) -> Result<(Option<String>, CeremonyState), WebauthnError> {
+        let row = sqlx::query("UPDATE webauthn_ceremonies SET consumed_at = ? WHERE ceremony_hash = ? AND kind = 'authentication' AND browser_hash = ? AND consumed_at IS NULL AND expires_at > ? RETURNING user_id, state_json")
+            .bind(unix_now())
+            .bind(digest(raw_id))
+            .bind(browser_hash)
+            .bind(unix_now())
+            .fetch_optional(&self.database.pool)
+            .await?
+            .ok_or(WebauthnError::Ceremony)?;
+        let user_id: Option<String> = row.try_get("user_id")?;
+        let state_json: String = row.try_get("state_json")?;
+        Ok((user_id, serde_json::from_str(&state_json)?))
+    }
 }
 
 fn normalize_label(label: &str) -> String {
@@ -728,6 +816,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_login_lists_only_that_accounts_legacy_credential() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        let service = WebauthnService::new(
+            "localhost",
+            &Url::parse("http://localhost:3000").unwrap(),
+            database.clone(),
+        )
+        .unwrap();
+        let user_id = "00000000-0000-4000-8000-000000000004";
+        sqlx::query("INSERT INTO users (id, username, email, display_name, created_at, updated_at) VALUES (?, 'legacy-user', 'legacy@example.com', 'Legacy', 1, 1)")
+            .bind(user_id)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let passkey = serde_json::json!({"cred": {
+            "cred_id": "AQIDBA",
+            "cred": {"type_": "ES256", "key": {"EC_EC2": {
+                "curve": "SECP256R1",
+                "x": [194,126,127,109,252,23,131,21,252,6,223,99,44,254,140,27,230,17,94,5,133,28,104,41,144,69,171,149,161,26,200,243],
+                "y": [143,123,183,156,24,178,21,248,117,159,162,69,171,52,188,252,26,59,6,47,103,92,19,58,117,103,249,0,219,8,95,196]
+            }}},
+            "counter": 0,
+            "transports": null,
+            "user_verified": true,
+            "backup_eligible": false,
+            "backup_state": false,
+            "registration_policy": "required",
+            "extensions": {"cred_protect": "NotRequested", "hmac_create_secret": "NotRequested", "appid": "NotRequested", "cred_props": "NotRequested"},
+            "attestation": {"data": "None", "metadata": "None"},
+            "attestation_format": "none"
+        }});
+        sqlx::query("INSERT INTO passkeys (id, user_id, credential_id, passkey_json, label, created_at) VALUES ('key-1', ?, ?, ?, 'legacy', 1)")
+            .bind(user_id)
+            .bind(vec![1_u8, 2, 3, 4])
+            .bind(passkey.to_string())
+            .execute(&database.pool)
+            .await
+            .unwrap();
+
+        let browser_hash = digest("legacy-browser");
+        let (ceremony_id, options) = service
+            .start_account_authentication("legacy@example.com", &browser_hash)
+            .await
+            .unwrap();
+        let allowed = options["allowCredentials"].as_array().unwrap();
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0]["id"], "AQIDBA");
+        assert!(matches!(
+            service
+                .consume_login_ceremony(&ceremony_id, &digest("another-browser"))
+                .await,
+            Err(WebauthnError::Ceremony)
+        ));
+        let (account_user_id, state) = service
+            .consume_login_ceremony(&ceremony_id, &browser_hash)
+            .await
+            .unwrap();
+        assert_eq!(account_user_id.as_deref(), Some(user_id));
+        assert!(matches!(state, CeremonyState::AccountAuthentication(_)));
+        assert!(matches!(
+            service
+                .consume_login_ceremony(&ceremony_id, &browser_hash)
+                .await,
+            Err(WebauthnError::Ceremony)
+        ));
+    }
+
+    #[tokio::test]
     async fn registration_quota_is_per_user_and_separate_from_authentication_capacity() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         let service = WebauthnService::new(
@@ -758,7 +914,7 @@ mod tests {
         ];
         for session in &sessions[..2] {
             for _ in 0..2 {
-                service
+                let (_, options) = service
                     .start_registration(
                         user_id,
                         "registration-user",
@@ -768,6 +924,12 @@ mod tests {
                     )
                     .await
                     .unwrap();
+                assert_eq!(options["authenticatorSelection"]["residentKey"], "required");
+                assert_eq!(
+                    options["authenticatorSelection"]["requireResidentKey"],
+                    true
+                );
+                assert_eq!(options["extensions"]["credProps"], true);
             }
         }
         service

@@ -1,6 +1,6 @@
 import { startAuthentication } from "@simplewebauthn/browser";
 import { ArrowRight, Check, Clock3, Fingerprint, Mail, MapPin, Phone, ShieldCheck, UserRound, Users, type LucideIcon } from "lucide-react";
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import ClientAdmin from "./ClientAdmin";
 import FirstRun from "./FirstRun";
 import { HankoSeal, type HankoState } from "./components/HankoSeal";
@@ -13,6 +13,7 @@ type Session = {
   authenticated: boolean;
   setup_only: boolean;
   is_admin: boolean;
+  username?: string | null;
   hanko_color?: string | null;
   hanko_seed?: string | null;
   oidc_username?: string | null;
@@ -234,7 +235,7 @@ function App() {
     if (clientsRoute && !session.is_admin) {
       return <Scene phase="error"><Seal phase="error" /><Copy title="Administrator access required" text="Sign in with an administrator account to manage OIDC clients." /></Scene>;
     }
-    return <ClientAdmin isAdmin={session.is_admin} requiredUserClaims={session.required_user_claims ?? []} />;
+    return <ClientAdmin isAdmin={session.is_admin} accountName={session.username ?? ""} requiredUserClaims={session.required_user_claims ?? []} />;
   }
 
   if (requestId && request?.requires_fresh_authentication) {
@@ -280,15 +281,18 @@ function SignIn({
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [failure, setFailure] = useState<SignInFailure | null>(null);
+  const [useAccountName, setUseAccountName] = useState(false);
+  const [account, setAccount] = useState("");
 
   async function signIn() {
+    if (useAccountName && !account.trim()) return;
     setFailure(null);
     setPhase("preparing");
     let passkeyVerified = false;
     try {
       const start = await api<PasskeyStart>("/api/passkeys/login/options", {
         method: "POST",
-        body: json({}),
+        body: json(useAccountName ? { account: account.trim() } : {}),
       });
       const authentication = startAuthentication({ optionsJSON: start.publicKey });
       setPhase("authenticating");
@@ -314,10 +318,23 @@ function SignIn({
     setPhase("idle");
   }
 
+  function accountSignIn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void signIn();
+  }
+
+  function switchSignInMode() {
+    setUseAccountName((current) => !current);
+    setFailure(null);
+    setPhase("idle");
+  }
+
   let title = freshAuthentication ? "Confirm it’s you" : `Sign in to ${clientName}`;
   let text = freshAuthentication
     ? `Use your passkey again to continue to ${clientName}.`
-    : "Use your passkey to continue.";
+    : useAccountName
+      ? "Enter the account name or email associated with your passkey."
+      : "Use your passkey to continue.";
   if (phase === "preparing") {
     title = "Preparing your device…";
     text = "Follow your device prompt.";
@@ -342,20 +359,37 @@ function SignIn({
       text = "Your passkey was accepted, but Hanko couldn’t finish loading this sign-in request. Please try again.";
     } else {
       title = "Passkey wasn’t accepted";
-      text = "Please try again.";
+      text = useAccountName
+        ? "Check the account name and try again with its saved passkey."
+        : "Please try again.";
     }
   }
 
   return <Scene phase={phase}>
     <Seal phase={phase} />
     <Copy title={title} text={text} />
-    {phase === "idle" && <button className="primary-action" onClick={signIn}>
-      <Fingerprint aria-hidden="true" className="size-[19px]" strokeWidth={1.8} />
-      <span>{freshAuthentication ? "Confirm with passkey" : "Sign in with passkey"}</span>
-    </button>}
+    {phase === "idle" && (useAccountName
+      ? <form className="account-sign-in" onSubmit={accountSignIn}>
+        <label htmlFor="passkey-account">Account name or email</label>
+        <input id="passkey-account" type="text" autoComplete="username" value={account}
+          onChange={(event) => setAccount(event.target.value)} required maxLength={254} />
+        <p>For older passkeys, use the account name saved with the passkey.</p>
+        <button className="primary-action" type="submit">
+          <Fingerprint aria-hidden="true" className="size-[19px]" strokeWidth={1.8} />
+          <span>{freshAuthentication ? "Confirm with passkey" : "Sign in with passkey"}</span>
+        </button>
+      </form>
+      : <button className="primary-action" onClick={signIn}>
+        <Fingerprint aria-hidden="true" className="size-[19px]" strokeWidth={1.8} />
+        <span>{freshAuthentication ? "Confirm with passkey" : "Sign in with passkey"}</span>
+      </button>)}
     {phase === "success" && <span className="success-check" aria-label="Signed in"><Check aria-hidden="true" /></span>}
     {phase === "error" && failure !== "access_denied" && failure !== "expired" && <button className="primary-action" onClick={retry}>
       <span>Try again</span><ArrowRight aria-hidden="true" className="size-4" />
+    </button>}
+    {(phase === "idle" || (phase === "error" && failure === "passkey")) && <button
+      className="auth-mode-switch" type="button" onClick={switchSignInMode}>
+      {useAccountName ? "Use a discoverable passkey" : "Passkey not listed? Use account name"}
     </button>}
   </Scene>;
 }

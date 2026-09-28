@@ -89,7 +89,7 @@ function invitationStatus(invitation: Invitation) {
   return "Active";
 }
 
-export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }: { isAdmin?: boolean; requiredUserClaims?: string[] }) {
+export default function ClientAdmin({ isAdmin = true, accountName = "", requiredUserClaims = [] }: { isAdmin?: boolean; accountName?: string; requiredUserClaims?: string[] }) {
   const canEditUserClaim = (claim: string) => canEditConfiguredUserClaim(claim, requiredUserClaims);
   const fieldRequirement = (claim: string) => isRequiredUserClaim(claim, requiredUserClaims) ? "Required" : "Optional";
   const previewScreen = import.meta.env.DEV && new URLSearchParams(window.location.search).get("ui-preview") === "1"
@@ -762,8 +762,7 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
       await refreshPasskeys();
       setPasskeyMessage("Passkey added to this account.");
     } catch (cause) {
-      logUiIssue("add passkey", cause);
-      setPasskeyError("Passkey registration wasn’t completed. You can try again.");
+      setPasskeyError(errorMessage(cause, "add passkey"));
     } finally {
       setAddingPasskey(false);
     }
@@ -1262,6 +1261,8 @@ export default function ClientAdmin({ isAdmin = true, requiredUserClaims = [] }:
           {activeTab === "passkeys" && <section className="account-passkeys">
             <section className="passkey-list" aria-labelledby="passkey-list-title">
               <div className="client-list-heading"><h2 id="passkey-list-title">Registered devices <span>{passkeys.length}</span></h2><button className="client-add-action" type="button" onClick={() => void addPasskey()} disabled={addingPasskey}><Plus aria-hidden="true" /> {addingPasskey ? "Follow your device prompt…" : "Add passkey"}</button></div>
+              {accountName && <p className="admin-hint">Sign-in account name: <PrivateValue>{accountName}</PrivateValue>. Save this name in case an older passkey needs account-specific sign-in.</p>}
+              {passkeys.length < 2 && !passkeysLoading && <p className="admin-hint">Add a second passkey stored independently, then test signing in with it in a separate browser session.</p>}
               {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
               {passkeysLoading ? <p className="admin-hint">Loading passkeys…</p> : passkeys.length === 0 ? <p className="admin-hint">No passkeys are registered.</p> : <div className="admin-table-scroll"><table className="admin-table passkey-table">
                 <thead><tr><th scope="col">Device</th><th scope="col">Added</th><th scope="col">Last used</th><th scope="col">Actions</th></tr></thead>

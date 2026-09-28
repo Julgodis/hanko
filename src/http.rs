@@ -184,6 +184,11 @@ struct RegistrationOptionsInput {
     approval_token: Option<String>,
 }
 
+#[derive(Default, Deserialize)]
+struct LoginOptionsInput {
+    account: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct CredentialChangeOptionsInput {
     action: String,
@@ -1041,6 +1046,7 @@ async fn login_options(
     State(state): State<AppState>,
     headers: HeaderMap,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    input: Option<Json<LoginOptionsInput>>,
 ) -> Result<Response, ApiError> {
     require_origin(&headers, &state.config)?;
     let _slot = try_anonymous_state_slot().ok_or(ApiError {
@@ -1091,18 +1097,32 @@ async fn login_options(
             });
         }
     }
-    let (ceremony_id, public_key) = state
-        .webauthn
-        .start_authentication(&browser_hash)
-        .await
-        .map_err(|error| match error {
-            crate::webauthn::WebauthnError::Capacity => ApiError {
-                status: StatusCode::TOO_MANY_REQUESTS,
-                message: "too many active sign-in requests; try again shortly",
-                retry_after_seconds: None,
-            },
-            _ => ApiError::unauthorized(),
-        })?;
+    let account = input.and_then(|Json(input)| input.account);
+    let account = account
+        .as_deref()
+        .map(|account| account.trim().to_ascii_lowercase());
+    if account.as_ref().is_some_and(|account| {
+        account.is_empty() || account.len() > 254 || account.chars().any(char::is_control)
+    }) {
+        return Err(ApiError::bad_request("invalid account name"));
+    }
+    let authentication = match account.as_deref() {
+        Some(account) => {
+            state
+                .webauthn
+                .start_account_authentication(account, &browser_hash)
+                .await
+        }
+        None => state.webauthn.start_authentication(&browser_hash).await,
+    };
+    let (ceremony_id, public_key) = authentication.map_err(|error| match error {
+        crate::webauthn::WebauthnError::Capacity => ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "too many active sign-in requests; try again shortly",
+            retry_after_seconds: None,
+        },
+        _ => ApiError::unauthorized(),
+    })?;
     let mut response =
         Json(serde_json::json!({ "ceremony_id": ceremony_id, "publicKey": public_key }))
             .into_response();
@@ -1334,7 +1354,12 @@ async fn register_verify(
         .await
         .map_err(|error| {
             tracing::warn!(%error, "passkey registration failed");
-            ApiError::bad_request("passkey registration failed")
+            match error {
+                crate::webauthn::WebauthnError::NonDiscoverable => ApiError::bad_request(
+                    "passkey was not saved as discoverable; choose another passkey provider",
+                ),
+                _ => ApiError::bad_request("passkey registration failed"),
+            }
         })?;
     // Setup and invitation sessions leave setup mode only after the first passkey commits.
     Ok(Json(serde_json::json!({ "ok": true })))

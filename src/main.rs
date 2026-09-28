@@ -32,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         database.clone(),
     )?;
     let master_key = config.master_key.ok_or("missing identity master key")?;
+    database.bind_webauthn_rp_id(&config.webauthn_rp_id).await?;
     let signing_keys = keys::SigningKeys::initialize(database.clone(), master_key).await?;
     spawn_cleanup(database.clone(), signing_keys.clone());
     let app = http::router(AppState {

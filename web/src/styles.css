@@ -246,6 +246,24 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible { outline: 
 .primary-action:active:not(:disabled) { transform: translateY(1px) scale(.992); }
 .primary-action:disabled { cursor: wait; opacity: .72; }
 
+.account-sign-in { display: grid; gap: 8px; margin-top: 25px; text-align: left; }
+.account-sign-in label { color: var(--ink); font-size: 15px; font-weight: 550; }
+.account-sign-in input {
+  width: 100%; min-height: 48px; padding: 10px 12px;
+  border: 1px solid var(--rule); border-radius: 7px;
+  color: var(--ink); background: var(--paper-raised); font: inherit;
+}
+.account-sign-in input:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 2px; }
+.account-sign-in p { margin: 0; color: var(--ink-muted); font-size: 13px; line-height: 1.5; }
+.account-sign-in .primary-action { margin-top: 12px; }
+.auth-mode-switch {
+  display: block; margin: 18px auto 0; padding: 7px 10px;
+  border: 0; color: var(--vermilion-text); background: transparent;
+  font: inherit; font-size: 14px; cursor: pointer;
+}
+.auth-mode-switch:hover { text-decoration: underline; }
+.auth-mode-switch:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 2px; }
+
 .success-check {
   display: grid;
   width: 29px;
