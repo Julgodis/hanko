@@ -3638,12 +3638,20 @@ mod tests {
             .iter()
             .map(|value| value.to_str().unwrap().to_owned())
             .collect();
-        assert_eq!(cleared.len(), 3);
+        assert_eq!(cleared.len(), 5);
         assert!(
             cleared
                 .iter()
                 .any(|cookie| cookie.starts_with("hanko_session="))
         );
+        for cookie_name in ["hanko_csrf", "hanko_crf", "hanko_preauth", "AUTHP"] {
+            assert!(
+                cleared
+                    .iter()
+                    .any(|cookie| cookie.starts_with(&format!("{cookie_name}="))),
+                "logout should clear the {cookie_name} cookie"
+            );
+        }
         let victim_still_exists: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ?)")
                 .bind(&victim_session.session_hash)
@@ -3692,7 +3700,7 @@ mod tests {
                 .get_all(header::SET_COOKIE)
                 .iter()
                 .count(),
-            3
+            5
         );
         let expired_session_remains: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ?)")
