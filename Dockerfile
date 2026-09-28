@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # The UI build is architecture-independent, so build it once on the builder host.
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web-build
+FROM --platform=$BUILDPLATFORM node:26-bookworm-slim AS web-build
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
