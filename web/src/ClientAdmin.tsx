@@ -6,7 +6,7 @@ import { HankoSeal } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
-import { api, defaultPasskeyLabel, json, logUiIssue } from "./lib/utils";
+import { api, appPath, defaultPasskeyLabel, json, logUiIssue } from "./lib/utils";
 import { canEditConfiguredUserClaim, isRequiredUserClaim, missingRequiredUserClaims, type OidcProfileClaims } from "./lib/userClaims";
 
 const AVAILABLE_SCOPES = ["profile", "email", "address", "phone", "picture", "groups", "offline_access"] as const;
@@ -174,6 +174,7 @@ function invitationStatus(invitation: Invitation) {
 export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = "", requiredUserClaims = [] }: { isAdmin?: boolean; defaultTab?: Tab; accountName?: string; requiredUserClaims?: string[] }) {
   const location = useLocation();
   const navigate = useNavigate();
+  const hankoLogoUrl = new URL(appPath("hanko.png"), window.location.origin).href;
   const route = parseAdminRoute(location.pathname);
   const routeState = location.state as { returnToGroup?: boolean; groupId?: string } | null;
   const userClaimsReturnGroup = Boolean(routeState?.returnToGroup);
@@ -1244,6 +1245,13 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
 
           {activeTab === "clients" && isAdmin && clientFormMode !== null && <section className="client-editor-panel client-form-page" aria-labelledby="admin-page-title">
       <form className="client-form" onSubmit={saveClient}>
+        {clientFormMode === "create" && <div className="client-logo-link">
+          <img src={appPath("hanko.png")} alt="" />
+          <div className="client-logo-link-content">
+            <div><strong>Hanko logo</strong><p>Use this public PNG URL when an application asks for a logo.</p></div>
+            <Credential label="Logo URL" value={hankoLogoUrl} copied={copied === "logo"} onCopy={() => copyValue("logo", hankoLogoUrl)} />
+          </div>
+        </div>}
         <label className="admin-field"><span>Application name</span><input autoComplete="off" maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="Jellyfin" required /></label>
         <label className="admin-field">
           <span>Token endpoint authentication</span>
