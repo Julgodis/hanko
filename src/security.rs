@@ -10,7 +10,6 @@ use axum::{
     response::Response,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
@@ -245,7 +244,7 @@ pub struct SessionIdentity {
 
 pub fn random_secret() -> String {
     let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("system randomness is unavailable");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
