@@ -210,6 +210,10 @@ impl IntoResponse for AdminError {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/users", get(list_users))
+        .route(
+            "/api/admin/users/{user_id}",
+            axum::routing::delete(delete_user),
+        )
         .route("/api/admin/users/{user_id}/groups", put(update_user_groups))
         .route(
             "/api/admin/users/{user_id}/claims",
@@ -274,6 +278,75 @@ async fn list_users(
         }));
     }
     Ok(Json(Value::Array(users)))
+}
+
+async fn delete_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> Result<StatusCode, AdminError> {
+    let admin = require_admin(&state, &headers, true).await?;
+    if admin.user_id == user_id {
+        return Err(AdminError::conflict("cannot remove your own account"));
+    }
+
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    let user = sqlx::query("SELECT is_admin, disabled_at FROM users WHERE id = ?")
+        .bind(&user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?
+        .ok_or_else(AdminError::user_not_found)?;
+    let is_active_admin: bool = user
+        .try_get::<bool, _>("is_admin")
+        .map_err(|_| AdminError::internal())?
+        && user
+            .try_get::<Option<i64>, _>("disabled_at")
+            .map_err(|_| AdminError::internal())?
+            .is_none();
+
+    if is_active_admin {
+        let active_admin_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND disabled_at IS NULL",
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+        if active_admin_count <= 1 {
+            return Err(AdminError::conflict(
+                "cannot remove the last active administrator",
+            ));
+        }
+    }
+
+    // Authorization requests are associated with a browser session rather than a
+    // user directly, so remove those tied to this account before its sessions cascade.
+    sqlx::query("DELETE FROM authorization_requests WHERE browser_hash IN (SELECT session_hash FROM sessions WHERE user_id = ?) OR prior_session_hash IN (SELECT session_hash FROM sessions WHERE user_id = ?)")
+        .bind(&user_id)
+        .bind(&user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+
+    let deleted = sqlx::query("DELETE FROM users WHERE id = ?")
+        .bind(&user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
+    if deleted.rows_affected() == 0 {
+        return Err(AdminError::user_not_found());
+    }
+
+    transaction
+        .commit()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_user_claims(

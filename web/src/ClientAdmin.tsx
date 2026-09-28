@@ -279,6 +279,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [groupMembersMessage, setGroupMembersMessage] = useState("");
   const groupMemberLoadId = useRef(0);
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
+  const [deletingUserId, setDeletingUserId] = useState("");
   const [userClaimDrafts, setUserClaimDrafts] = useState<UserClaimDraft[]>([]);
   const [userClaimsLoading, setUserClaimsLoading] = useState(false);
   const [userClaimsReady, setUserClaimsReady] = useState(false);
@@ -585,6 +586,25 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     navigate(userClaimsReturnGroup && userClaimsReturnGroupId
       ? `${TAB_PATHS.groups}/${encodeURIComponent(userClaimsReturnGroupId)}/edit`
       : TAB_PATHS.users);
+  }
+
+  async function removeUser(user: AdminUser) {
+    const label = user.display_name || user.username;
+    const confirmed = window.confirm(`Permanently remove ${label}? This deletes the account, passkeys, active sessions, group memberships, OIDC consents, tokens, and custom claims. This action cannot be undone.`);
+    if (!confirmed) return;
+
+    setDeletingUserId(user.id);
+    setUserEditorError("");
+    try {
+      await api(`/api/admin/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
+      setUsers((current) => current.filter((item) => item.id !== user.id));
+      setGroupMemberSelection((current) => current.filter((id) => id !== user.id));
+      closeUserEditor();
+    } catch (removeError) {
+      setUserEditorError(errorMessage(removeError, "remove user"));
+    } finally {
+      setDeletingUserId("");
+    }
   }
 
   function updateUserClaim(index: number, key: keyof UserClaimDraft, value: string) {
@@ -1391,7 +1411,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
               <div><dt>Created</dt><dd><PrivateValue>{new Date(editingUser.created_at * 1000).toLocaleDateString()}</PrivateValue></dd></div>
             </dl>
             <form className="client-form user-editor-form" onSubmit={saveUserClaims}>
-              <fieldset className="admin-options admin-claims">
+              <fieldset className="admin-options admin-claims" disabled={Boolean(deletingUserId)}>
                 <legend>Custom claims <em>Optional</em></legend>
                 <p className="admin-hint">Add JSON claims to this user’s ID and access tokens. A user claim takes precedence over a group claim with the same name; a client-specific claim mapping takes precedence over both.</p>
                 {userClaimsLoading ? <p className="admin-hint">Loading custom claims…</p> : userClaimDrafts.map((claim, index) => <div className="claim-editor user-claim-editor" key={index}>
@@ -1404,8 +1424,13 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
               </fieldset>
               {userEditorError && <p className="admin-message admin-message-error" role="alert">{userEditorError}</p>}
               {userEditorMessage && <p className="admin-message" role="status">{userEditorMessage}</p>}
-              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={userClaimsBusy || userClaimsLoading || !userClaimsReady}>{userClaimsBusy ? "Saving…" : "Save custom claims"}</button><button className="client-list-action" type="button" disabled={userClaimsBusy} onClick={closeUserEditor}>Cancel</button></div>
+              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={userClaimsBusy || userClaimsLoading || !userClaimsReady || Boolean(deletingUserId)}>{userClaimsBusy ? "Saving…" : "Save custom claims"}</button><button className="client-list-action" type="button" disabled={userClaimsBusy || Boolean(deletingUserId)} onClick={closeUserEditor}>Cancel</button></div>
             </form>
+            <section className="client-danger-zone user-danger-zone" aria-labelledby="user-remove-title">
+              <h2 id="user-remove-title">Remove user</h2>
+              <p>Permanently delete this account, including its passkeys, active sessions, group memberships, OIDC consents, tokens, and custom claims.</p>
+              <button className="client-list-action client-remove-action" type="button" disabled={userClaimsBusy || Boolean(deletingUserId)} onClick={() => void removeUser(editingUser)}><Trash2 aria-hidden="true" />{deletingUserId === editingUser.id ? "Removing…" : "Remove user"}</button>
+            </section>
           </section>}
 
           {activeTab === "users" && isAdmin && userFormOpen && <>
