@@ -7,37 +7,9 @@ import FirstRun from "./FirstRun";
 import { HankoSeal, type HankoState } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
 import { ApiError, api, json, logUiIssue } from "./lib/utils";
-import type { OidcProfileClaims } from "./lib/userClaims";
+import type { Session, SetupStatus, AuthorizationRequest, AuthenticationStart } from "./lib/apiTypes";
 
 type Phase = "idle" | "preparing" | "authenticating" | "success" | "error";
-type Session = {
-  authenticated: boolean;
-  setup_only: boolean;
-  is_admin: boolean;
-  username?: string | null;
-  hanko_color?: string | null;
-  hanko_seed?: string | null;
-  oidc_username?: string | null;
-  oidc_name?: string | null;
-  oidc_picture?: string | null;
-  oidc_phone?: string | null;
-  oidc_address?: { street_address?: string; locality?: string; region?: string; postal_code?: string; country?: string } | null;
-  oidc_profile_claims?: OidcProfileClaims | null;
-  required_user_claims?: string[];
-  allow_multiple_passkeys_per_authenticator?: boolean;
-};
-type SetupStatus = { initialized: boolean; bootstrap_enabled: boolean };
-type AuthorizationRequest = {
-  client_name: string;
-  scopes: string[];
-  requires_fresh_authentication: boolean;
-  consent_required: boolean;
-  claims?: Record<string, unknown> | null;
-};
-type PasskeyStart = {
-  ceremony_id: string;
-  publicKey: Parameters<typeof startAuthentication>[0]["optionsJSON"];
-};
 
 type UserFacingError = { title: string; text: string; retry?: boolean };
 
@@ -295,7 +267,7 @@ function SignIn({
     setPhase("preparing");
     let passkeyVerified = false;
     try {
-      const start = await api<PasskeyStart>("/api/passkeys/login/options", {
+      const start = await api<AuthenticationStart>("/api/passkeys/login/options", {
         method: "POST",
         body: json(useAccountName ? { account: account.trim() } : {}),
       });

@@ -1,3 +1,4 @@
+import type { RegistrationStart } from "./lib/apiTypes";
 import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { startRegistration } from "@simplewebauthn/browser";
@@ -8,10 +9,6 @@ import { ApiError, api, defaultPasskeyLabel, json, logUiIssue } from "./lib/util
 import { ProfileFields } from "./components/ProfileFields";
 import { buildProfilePayload, createProfileDraft, missingProfileClaims, type InitialProfile } from "./lib/profile";
 
-type RegistrationStart = {
-  ceremony_id: string;
-  publicKey: Parameters<typeof startRegistration>[0]["optionsJSON"];
-};
 type Step = "bootstrap" | "profile" | "hanko" | "passkey";
 type Props = {
   hasSetupSession: boolean;
