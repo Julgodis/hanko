@@ -1,3 +1,4 @@
+import type { Session, TokenEndpointAuthMethod, PkcePolicy, Client, Group, AdminUser, UserClaim, Invitation, CreatedInvitation, SigningKey, AccountPasskey, ConsentGrant, CreatedClient, RegistrationStart, AuthenticationStart, CredentialChangeApproval } from "./lib/apiTypes";
 import { Check, Copy, Fingerprint, KeyRound, LogOut, Mail, Pencil, Plus, Shield, ShieldCheck, Users, UserRound, Stamp, Trash2 } from "lucide-react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
@@ -8,40 +9,14 @@ import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
 import { api, appPath, defaultPasskeyLabel, json, logUiIssue } from "./lib/utils";
 import { loadDashboardTab, type DashboardTab } from "./lib/dashboard";
-import type { OidcProfileClaims } from "./lib/userClaims";
 import { ProfileFields } from "./components/ProfileFields";
-import { buildProfilePayload, createProfileDraft, missingProfileClaims, type OidcAddress, type SavedProfile } from "./lib/profile";
+import { buildProfilePayload, createProfileDraft, missingProfileClaims, type SavedProfile } from "./lib/profile";
 
 import { OPTIONAL_SCOPES as AVAILABLE_SCOPES, scopeDescription, type Scope } from "./lib/scopes";
 const EXPIRY_UNIT_SECONDS = { seconds: 1, minutes: 60, hours: 60 * 60, days: 24 * 60 * 60, years: 365 * 24 * 60 * 60 } as const;
 type ExpiryUnit = keyof typeof EXPIRY_UNIT_SECONDS;
 
-type TokenEndpointAuthMethod = "none" | "client_secret_basic" | "client_secret_post";
-type PkcePolicy = "required" | "optional";
-type Client = {
-  client_id: string;
-  name: string;
-  client_type: "public" | "confidential";
-  token_endpoint_auth_method: TokenEndpointAuthMethod;
-  pkce_policy: PkcePolicy;
-  enabled: boolean;
-  redirect_uris: string[];
-  post_logout_redirect_uris: string[];
-  scopes: Scope[];
-  allowed_groups: string[];
-  claims: { claim_name: string; user_attribute_path: string; required_scope: string | null }[];
-  user_count: number;
-};
-type GroupClaimMapping = { claim_name: string; claim_value: unknown; required_scope: Scope };
-type Group = { id: string; name: string; display_name: string; member_count: number; claims?: GroupClaimMapping[] };
-type AdminUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; created_at: number; groups: string[] };
-type UserClaim = { claim_name: string; claim_value: unknown; required_scope: string | null };
 type UserClaimDraft = { claim_name: string; claim_value: string; required_scope: string };
-type Invitation = { id: string; label: string; email: string | null; max_uses: number; use_count: number; created_at: number; expires_at: number; revoked: boolean };
-type CreatedInvitation = { id: string; label: string; email: string | null; enrollment_url: string; expires_at: number };
-type SigningKey = { kid: string; algorithm: string; status: string; created_at: number; retire_after: number | null };
-type AccountPasskey = { id: string; label: string; created_at: number; last_used_at: number | null };
-type ConsentGrant = { client_id: string; client_name: string; scopes: string[]; granted_at: number; expires_at: number | null };
 type Tab = DashboardTab;
 type AdminRoute = {
   tab: Tab;
@@ -55,24 +30,6 @@ type AdminRoute = {
 };
 type ClaimDraft = { claim_name: string; user_attribute_path: string; required_scope: string };
 type GroupClaimDraft = { claim_name: string; claim_value: string; required_scope: Scope };
-type CreatedClient = {
-  client_id: string;
-  client_secret: string | null;
-  name: string;
-  client_type: "public" | "confidential";
-  token_endpoint_auth_method: TokenEndpointAuthMethod;
-  pkce_policy: PkcePolicy;
-  scopes: Scope[];
-};
-type RegistrationStart = {
-  ceremony_id: string;
-  publicKey: Parameters<typeof startRegistration>[0]["optionsJSON"];
-};
-type AuthenticationStart = {
-  ceremony_id: string;
-  publicKey: Parameters<typeof startAuthentication>[0]["optionsJSON"];
-};
-type CredentialChangeApproval = { approval_token: string };
 
 const TAB_PATHS: Record<Tab, string> = {
   clients: "/admin/clients/clients",
@@ -306,7 +263,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     let active = true;
     async function load() {
       try {
-        const session = await api<{ hanko_color?: string; hanko_seed?: string; oidc_username?: string | null; oidc_name?: string | null; oidc_picture?: string | null; oidc_phone?: string | null; oidc_address?: Partial<OidcAddress> | null; oidc_profile_claims?: OidcProfileClaims | null; allow_multiple_passkeys_per_authenticator?: boolean }>("/api/session");
+        const session = await api<Session>("/api/session");
         if (active) {
           if (session.hanko_color) setHankoColor(session.hanko_color === "#d64135" ? ORIGINAL_HANKO_GRADIENT : session.hanko_color);
           if (session.hanko_seed) setHankoSeed(session.hanko_seed);
