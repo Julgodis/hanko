@@ -564,7 +564,15 @@ async fn authorize_request(
     } else {
         None
     };
-    let preauth = crate::security::random_secret();
+    // Tabs share this cookie. Replacing it would orphan every pending request
+    // (and WebAuthn ceremony) started by another tab in the same browser.
+    let preauth = cookie_value(&headers, PREAUTH_COOKIE)
+        .filter(|value| {
+            URL_SAFE_NO_PAD
+                .decode(value)
+                .is_ok_and(|bytes| bytes.len() == 32)
+        })
+        .unwrap_or_else(crate::security::random_secret);
     let request_id = crate::security::random_secret();
     sqlx::query("DELETE FROM authorization_requests WHERE expires_at <= ?")
         .bind(now)
@@ -2643,6 +2651,84 @@ mod tests {
             .await
             .unwrap();
         (state, user_id, client_id)
+    }
+
+    #[tokio::test]
+    async fn overlapping_authorizations_keep_the_browser_binding() {
+        let (state, _, client_id) = oidc_test_state().await;
+        let app = http_router(state);
+        let mut url = Url::parse("http://localhost:3000/authorize").unwrap();
+        url.query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &client_id)
+            .append_pair(
+                "redirect_uri",
+                "https://client.example/callback?from=provider",
+            )
+            .append_pair("scope", "openid")
+            .append_pair("state", "tab-state")
+            .append_pair("code_challenge", &s256_challenge(&"a".repeat(43)))
+            .append_pair("code_challenge_method", "S256");
+        let mut cookie = String::new();
+        let mut request_ids = Vec::new();
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(url.as_str())
+                        .header(header::COOKIE, &cookie)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FOUND);
+            let next_cookie = response.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned();
+            if !cookie.is_empty() {
+                assert_eq!(cookie, next_cookie);
+            }
+            cookie = next_cookie;
+            let location =
+                Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+            request_ids.push(
+                location
+                    .query_pairs()
+                    .find(|(key, _)| key == "request_id")
+                    .unwrap()
+                    .1
+                    .into_owned(),
+            );
+        }
+        assert_ne!(request_ids[0], request_ids[1]);
+        for id in request_ids {
+            for (browser_cookie, expected) in [
+                (cookie.clone(), StatusCode::OK),
+                (
+                    format!("hanko_preauth={}", crate::security::random_secret()),
+                    StatusCode::BAD_REQUEST,
+                ),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/api/authorize/request?request_id={id}"))
+                            .header(header::COOKIE, browser_cookie)
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected);
+            }
+        }
     }
 
     async fn add_confidential_client(state: &AppState) -> (String, String) {
