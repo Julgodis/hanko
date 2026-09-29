@@ -994,60 +994,58 @@ async fn list_clients(
     headers: HeaderMap,
 ) -> Result<Json<Value>, AdminError> {
     let _admin = require_admin(&state, &headers, false).await?;
-    let rows =
-        sqlx::query("SELECT client_id, name, client_type, token_endpoint_auth_method, pkce_policy, enabled FROM oidc_clients ORDER BY name")
-            .fetch_all(&state.database.pool)
-            .await
+    // Read a consistent snapshot with a fixed number of queries, rather than
+    // fetching each client's collections separately.
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    let rows = sqlx::query("SELECT c.client_id, c.name, c.client_type, c.token_endpoint_auth_method, c.pkce_policy, c.enabled, COALESCE(u.user_count, 0) AS user_count FROM oidc_clients c LEFT JOIN (SELECT client_id, COUNT(*) AS user_count FROM client_users GROUP BY client_id) u ON u.client_id = c.client_id ORDER BY c.name, c.client_id")
+        .fetch_all(&mut *transaction).await.map_err(|_| AdminError::internal())?;
+    let related = sqlx::query("SELECT client_id, 'redirect_uris' AS kind, uri AS value FROM client_redirect_uris UNION ALL SELECT client_id, 'post_logout_redirect_uris', uri FROM client_post_logout_uris UNION ALL SELECT client_id, 'scopes', scope FROM client_scopes UNION ALL SELECT cg.client_id, 'allowed_groups', g.name FROM client_allowed_groups cg JOIN groups g ON g.id = cg.group_id ORDER BY client_id, kind, value")
+        .fetch_all(&mut *transaction).await.map_err(|_| AdminError::internal())?;
+    let claim_rows = sqlx::query("SELECT client_id, claim_name, user_attribute_path, required_scope FROM client_claim_mappings ORDER BY client_id, claim_name")
+        .fetch_all(&mut *transaction).await.map_err(|_| AdminError::internal())?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| AdminError::internal())?;
+
+    let mut collections: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, Vec<Value>>,
+    > = std::collections::HashMap::new();
+    for row in related {
+        let client_id: String = row
+            .try_get("client_id")
             .map_err(|_| AdminError::internal())?;
+        let kind: String = row.try_get("kind").map_err(|_| AdminError::internal())?;
+        let value: String = row.try_get("value").map_err(|_| AdminError::internal())?;
+        collections
+            .entry(client_id)
+            .or_default()
+            .entry(kind)
+            .or_default()
+            .push(Value::String(value));
+    }
+    for row in claim_rows {
+        let client_id: String = row
+            .try_get("client_id")
+            .map_err(|_| AdminError::internal())?;
+        collections.entry(client_id).or_default().entry("claims".into()).or_default().push(serde_json::json!({
+            "claim_name": row.try_get::<String, _>("claim_name").map_err(|_| AdminError::internal())?,
+            "user_attribute_path": row.try_get::<String, _>("user_attribute_path").map_err(|_| AdminError::internal())?,
+            "required_scope": row.try_get::<Option<String>, _>("required_scope").map_err(|_| AdminError::internal())?,
+        }));
+    }
     let mut clients = Vec::with_capacity(rows.len());
     for row in rows {
         let client_id: String = row
             .try_get("client_id")
             .map_err(|_| AdminError::internal())?;
-        let redirects: Vec<String> = sqlx::query_scalar(
-            "SELECT uri FROM client_redirect_uris WHERE client_id = ? ORDER BY uri",
-        )
-        .bind(&client_id)
-        .fetch_all(&state.database.pool)
-        .await
-        .map_err(|_| AdminError::internal())?;
-        let scopes: Vec<String> = sqlx::query_scalar(
-            "SELECT scope FROM client_scopes WHERE client_id = ? ORDER BY scope",
-        )
-        .bind(&client_id)
-        .fetch_all(&state.database.pool)
-        .await
-        .map_err(|_| AdminError::internal())?;
-        let groups: Vec<String> = sqlx::query_scalar("SELECT g.name FROM groups g JOIN client_allowed_groups cg ON cg.group_id = g.id WHERE cg.client_id = ? ORDER BY g.name")
-            .bind(&client_id).fetch_all(&state.database.pool).await.map_err(|_| AdminError::internal())?;
-        let post_logout_redirect_uris: Vec<String> = sqlx::query_scalar(
-            "SELECT uri FROM client_post_logout_uris WHERE client_id = ? ORDER BY uri",
-        )
-        .bind(&client_id)
-        .fetch_all(&state.database.pool)
-        .await
-        .map_err(|_| AdminError::internal())?;
-        let claim_rows = sqlx::query("SELECT claim_name, user_attribute_path, required_scope FROM client_claim_mappings WHERE client_id = ? ORDER BY claim_name")
-            .bind(&client_id)
-            .fetch_all(&state.database.pool)
-            .await
-            .map_err(|_| AdminError::internal())?;
-        let claims = claim_rows
-            .into_iter()
-            .map(|claim| {
-                Ok(serde_json::json!({
-                    "claim_name": claim.try_get::<String, _>("claim_name").map_err(|_| AdminError::internal())?,
-                    "user_attribute_path": claim.try_get::<String, _>("user_attribute_path").map_err(|_| AdminError::internal())?,
-                    "required_scope": claim.try_get::<Option<String>, _>("required_scope").map_err(|_| AdminError::internal())?,
-                }))
-            })
-            .collect::<Result<Vec<_>, AdminError>>()?;
-        let user_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM client_users WHERE client_id = ?")
-                .bind(&client_id)
-                .fetch_one(&state.database.pool)
-                .await
-                .map_err(|_| AdminError::internal())?;
+        let mut related = collections.remove(&client_id).unwrap_or_default();
         clients.push(serde_json::json!({
             "client_id": client_id,
             "name": row.try_get::<String, _>("name").map_err(|_| AdminError::internal())?,
@@ -1055,12 +1053,12 @@ async fn list_clients(
             "token_endpoint_auth_method": row.try_get::<String, _>("token_endpoint_auth_method").map_err(|_| AdminError::internal())?,
             "pkce_policy": row.try_get::<String, _>("pkce_policy").map_err(|_| AdminError::internal())?,
             "enabled": row.try_get::<bool, _>("enabled").map_err(|_| AdminError::internal())?,
-            "redirect_uris": redirects,
-            "post_logout_redirect_uris": post_logout_redirect_uris,
-            "scopes": scopes,
-            "allowed_groups": groups,
-            "claims": claims,
-            "user_count": user_count,
+            "redirect_uris": related.remove("redirect_uris").unwrap_or_default(),
+            "post_logout_redirect_uris": related.remove("post_logout_redirect_uris").unwrap_or_default(),
+            "scopes": related.remove("scopes").unwrap_or_default(),
+            "allowed_groups": related.remove("allowed_groups").unwrap_or_default(),
+            "claims": related.remove("claims").unwrap_or_default(),
+            "user_count": row.try_get::<i64, _>("user_count").map_err(|_| AdminError::internal())?,
         }));
     }
     Ok(Json(Value::Array(clients)))

@@ -7,6 +7,7 @@ import { PrivateValue } from "./components/PrivacyMode";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
 import { api, appPath, defaultPasskeyLabel, json, logUiIssue } from "./lib/utils";
+import { loadDashboardTab, type DashboardTab } from "./lib/dashboard";
 import type { OidcProfileClaims } from "./lib/userClaims";
 import { ProfileFields } from "./components/ProfileFields";
 import { buildProfilePayload, createProfileDraft, missingProfileClaims, type OidcAddress, type SavedProfile } from "./lib/profile";
@@ -42,7 +43,7 @@ type CreatedInvitation = { id: string; label: string; email: string | null; enro
 type SigningKey = { kid: string; algorithm: string; status: string; created_at: number; retire_after: number | null };
 type AccountPasskey = { id: string; label: string; created_at: number; last_used_at: number | null };
 type ConsentGrant = { client_id: string; client_name: string; scopes: string[]; granted_at: number; expires_at: number | null };
-type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys" | "consents";
+type Tab = DashboardTab;
 type AdminRoute = {
   tab: Tab;
   canonicalPath: string;
@@ -195,6 +196,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [signingKeys, setSigningKeys] = useState<SigningKey[]>([]);
   const [loading, setLoading] = useState(true);
+  const [tabLoading, setTabLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [sessionsRevoked, setSessionsRevoked] = useState(false);
   const [name, setName] = useState("");
@@ -306,13 +308,8 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     let active = true;
     async function load() {
       try {
-        const sessionPromise = api<{ hanko_color?: string; hanko_seed?: string; oidc_username?: string | null; oidc_name?: string | null; oidc_picture?: string | null; oidc_phone?: string | null; oidc_address?: Partial<OidcAddress> | null; oidc_profile_claims?: OidcProfileClaims | null; allow_multiple_passkeys_per_authenticator?: boolean }>("/api/session");
-        const [session, clientList, groupList] = isAdmin
-          ? await Promise.all([sessionPromise, api<Client[]>("/api/admin/clients"), api<Group[]>("/api/admin/groups")])
-          : [await sessionPromise, [], []];
+        const session = await api<{ hanko_color?: string; hanko_seed?: string; oidc_username?: string | null; oidc_name?: string | null; oidc_picture?: string | null; oidc_phone?: string | null; oidc_address?: Partial<OidcAddress> | null; oidc_profile_claims?: OidcProfileClaims | null; allow_multiple_passkeys_per_authenticator?: boolean }>("/api/session");
         if (active) {
-          setClients(clientList);
-          setGroups(groupList);
           if (session.hanko_color) setHankoColor(session.hanko_color === "#d64135" ? ORIGINAL_HANKO_GRADIENT : session.hanko_color);
           if (session.hanko_seed) setHankoSeed(session.hanko_seed);
           setProfileDraft(createProfileDraft({
@@ -335,35 +332,32 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   useEffect(() => {
     let active = true;
     async function loadTabData() {
+      setTabLoading(true);
+      setLoadError("");
+      setPasskeysLoading(activeTab === "passkeys");
+      setConsentsLoading(activeTab === "consents");
       try {
-        if (activeTab === "users" && isAdmin) {
-          const [userList, invitationList] = await Promise.all([
-            api<AdminUser[]>("/api/admin/users"),
-            api<Invitation[]>("/api/admin/invitations"),
-          ]);
-          setUsers(userList);
-          setInvitations(invitationList);
+        const data = await loadDashboardTab<unknown>(activeTab, isAdmin, path => api(path));
+        if (!active) return;
+        if (data.clients) setClients(data.clients as Client[]);
+        if (data.groups) setGroups(data.groups as Group[]);
+        if (data.users) setUsers(data.users as AdminUser[]);
+        if (data.invitations) setInvitations(data.invitations as Invitation[]);
+        if (data.keys) setSigningKeys(data.keys as SigningKey[]);
+        if (data.passkeys) {
+          const records = data.passkeys as AccountPasskey[];
+          setPasskeys(records);
+          setPasskeyDrafts(Object.fromEntries(records.map(passkey => [passkey.id, passkey.label])));
         }
-        if (activeTab === "groups" && isAdmin) setUsers(await api<AdminUser[]>("/api/admin/users"));
-        if (activeTab === "keys" && isAdmin) setSigningKeys(await api<SigningKey[]>("/api/admin/signing-keys"));
-        if (activeTab === "passkeys") {
-          setPasskeysLoading(true);
-          const records = await api<AccountPasskey[]>("/api/passkeys");
-          if (active) {
-            setPasskeys(records);
-            setPasskeyDrafts(Object.fromEntries(records.map((passkey) => [passkey.id, passkey.label])));
-          }
-        }
-        if (activeTab === "consents") {
-          setConsentsLoading(true);
-          const records = await api<ConsentGrant[]>("/api/account/consents");
-          if (active) setConsents(records);
-        }
+        if (data.consents) setConsents(data.consents as ConsentGrant[]);
       } catch (tabError) {
         if (active) setLoadError(errorMessage(tabError, "load admin tab"));
       } finally {
-        if (active && activeTab === "passkeys") setPasskeysLoading(false);
-        if (active && activeTab === "consents") setConsentsLoading(false);
+        if (active) {
+          setTabLoading(false);
+          setPasskeysLoading(false);
+          setConsentsLoading(false);
+        }
       }
     }
     void loadTabData();
@@ -1221,7 +1215,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
           <p>{description}</p>
         </header>
         {loadError && <p className="admin-message admin-message-error" role="alert">{loadError}</p>}
-        {loading ? <div className="admin-loading"><HankoSeal size={42} /><p>Loading…</p></div> : <>
+        {loading || tabLoading ? <div className="admin-loading"><HankoSeal size={42} /><p>Loading…</p></div> : <>
           {activeTab === "clients" && isAdmin && clientFormMode === null && <>
     <section className="registered-clients">
       <div className="client-list-heading">
