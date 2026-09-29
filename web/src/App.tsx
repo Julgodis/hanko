@@ -138,11 +138,6 @@ function App() {
     async function load() {
       if (authorizationPageError) return;
       try {
-        if (enrollmentToken) {
-          const cleanUrl = new URL(window.location.href);
-          cleanUrl.searchParams.delete("enroll");
-          window.history.replaceState(null, "", cleanUrl);
-        }
         const [identity, setup] = await Promise.all([
           api<Session>("/api/session"),
           api<SetupStatus>("/api/setup-status"),
@@ -193,6 +188,10 @@ function App() {
     ]);
     setSession(identity);
     setSetupStatus(setup);
+    // Keep the invitation recoverable across reloads until enrollment succeeds.
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete("enroll");
+    window.history.replaceState(null, "", cleanUrl);
     setEnrollmentToken(null);
     if (requestId) setRequest(authorizationRequest);
   }
