@@ -100,10 +100,24 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
   const interactive = phase === "idle" || phase === "error";
   const showHanko = step === "hanko" || step === "passkey";
 
-  function continueBootstrap(event: FormEvent<HTMLFormElement>) {
+  async function continueBootstrap(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy || !bootstrapToken.trim()) return;
+    setBusy(true);
     setError("");
-    setStep("profile");
+    try {
+      await api("/api/bootstrap", { method: "POST", body: json({ token: bootstrapToken }) });
+      setBootstrapToken("");
+      setSetupSession(true);
+      setStep("profile");
+    } catch (cause) {
+      logUiIssue("validate bootstrap code", cause);
+      setError(cause instanceof ApiError && cause.status === 401
+        ? "The setup code was not accepted. Check the code and try again."
+        : getError(cause));
+    } finally {
+      setBusy(false);
+    }
   }
 
   function continueProfile(event: FormEvent<HTMLFormElement>) {
@@ -153,14 +167,6 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
         }
         inviteReserved = true;
         setPendingInvitation(null);
-        ready = true;
-        setSetupSession(true);
-      } else if (!ready && isAdminSetup) {
-        await api("/api/bootstrap", {
-          method: "POST",
-          body: json({ token: bootstrapToken }),
-        });
-        setBootstrapToken("");
         ready = true;
         setSetupSession(true);
       }
@@ -289,12 +295,12 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
       {interactive && step === "bootstrap" && <form className="setup-form" onSubmit={continueBootstrap}>
         <label className="admin-field">
           <span>Bootstrap code</span>
-          <input type="password" autoComplete="off" value={bootstrapToken} onChange={(event) => setBootstrapToken(event.target.value)} placeholder="From the server’s environment" />
+          <input type="password" required disabled={busy} autoComplete="off" value={bootstrapToken} onChange={(event) => setBootstrapToken(event.target.value)} placeholder="From the server’s environment" />
           <small>This code creates the first administrator account or resumes setup before its first passkey is saved.</small>
         </label>
         {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
-        <button className="primary-action setup-action" type="submit">
-          <span>Continue</span><ArrowRight aria-hidden="true" className="setup-arrow" />
+        <button className="primary-action setup-action" type="submit" disabled={busy || !bootstrapToken.trim()}>
+          <span>{busy ? "Checking…" : "Continue"}</span><ArrowRight aria-hidden="true" className="setup-arrow" />
         </button>
       </form>}
 
