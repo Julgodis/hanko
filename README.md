@@ -69,6 +69,8 @@ cargo test --locked
 (cd web && npm ci && npm test && npm run typecheck && npm run build)
 ```
 
+Browser regressions run with `cd web && npx playwright install chromium && npm run test:browser`. The suite starts an isolated in-memory Rust server and Vite on ports 38127 and 5179. It covers editor cancellation, invitation reloads, setup, concurrent sign-in tabs, and cross-origin discovery, PKCE token exchange, and userinfo using a virtual passkey. CI runs these browser checks and the Rust regressions for pull requests and releases.
+
 For a local release build, build the UI first, then the server:
 
 ```sh
