@@ -1,9 +1,9 @@
-import userClaimDefinitions from "../../../shared/user_claims.json";
+import userClaimDefinitions from "../../../shared/user_claims.json" with { type: "json" };
 
 export const SUPPORTED_USER_CLAIMS = userClaimDefinitions.supported_user_claims;
 
 const hiddenUserClaims = new Set(
-  (import.meta.env.VITE_HIDDEN_USER_CLAIMS ?? "")
+  (import.meta.env?.VITE_HIDDEN_USER_CLAIMS ?? "")
     .split(",")
     .map((claim) => claim.trim())
     .filter(Boolean),
@@ -20,15 +20,15 @@ export type OidcProfileClaims = {
   app_roles?: Record<string, string[]>;
 };
 
-export function canEditUserClaim(claim: string) {
-  return !hiddenUserClaims.has(claim);
+export function canEditUserClaim(claim: string, hiddenClaims: ReadonlySet<string> = hiddenUserClaims) {
+  return !hiddenClaims.has(claim);
 }
 
-export function canEditConfiguredUserClaim(claim: string, requiredUserClaims: string[]) {
+export function canEditConfiguredUserClaim(claim: string, requiredUserClaims: string[], hiddenClaims: ReadonlySet<string> = hiddenUserClaims) {
   const requiresAddressField = requiredUserClaims.some((requiredClaim) => userClaimDefinitions.address_user_claims.includes(requiredClaim));
   return requiredUserClaims.includes(claim)
     || (requiresAddressField && userClaimDefinitions.address_user_claims.includes(claim))
-    || canEditUserClaim(claim);
+    || canEditUserClaim(claim, hiddenClaims);
 }
 
 export function isRequiredUserClaim(claim: string, requiredUserClaims: string[]) {
