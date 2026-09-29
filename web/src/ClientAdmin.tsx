@@ -12,11 +12,10 @@ import type { OidcProfileClaims } from "./lib/userClaims";
 import { ProfileFields } from "./components/ProfileFields";
 import { buildProfilePayload, createProfileDraft, missingProfileClaims, type OidcAddress, type SavedProfile } from "./lib/profile";
 
-const AVAILABLE_SCOPES = ["profile", "email", "address", "phone", "picture", "groups", "offline_access"] as const;
+import { OPTIONAL_SCOPES as AVAILABLE_SCOPES, scopeDescription, type Scope } from "./lib/scopes";
 const EXPIRY_UNIT_SECONDS = { seconds: 1, minutes: 60, hours: 60 * 60, days: 24 * 60 * 60, years: 365 * 24 * 60 * 60 } as const;
 type ExpiryUnit = keyof typeof EXPIRY_UNIT_SECONDS;
 
-type Scope = "openid" | (typeof AVAILABLE_SCOPES)[number];
 type TokenEndpointAuthMethod = "none" | "client_secret_basic" | "client_secret_post";
 type PkcePolicy = "required" | "optional";
 type Client = {
@@ -1524,17 +1523,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   </AdminScene>;
 }
 
-function scopeDescription(scope: (typeof AVAILABLE_SCOPES)[number]) {
-  switch (scope) {
-    case "profile": return "Name and profile details";
-    case "email": return "Email address";
-    case "address": return "Postal address";
-    case "phone": return "Phone number";
-    case "picture": return "Profile picture URL";
-    case "groups": return "Group memberships";
-    case "offline_access": return "Issue a refresh token for ongoing access";
-  }
-}
 
 function Credential({ label, value, copied, onCopy }: { label: ReactNode; value: string; copied: boolean; onCopy: () => void }) {
   return <div className="credential-row">

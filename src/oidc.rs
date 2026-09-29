@@ -1939,19 +1939,7 @@ fn parse_scopes(scope: &str) -> Result<Vec<String>, OAuthError> {
     let missing_openid = !scopes.iter().any(|scope| scope == "openid");
     let unsupported: Vec<&str> = scopes
         .iter()
-        .filter(|scope| {
-            !matches!(
-                scope.as_str(),
-                "openid"
-                    | "profile"
-                    | "email"
-                    | "picture"
-                    | "address"
-                    | "phone"
-                    | "groups"
-                    | "offline_access"
-            )
-        })
+        .filter(|scope| !crate::scopes::supported(scope))
         .map(String::as_str)
         .collect();
     if scopes.is_empty() || missing_openid || !unsupported.is_empty() {

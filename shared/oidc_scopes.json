@@ -1,0 +1,10 @@
+{
+  "openid": "OpenID Connect identity",
+  "profile": "Name and profile information",
+  "email": "Email address",
+  "address": "Postal address",
+  "phone": "Phone number",
+  "picture": "Profile picture URL",
+  "groups": "Group memberships",
+  "offline_access": "Issue a refresh token for ongoing access"
+}

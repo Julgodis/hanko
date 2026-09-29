@@ -80,7 +80,7 @@ struct DiscoveryDocument {
     token_endpoint_auth_methods_supported: [&'static str; 3],
     code_challenge_methods_supported: [&'static str; 1],
     grant_types_supported: [&'static str; 2],
-    scopes_supported: [&'static str; 8],
+    scopes_supported: &'static [String],
 }
 
 #[derive(Deserialize)]
@@ -417,16 +417,7 @@ async fn discovery(State(state): State<AppState>) -> Json<DiscoveryDocument> {
         ],
         code_challenge_methods_supported: ["S256"],
         grant_types_supported: ["authorization_code", "refresh_token"],
-        scopes_supported: [
-            "openid",
-            "profile",
-            "email",
-            "groups",
-            "offline_access",
-            "picture",
-            "address",
-            "phone",
-        ],
+        scopes_supported: &crate::scopes::SUPPORTED,
     })
 }
 
@@ -2109,7 +2100,12 @@ mod tests {
         let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(document["issuer"], "https://login.example");
         assert_eq!(document["code_challenge_methods_supported"][0], "S256");
-        assert_eq!(document["scopes_supported"][4], "offline_access");
+        assert!(
+            document["scopes_supported"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("offline_access"))
+        );
         assert_eq!(document["grant_types_supported"][1], "refresh_token");
         assert_eq!(document["token_endpoint_auth_methods_supported"][0], "none");
         assert_eq!(
