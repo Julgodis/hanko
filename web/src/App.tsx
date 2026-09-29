@@ -1,6 +1,6 @@
 import { startAuthentication } from "@simplewebauthn/browser";
 import { ArrowRight, Clock3, Fingerprint, Mail, MapPin, Phone, ShieldCheck, UserRound, Users, type LucideIcon } from "lucide-react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import ClientAdmin from "./ClientAdmin";
 import FirstRun from "./FirstRun";
@@ -263,9 +263,7 @@ function App() {
   }
 
   if (session?.authenticated && !session.setup_only) {
-    return <Scene phase="success"><Seal phase="success" color={session.hanko_color} seed={session.hanko_seed} />
-      <span className="sr-only" role="status">Signed in. Opening account settings.</span>
-    </Scene>;
+    return <Navigate to="/account" replace />;
   }
 
   return <SignIn
