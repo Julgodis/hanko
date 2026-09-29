@@ -5,3 +5,5 @@
 *.sqlite-shm
 *.sqlite-wal
 .env
+/web/test-results
+/web/playwright-report

@@ -282,7 +282,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [userEditorMessage, setUserEditorMessage] = useState("");
   const initializedClientEdit = useRef("");
   const initializedGroupEdit = useRef("");
-  const initializedUserEdit = useRef("");
 
   useEffect(() => {
     if (!previewScreen && route.canonicalPath !== location.pathname) {
@@ -531,30 +530,10 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     navigate(TAB_PATHS.groups);
   }
 
-  async function openEditUser(user: AdminUser, returnToGroup = false) {
-    setEditingUser(user);
-    setUserClaimDrafts([]);
-    setUserClaimsLoading(true);
-    setUserClaimsReady(false);
-    setUserEditorError("");
-    setUserEditorMessage("");
-    initializedUserEdit.current = user.id;
+  function openEditUser(user: AdminUser, returnToGroup = false) {
     navigate(`${TAB_PATHS.users}/${encodeURIComponent(user.id)}/edit`, {
       state: returnToGroup ? { returnToGroup: true, groupId: editingGroupId } : null,
     });
-    try {
-      const claims = await api<UserClaim[]>(`/api/admin/users/${encodeURIComponent(user.id)}/claims`);
-      setUserClaimDrafts(claims.map((claim) => ({
-        claim_name: claim.claim_name,
-        claim_value: JSON.stringify(claim.claim_value) ?? "null",
-        required_scope: claim.required_scope ?? "",
-      })));
-      setUserClaimsReady(true);
-    } catch (loadError) {
-      setUserEditorError(errorMessage(loadError, "load user claims"));
-    } finally {
-      setUserClaimsLoading(false);
-    }
   }
 
   function closeUserEditor() {
@@ -564,7 +543,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     setUserClaimsReady(false);
     setUserEditorError("");
     setUserEditorMessage("");
-    initializedUserEdit.current = "";
     navigate(userClaimsReturnGroup && userClaimsReturnGroupId
       ? `${TAB_PATHS.groups}/${encodeURIComponent(userClaimsReturnGroupId)}/edit`
       : TAB_PATHS.users);
@@ -1017,7 +995,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     setUserEditorError("");
     setUserEditorMessage("");
     setError("");
-    initializedUserEdit.current = "";
     initializedClientEdit.current = "";
     initializedGroupEdit.current = "";
     setGroupMembersReady(false);
@@ -1127,7 +1104,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
 
   useEffect(() => {
     if (!route.userId) {
-      initializedUserEdit.current = "";
       setEditingUser(null);
       setUserClaimDrafts([]);
       setUserClaimsLoading(false);
@@ -1136,11 +1112,9 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       setUserEditorMessage("");
       return;
     }
-    if (initializedUserEdit.current === route.userId) return;
     const user = users.find((candidate) => candidate.id === route.userId);
     if (!user) return;
 
-    initializedUserEdit.current = route.userId;
     setEditingUser(user);
     setUserClaimDrafts([]);
     setUserClaimsLoading(true);
@@ -1162,7 +1136,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       if (active) setUserClaimsLoading(false);
     });
     return () => { active = false; };
-  }, [location.state, route.userId, users]);
+  }, [route.userId, users]);
   const title = activeTab === "clients" && clientFormMode !== null
     ? clientFormMode === "edit" ? "Edit OIDC client" : "Add an OIDC client"
     : activeTab === "users" && editingUser ? "Edit user"
