@@ -455,6 +455,24 @@ async fn create_session_with_auth_time(
     now: i64,
     authenticated_at_ms: i64,
 ) -> Result<BrowserSession, sqlx::Error> {
+    let mut connection = database.pool.acquire().await?;
+    create_session_on_connection(
+        &mut connection,
+        user_id,
+        setup_only,
+        now,
+        authenticated_at_ms,
+    )
+    .await
+}
+
+pub(crate) async fn create_session_on_connection(
+    connection: &mut sqlx::SqliteConnection,
+    user_id: &str,
+    setup_only: bool,
+    now: i64,
+    authenticated_at_ms: i64,
+) -> Result<BrowserSession, sqlx::Error> {
     let raw_token = random_secret();
     let raw_csrf = random_secret();
     let session_hash = digest(&raw_token);
@@ -467,7 +485,7 @@ async fn create_session_with_auth_time(
         .bind(now)
         .bind(now + SESSION_SECONDS)
         .bind(authenticated_at_ms)
-        .execute(&database.pool)
+        .execute(connection)
         .await?;
     Ok(BrowserSession {
         raw_token,

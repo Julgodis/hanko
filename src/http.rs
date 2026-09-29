@@ -26,9 +26,8 @@ use crate::{
     security::{
         AnonymousRequestLimiter, BrowserSession, PREAUTH_COOKIE, SESSION_COOKIE,
         anonymous_request_allowed, clear_session_cookies, cookie_header, cookie_value,
-        create_passkey_session, create_session, csrf_header_matches, digest, load_identity,
-        load_session, origin_is_valid, set_session_cookies, source_ip, try_anonymous_state_slot,
-        unix_now,
+        create_passkey_session, csrf_header_matches, digest, load_identity, load_session,
+        origin_is_valid, set_session_cookies, source_ip, try_anonymous_state_slot, unix_now,
     },
     webauthn::WebauthnService,
 };
@@ -477,6 +476,10 @@ async fn generated_user_picture(
         .map_err(|_| ApiError::internal())
 }
 
+// Only an installation whose sole account is an unfinished administrator may
+// resume bootstrap. Completed installations and invited accounts are excluded.
+const PENDING_BOOTSTRAP_USER: &str = "SELECT u.id FROM users u WHERE u.is_admin = 1 AND u.disabled_at IS NULL AND u.invitation_link_id IS NULL AND NOT EXISTS (SELECT 1 FROM users other WHERE other.id != u.id) AND NOT EXISTS (SELECT 1 FROM passkeys WHERE user_id = u.id) AND NOT EXISTS (SELECT 1 FROM sessions WHERE user_id = u.id AND setup_only = 0)";
+
 async fn bootstrap(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -542,6 +545,12 @@ async fn bootstrap(
     let display_name = raw_display_name.unwrap_or(&username);
     validate_hanko_style(&input.hanko_color, &input.hanko_seed)?;
     let now = unix_now();
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| ApiError::internal())?;
     let inserted = sqlx::query("INSERT INTO users (id, username, display_name, hanko_color, hanko_seed, expose_preferred_username, expose_name, is_admin, created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, 1, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)")
         .bind(&user_id)
         .bind(&username)
@@ -552,23 +561,41 @@ async fn bootstrap(
         .bind(raw_display_name.is_some())
         .bind(now)
         .bind(now)
-        .execute(&state.database.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to create initial administrator");
             ApiError::internal()
         })?;
-    if inserted.rows_affected() != 1 {
-        return Err(ApiError::conflict(
-            "identity provider has already been initialized",
-        ));
-    }
-    let session = create_session(&state.database, &user_id, true, now)
+    let user_id = if inserted.rows_affected() == 1 {
+        user_id
+    } else {
+        let user_id: String = sqlx::query_scalar(PENDING_BOOTSTRAP_USER)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| ApiError::internal())?
+            .ok_or_else(|| ApiError::conflict("identity provider has already been initialized"))?;
+        // Rotate the setup capability and discard ceremonies from the old session.
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(&user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ApiError::internal())?;
+        sqlx::query("DELETE FROM webauthn_ceremonies WHERE user_id = ?")
+            .bind(&user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ApiError::internal())?;
+        user_id
+    };
+    let session =
+        crate::security::create_session_on_connection(&mut transaction, &user_id, true, now, 0)
+            .await
+            .map_err(|_| ApiError::internal())?;
+    transaction
+        .commit()
         .await
-        .map_err(|error| {
-            tracing::error!(%error, "failed to create initial session");
-            ApiError::internal()
-        })?;
+        .map_err(|_| ApiError::internal())?;
     let mut response = Json(serde_json::json!({ "ok": true, "setup_only": true })).into_response();
     set_session_cookies(&mut response, &session, &state.config);
     Ok(response)
@@ -1048,6 +1075,12 @@ async fn setup_status(State(state): State<AppState>) -> Result<Json<serde_json::
         .fetch_one(&state.database.pool)
         .await
         .map_err(|_| ApiError::internal())?;
+    let incomplete = sqlx::query_scalar::<_, String>(PENDING_BOOTSTRAP_USER)
+        .fetch_optional(&state.database.pool)
+        .await
+        .map_err(|_| ApiError::internal())?
+        .is_some();
+    let initialized = initialized && !incomplete;
     Ok(Json(
         serde_json::json!({ "initialized": initialized, "bootstrap_enabled": state.config.bootstrap_token.is_some() }),
     ))
@@ -2052,7 +2085,7 @@ mod tests {
         )
         .unwrap();
         config.bootstrap_token = Some("bootstrap-secret".into());
-        let app = test_app(config).await;
+        let (app, database) = test_app_with_database(config).await;
         let request = || {
             axum::http::Request::builder()
                 .method("POST")
@@ -2082,8 +2115,91 @@ mod tests {
                 .iter()
                 .any(|v| v.starts_with("hanko_csrf=") && !v.contains("HttpOnly"))
         );
+        sqlx::query("INSERT INTO passkeys (id, user_id, credential_id, passkey_json, label, created_at) SELECT 'key', id, X'01', '{}', 'Test', 0 FROM users")
+            .execute(&database.pool).await.unwrap();
         assert_eq!(
             app.oneshot(request()).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_bootstrap_can_resume_with_token_and_rotates_setup_session() {
+        let mut config = local_config();
+        config.bootstrap_token = Some("bootstrap-secret".into());
+        let (app, database) = test_app_with_database(config).await;
+        let body = serde_json::json!({"token":"bootstrap-secret"});
+        let first = browser_request(&app, "POST", "/api/bootstrap", "", body.clone()).await;
+        let old_cookies = response_cookies(&first);
+        let user_id: String = sqlx::query_scalar("SELECT id FROM users")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        let status = response_json(
+            browser_request(&app, "GET", "/api/setup-status", "", serde_json::json!({})).await,
+        )
+        .await;
+        assert_eq!(status["initialized"], false);
+        let rejected = browser_request(
+            &app,
+            "POST",
+            "/api/bootstrap",
+            "",
+            serde_json::json!({"token":"wrong"}),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        let resumed = browser_request(&app, "POST", "/api/bootstrap", "", body.clone()).await;
+        assert_eq!(resumed.status(), StatusCode::OK);
+        let cookies = response_cookies(&resumed);
+        assert_ne!(old_cookies, cookies);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT id FROM users")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap(),
+            user_id
+        );
+        assert_eq!(
+            browser_request(
+                &app,
+                "POST",
+                "/api/passkeys/register/options",
+                &old_cookies,
+                serde_json::json!({})
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            browser_request(
+                &app,
+                "POST",
+                "/api/passkeys/register/options",
+                &cookies,
+                serde_json::json!({})
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        // Resumption must also work after expired sessions have been cleaned up.
+        sqlx::query("DELETE FROM sessions")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            browser_request(&app, "POST", "/api/bootstrap", "", body.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        sqlx::query("INSERT INTO users(id,username,display_name,created_at,updated_at) VALUES('other','other','Other',0,0)").execute(&database.pool).await.unwrap();
+        assert_eq!(
+            browser_request(&app, "POST", "/api/bootstrap", "", body)
+                .await
+                .status(),
             StatusCode::CONFLICT
         );
     }
