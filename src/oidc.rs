@@ -2373,7 +2373,7 @@ async fn verify_access_token(state: &AppState, token: &str) -> Result<AccessClai
         return Err(OAuthError::invalid_grant());
     }
     let kid = header.kid.ok_or_else(OAuthError::invalid_grant)?;
-    let decoding_key = load_decoding_key(state, &kid, unix_now()).await?;
+    let decoding_key = load_decoding_key(state, &kid, unix_now(), false).await?;
     let mut validation = Validation::new(Algorithm::ES256);
     validation.set_issuer(&[state.config.issuer()]);
     validation.validate_exp = true;
@@ -2411,7 +2411,7 @@ async fn verify_id_token_hint(
         return Err(OAuthError::invalid_grant());
     }
     let kid = header.kid.ok_or_else(OAuthError::invalid_grant)?;
-    let decoding_key = load_decoding_key(state, &kid, unix_now()).await?;
+    let decoding_key = load_decoding_key(state, &kid, unix_now(), true).await?;
     let mut validation = Validation::new(Algorithm::ES256);
     validation.set_issuer(&[state.config.issuer()]);
     validation.validate_exp = false;
@@ -2449,10 +2449,16 @@ async fn load_decoding_key(
     state: &AppState,
     kid: &str,
     now: i64,
+    for_logout_hint: bool,
 ) -> Result<DecodingKey, OAuthError> {
-    let row = sqlx::query("SELECT public_jwk FROM signing_keys WHERE kid = ? AND (status = 'active' OR (status = 'retiring' AND retire_after > ?))")
+    // Only logout accepts historical public keys; access-token validation keeps
+    // the normal retirement deadline even before cleanup has run.
+    let row = sqlx::query("SELECT public_jwk FROM signing_keys WHERE kid = ? AND (status = 'active' OR (status = 'retiring' AND (retire_after > ? OR ?))) UNION ALL SELECT public_jwk FROM retired_signing_public_keys WHERE kid = ? AND ? LIMIT 1")
         .bind(kid)
         .bind(now)
+        .bind(for_logout_hint)
+        .bind(kid)
+        .bind(for_logout_hint)
         .fetch_optional(&state.database.pool)
         .await
         .map_err(|_| OAuthError::server_error())?
@@ -4056,6 +4062,83 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn logout_verifies_old_hints_after_private_key_retirement() {
+        let (state, user_id, client_id) = oidc_test_state().await;
+        let session = create_session(&state.database, &user_id, false, unix_now())
+            .await
+            .unwrap();
+        let tokens = issue_tokens(
+            &state,
+            &client_id,
+            &user_id,
+            &["openid".into()],
+            unix_now(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let old_kid = state.signing_keys.active_kid().await.unwrap();
+        state.signing_keys.rotate(unix_now()).await.unwrap();
+        sqlx::query("UPDATE signing_keys SET retire_after = ? WHERE kid = ?")
+            .bind(unix_now() - 1)
+            .bind(&old_kid)
+            .execute(&state.database.pool)
+            .await
+            .unwrap();
+        assert!(verify_id_token_hint(&state, &tokens.id_token).await.is_ok());
+        assert!(
+            verify_access_token(&state, &tokens.access_token)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.signing_keys.prune_retired(unix_now()).await.unwrap(),
+            1
+        );
+        assert_eq!(state.signing_keys.public_jwks().await.unwrap().len(), 1);
+        assert!(
+            verify_access_token(&state, &tokens.access_token)
+                .await
+                .is_err()
+        );
+        let private_key_remains: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM signing_keys WHERE kid = ?)")
+                .bind(&old_kid)
+                .fetch_one(&state.database.pool)
+                .await
+                .unwrap();
+        assert!(!private_key_remains);
+        let mut url = Url::parse("http://localhost:3000/logout").unwrap();
+        url.query_pairs_mut()
+            .append_pair("id_token_hint", &tokens.id_token);
+        let response = http_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(url.as_str())
+                    .header(
+                        header::COOKIE,
+                        format!(
+                            "hanko_session={}; hanko_csrf={}",
+                            session.raw_token, session.raw_csrf
+                        ),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let session_remains: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_hash = ?)")
+                .bind(session.session_hash)
+                .fetch_one(&state.database.pool)
+                .await
+                .unwrap();
+        assert!(!session_remains);
     }
 
     #[tokio::test]

@@ -132,11 +132,17 @@ impl SigningKeys {
     }
 
     pub async fn prune_retired(&self, now: i64) -> Result<u64, KeyError> {
+        let mut transaction = self.database.pool.begin().await?;
+        sqlx::query("INSERT INTO retired_signing_public_keys (kid, public_jwk, retired_at) SELECT kid, public_jwk, retire_after FROM signing_keys WHERE status = 'retiring' AND retire_after <= ? ON CONFLICT(kid) DO NOTHING")
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
         let result =
             sqlx::query("DELETE FROM signing_keys WHERE status = 'retiring' AND retire_after <= ?")
                 .bind(now)
-                .execute(&self.database.pool)
+                .execute(&mut *transaction)
                 .await?;
+        transaction.commit().await?;
         Ok(result.rows_affected())
     }
 
