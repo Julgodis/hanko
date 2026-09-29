@@ -4,6 +4,7 @@ mod db;
 mod http;
 mod keys;
 mod oidc;
+mod scopes;
 mod security;
 mod stamp;
 mod webauthn;

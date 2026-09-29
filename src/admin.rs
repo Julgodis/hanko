@@ -1136,19 +1136,7 @@ async fn create_client(
         scopes.push("openid".to_owned());
     }
     if !scopes.iter().any(|scope| scope == "openid")
-        || scopes.iter().any(|scope| {
-            !matches!(
-                scope.as_str(),
-                "openid"
-                    | "profile"
-                    | "email"
-                    | "picture"
-                    | "address"
-                    | "phone"
-                    | "groups"
-                    | "offline_access"
-            )
-        })
+        || scopes.iter().any(|scope| !crate::scopes::supported(scope))
     {
         return Err(AdminError::bad_request(
             "client scopes must include openid and use supported scopes",
@@ -1287,19 +1275,7 @@ async fn update_client(
         scopes.push("openid".to_owned());
     }
     if !scopes.iter().any(|scope| scope == "openid")
-        || scopes.iter().any(|scope| {
-            !matches!(
-                scope.as_str(),
-                "openid"
-                    | "profile"
-                    | "email"
-                    | "picture"
-                    | "address"
-                    | "phone"
-                    | "groups"
-                    | "offline_access"
-            )
-        })
+        || scopes.iter().any(|scope| !crate::scopes::supported(scope))
     {
         return Err(AdminError::bad_request(
             "client scopes must include openid and use supported scopes",
@@ -1844,10 +1820,7 @@ fn validate_group_claims(claims: &[GroupClaimInput]) -> Result<(), AdminError> {
                 "invalid or duplicate group claim name",
             ));
         }
-        if !matches!(
-            claim.required_scope.as_str(),
-            "openid" | "profile" | "email" | "groups" | "offline_access"
-        ) {
+        if !crate::scopes::supported(&claim.required_scope) {
             return Err(AdminError::bad_request("unsupported group claim scope"));
         }
         let value = serde_json::to_vec(&claim.claim_value).map_err(|_| AdminError::internal())?;
@@ -1870,19 +1843,11 @@ fn validate_user_claims(claims: &[UserClaimInput]) -> Result<(), AdminError> {
                 "invalid or duplicate user claim name",
             ));
         }
-        if claim.required_scope.as_deref().is_some_and(|scope| {
-            !matches!(
-                scope,
-                "openid"
-                    | "profile"
-                    | "email"
-                    | "address"
-                    | "phone"
-                    | "picture"
-                    | "groups"
-                    | "offline_access"
-            )
-        }) {
+        if claim
+            .required_scope
+            .as_deref()
+            .is_some_and(|scope| !crate::scopes::supported(scope))
+        {
             return Err(AdminError::bad_request("unsupported user claim scope"));
         }
         let value = serde_json::to_vec(&claim.claim_value).map_err(|_| AdminError::internal())?;
@@ -1904,6 +1869,24 @@ fn valid_json_pointer(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_claims_accept_all_advertised_scopes_and_reject_unknown_ones() {
+        for scope in crate::scopes::SUPPORTED.iter() {
+            let claim = GroupClaimInput {
+                claim_name: "department".into(),
+                claim_value: serde_json::json!("engineering"),
+                required_scope: scope.clone(),
+            };
+            assert!(validate_group_claims(&[claim]).is_ok(), "{scope}");
+        }
+        let claim = GroupClaimInput {
+            claim_name: "department".into(),
+            claim_value: serde_json::json!("engineering"),
+            required_scope: "unknown".into(),
+        };
+        assert!(validate_group_claims(&[claim]).is_err());
+    }
 
     #[test]
     fn custom_claim_mappings_reject_reserved_claims_and_bad_pointers() {
