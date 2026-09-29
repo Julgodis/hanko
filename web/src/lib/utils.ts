@@ -84,3 +84,8 @@ export function defaultPasskeyLabel(addedAt = new Date()) {
   const time = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(addedAt);
   return `${device} · added ${time}`;
 }
+
+export function errorMessage(error: unknown, context: string) {
+  logUiIssue(context, error);
+  return error instanceof Error ? error.message : "The request could not be completed.";
+}

@@ -1,22 +1,22 @@
-import type { Session, TokenEndpointAuthMethod, PkcePolicy, Client, Group, AdminUser, UserClaim, Invitation, CreatedInvitation, SigningKey, AccountPasskey, ConsentGrant, CreatedClient, RegistrationStart, AuthenticationStart, CredentialChangeApproval } from "./lib/apiTypes";
-import { Check, Copy, Fingerprint, KeyRound, LogOut, Mail, Pencil, Plus, Shield, ShieldCheck, Users, UserRound, Stamp, Trash2 } from "lucide-react";
+import { InvitationEditor } from "./admin/InvitationEditor";
+import { GroupEditor } from "./admin/GroupEditor";
+import { ClientEditor } from "./admin/ClientEditor";
+import { UserEditor } from "./admin/UserEditor";
+import { Credential } from "./admin/Credential";
+import type { Session, Client, Group, AdminUser, Invitation, SigningKey, AccountPasskey, ConsentGrant, CreatedClient, RegistrationStart, AuthenticationStart, CredentialChangeApproval } from "./lib/apiTypes";
+import { Check, Fingerprint, KeyRound, LogOut, Pencil, Plus, Shield, ShieldCheck, Users, UserRound, Stamp, Trash2 } from "lucide-react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { HankoSeal } from "./components/HankoSeal";
 import { PrivateValue } from "./components/PrivacyMode";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
-import { api, appPath, defaultPasskeyLabel, json, logUiIssue } from "./lib/utils";
+import { api, appPath, errorMessage, defaultPasskeyLabel, json } from "./lib/utils";
 import { loadDashboardTab, type DashboardTab } from "./lib/dashboard";
 import { ProfileFields } from "./components/ProfileFields";
 import { buildProfilePayload, createProfileDraft, missingProfileClaims, type SavedProfile } from "./lib/profile";
 
-import { OPTIONAL_SCOPES as AVAILABLE_SCOPES, scopeDescription, type Scope } from "./lib/scopes";
-const EXPIRY_UNIT_SECONDS = { seconds: 1, minutes: 60, hours: 60 * 60, days: 24 * 60 * 60, years: 365 * 24 * 60 * 60 } as const;
-type ExpiryUnit = keyof typeof EXPIRY_UNIT_SECONDS;
-
-type UserClaimDraft = { claim_name: string; claim_value: string; required_scope: string };
 type Tab = DashboardTab;
 type AdminRoute = {
   tab: Tab;
@@ -28,8 +28,6 @@ type AdminRoute = {
   groupFormOpen: boolean;
   groupId: string;
 };
-type ClaimDraft = { claim_name: string; user_attribute_path: string; required_scope: string };
-type GroupClaimDraft = { claim_name: string; claim_value: string; required_scope: Scope };
 
 const TAB_PATHS: Record<Tab, string> = {
   clients: "/admin/clients/clients",
@@ -103,22 +101,6 @@ function parseAdminRoute(pathname: string): AdminRoute {
   return route;
 }
 
-function splitLines(value: string) {
-  return [...new Set(value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
-}
-
-function errorMessage(error: unknown, context: string) {
-  logUiIssue(context, error);
-  return error instanceof Error ? error.message : "The request could not be completed.";
-}
-
-function invitationEmailHref(invitation: CreatedInvitation) {
-  const subject = `Your Hanko invite: ${invitation.label}`;
-  const expiry = new Date(invitation.expires_at * 1000).toLocaleString();
-  const body = `You have been invited to set up a Hanko account.\n\nUse this link before ${expiry}:\n${invitation.enrollment_url}`;
-  return `mailto:${encodeURIComponent(invitation.email ?? "")}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-}
-
 function invitationStatus(invitation: Invitation) {
   if (invitation.revoked) return "Revoked";
   if (invitation.expires_at <= Date.now() / 1000) return "Expired";
@@ -129,7 +111,6 @@ function invitationStatus(invitation: Invitation) {
 export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = "", requiredUserClaims = [] }: { isAdmin?: boolean; defaultTab?: Tab; accountName?: string; requiredUserClaims?: string[] }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const hankoLogoUrl = new URL(appPath("hanko.png"), window.location.origin).href;
   const route = parseAdminRoute(location.pathname);
   const routeState = location.state as { returnToGroup?: boolean; groupId?: string } | null;
   const userClaimsReturnGroup = Boolean(routeState?.returnToGroup);
@@ -149,22 +130,14 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const activeTab = previewScreen ? previewTab() : userClaimsReturnGroup ? "users" : route.tab;
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
+  const [usersRevision, setUsersRevision] = useState(0);
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const editingUser = users.find(user => user.id === route.userId) ?? null;
   const [signingKeys, setSigningKeys] = useState<SigningKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [tabLoading, setTabLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [sessionsRevoked, setSessionsRevoked] = useState(false);
-  const [name, setName] = useState("");
-  const [tokenAuthMethod, setTokenAuthMethod] = useState<TokenEndpointAuthMethod>("none");
-  const [pkcePolicy, setPkcePolicy] = useState<PkcePolicy>("required");
-  const [clientEnabled, setClientEnabled] = useState(true);
-  const [redirectUris, setRedirectUris] = useState("");
-  const [logoutUris, setLogoutUris] = useState("");
-  const [scopes, setScopes] = useState<Scope[]>(["openid", "profile", "email"]);
-  const [allowedGroups, setAllowedGroups] = useState<string[]>([]);
-  const [claims, setClaims] = useState<ClaimDraft[]>([]);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState("");
@@ -172,9 +145,9 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [credentialsUpdated, setCredentialsUpdated] = useState(false);
   const userFormOpen = previewScreen === "invite" || previewScreen === "invite-ready" || route.userFormOpen;
   const groupFormOpen = route.groupFormOpen;
-  const editingGroupId = route.groupId;
+  const editingGroupId = route.groupId || (userClaimsReturnGroup ? userClaimsReturnGroupId : "");
+  const groupBeingEdited = groups.find(group => group.id === editingGroupId) ?? null;
   const editingClientId = route.clientId;
-  const [deletingClientId, setDeletingClientId] = useState("");
   const [created, setCreated] = useState<CreatedClient | null>(null);
   const [copied, setCopied] = useState("");
   const [addingPasskey, setAddingPasskey] = useState(false);
@@ -201,49 +174,23 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [savingOidcProfile, setSavingOidcProfile] = useState(false);
   const [oidcProfileMessage, setOidcProfileMessage] = useState("");
   const [invitations, setInvitations] = useState<Invitation[]>([]);
-  const [invitationLabel, setInvitationLabel] = useState("");
-  const [invitationEmail, setInvitationEmail] = useState("");
-  const [invitationMaxUses, setInvitationMaxUses] = useState("1");
-  const [invitationExpiry, setInvitationExpiry] = useState("15");
-  const [invitationExpiryUnit, setInvitationExpiryUnit] = useState<ExpiryUnit>("minutes");
-  const [userGroups, setUserGroups] = useState<string[]>([]);
-  const [createdInvitation, setCreatedInvitation] = useState<CreatedInvitation | null>(previewScreen === "invite-ready" ? {
-    id: "inv_preview_ready",
-    label: "Studio team",
-    email: "person@example.com",
-    enrollment_url: "https://id.example.com/enroll/sample-invite-token",
-    expires_at: 1_793_109_600,
-  } : null);
-  const [groupName, setGroupName] = useState("");
-  const [groupDisplayName, setGroupDisplayName] = useState("");
-  const [groupClaims, setGroupClaims] = useState<GroupClaimDraft[]>([]);
   const [deletingGroupId, setDeletingGroupId] = useState("");
   const [adminActionBusy, setAdminActionBusy] = useState(false);
   const [adminActionMessage, setAdminActionMessage] = useState("");
-  const [groupMemberSelection, setGroupMemberSelection] = useState<string[]>([]);
-  const [groupMemberSearch, setGroupMemberSearch] = useState("");
-  const [groupMembersLoading, setGroupMembersLoading] = useState(false);
-  const [groupMembersBusy, setGroupMembersBusy] = useState(false);
-  const [groupMembersReady, setGroupMembersReady] = useState(false);
-  const [groupMembersError, setGroupMembersError] = useState("");
-  const [groupMembersMessage, setGroupMembersMessage] = useState("");
-  const groupMemberLoadId = useRef(0);
-  const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
-  const [deletingUserId, setDeletingUserId] = useState("");
-  const [userClaimDrafts, setUserClaimDrafts] = useState<UserClaimDraft[]>([]);
-  const [userClaimsLoading, setUserClaimsLoading] = useState(false);
-  const [userClaimsReady, setUserClaimsReady] = useState(false);
-  const [userClaimsBusy, setUserClaimsBusy] = useState(false);
-  const [userEditorError, setUserEditorError] = useState("");
-  const [userEditorMessage, setUserEditorMessage] = useState("");
-  const initializedClientEdit = useRef("");
-  const initializedGroupEdit = useRef("");
 
   useEffect(() => {
     if (!previewScreen && route.canonicalPath !== location.pathname) {
       navigate(route.canonicalPath, { replace: true });
     }
   }, [location.pathname, navigate, previewScreen, route.canonicalPath]);
+
+  function openCreateClient() { setCreated(null); setCredentialsUpdated(false); setError(""); navigate(`${TAB_PATHS.clients}/new`); }
+  function openEditClient(client: Client) { setCreated(null); setCredentialsUpdated(false); setError(""); navigate(`${TAB_PATHS.clients}/${encodeURIComponent(client.client_id)}/edit`); }
+  function closeClientForm() { setError(""); navigate(TAB_PATHS.clients); }
+
+  function openCreateGroup() { navigate(`${TAB_PATHS.groups}/new`); }
+  function openEditGroup(group: Group) { navigate(`${TAB_PATHS.groups}/${encodeURIComponent(group.id)}/edit`); }
+  function closeGroupForm() { navigate(TAB_PATHS.groups); }
 
   async function refreshClients() {
     setClients(await api<Client[]>("/api/admin/clients"));
@@ -340,150 +287,11 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     }
   }, [clientFormMode, userFormOpen, groupFormOpen, editingUser]);
 
-  function toggleScope(scope: (typeof AVAILABLE_SCOPES)[number]) {
-    setScopes((current) => current.includes(scope)
-      ? current.filter((item) => item !== scope)
-      : [...current, scope]);
-  }
-
-  function toggleGroup(groupName: string) {
-    setAllowedGroups((current) => current.includes(groupName)
-      ? current.filter((item) => item !== groupName)
-      : [...current, groupName]);
-  }
-
-  function updateClaim(index: number, key: keyof ClaimDraft, value: string) {
-    setClaims((current) => current.map((claim, claimIndex) =>
-      claimIndex === index ? { ...claim, [key]: value } : claim));
-  }
-
-  function updateGroupClaim(index: number, key: keyof GroupClaimDraft, value: string) {
-    setGroupClaims((current) => current.map((claim, claimIndex) =>
-      claimIndex !== index
-        ? claim
-        : key === "required_scope"
-          ? { ...claim, required_scope: value as Scope }
-          : { ...claim, [key]: value }));
-  }
-
-  function openCreateClient() {
-    setName("");
-    setTokenAuthMethod("none");
-    setPkcePolicy("required");
-    setClientEnabled(true);
-    setRedirectUris("");
-    setLogoutUris("");
-    setScopes(["openid", "profile", "email"]);
-    setAllowedGroups([]);
-    setClaims([]);
-    setCreated(null);
-    setCredentialsUpdated(false);
-    setError("");
-    initializedClientEdit.current = "";
-    navigate(`${TAB_PATHS.clients}/new`);
-  }
-
-  function openEditClient(client: Client) {
-    setName(client.name);
-    setTokenAuthMethod(client.token_endpoint_auth_method);
-    setPkcePolicy(client.pkce_policy);
-    setClientEnabled(client.enabled);
-    setRedirectUris(client.redirect_uris.join("\n"));
-    setLogoutUris(client.post_logout_redirect_uris.join("\n"));
-    setScopes(client.scopes);
-    setAllowedGroups(client.allowed_groups);
-    setClaims(client.claims.map((claim) => ({
-      claim_name: claim.claim_name,
-      user_attribute_path: claim.user_attribute_path,
-      required_scope: claim.required_scope ?? "",
-    })));
-    setCreated(null);
-    setCredentialsUpdated(false);
-    setError("");
-    initializedClientEdit.current = client.client_id;
-    navigate(`${TAB_PATHS.clients}/${encodeURIComponent(client.client_id)}/edit`);
-  }
-
-  function closeClientForm() {
-    setError("");
-    initializedClientEdit.current = "";
-    navigate(TAB_PATHS.clients);
-  }
-
-  function openCreateUser() {
-    closeUserEditor();
-    setInvitationLabel("");
-    setInvitationEmail("");
-    setInvitationMaxUses("1");
-    setInvitationExpiry("15");
-    setInvitationExpiryUnit("minutes");
-    setUserGroups([]);
-    setCreatedInvitation(null);
-    setAdminActionMessage("");
-    navigate(`${TAB_PATHS.users}/invite`);
-  }
+  function openCreateUser() { navigate(`${TAB_PATHS.users}/invite`); }
 
   function closeUserForm() {
     setAdminActionMessage("");
     navigate(TAB_PATHS.users);
-  }
-
-  function openCreateGroup() {
-    groupMemberLoadId.current += 1;
-    setGroupName("");
-    setGroupDisplayName("");
-    setGroupClaims([]);
-    setGroupMemberSelection([]);
-    setGroupMemberSearch("");
-    setGroupMembersReady(false);
-    setGroupMembersError("");
-    setGroupMembersMessage("");
-    initializedGroupEdit.current = "";
-    setAdminActionMessage("");
-    navigate(`${TAB_PATHS.groups}/new`);
-  }
-
-  async function openEditGroup(group: Group) {
-    const loadId = ++groupMemberLoadId.current;
-    setGroupName(group.name);
-    setGroupDisplayName(group.display_name);
-    setGroupClaims((group.claims ?? []).map((claim) => ({
-      claim_name: claim.claim_name,
-      claim_value: JSON.stringify(claim.claim_value) ?? "null",
-      required_scope: claim.required_scope,
-    })));
-    initializedGroupEdit.current = group.id;
-    setGroupMemberSelection([]);
-    setGroupMemberSearch("");
-    setGroupMembersReady(false);
-    setGroupMembersError("");
-    setGroupMembersMessage("");
-    setGroupMembersLoading(true);
-    setAdminActionMessage("");
-    navigate(`${TAB_PATHS.groups}/${encodeURIComponent(group.id)}/edit`);
-    try {
-      const userList = await api<AdminUser[]>("/api/admin/users");
-      if (groupMemberLoadId.current !== loadId) return;
-      setUsers(userList);
-      setGroupMemberSelection(userList.filter((user) => user.groups.includes(group.name)).map((user) => user.id));
-      setGroupMembersReady(true);
-    } catch (loadError) {
-      if (groupMemberLoadId.current === loadId) setGroupMembersError(errorMessage(loadError, "load group members"));
-    } finally {
-      if (groupMemberLoadId.current === loadId) setGroupMembersLoading(false);
-    }
-  }
-
-  function closeGroupForm() {
-    groupMemberLoadId.current += 1;
-    setGroupMemberSelection([]);
-    setGroupMemberSearch("");
-    setGroupMembersReady(false);
-    setGroupMembersError("");
-    setGroupMembersMessage("");
-    initializedGroupEdit.current = "";
-    setAdminActionMessage("");
-    navigate(TAB_PATHS.groups);
   }
 
   function openEditUser(user: AdminUser, returnToGroup = false) {
@@ -493,211 +301,9 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   }
 
   function closeUserEditor() {
-    setEditingUser(null);
-    setUserClaimDrafts([]);
-    setUserClaimsLoading(false);
-    setUserClaimsReady(false);
-    setUserEditorError("");
-    setUserEditorMessage("");
     navigate(userClaimsReturnGroup && userClaimsReturnGroupId
       ? `${TAB_PATHS.groups}/${encodeURIComponent(userClaimsReturnGroupId)}/edit`
       : TAB_PATHS.users);
-  }
-
-  async function removeUser(user: AdminUser) {
-    const label = user.display_name || user.username;
-    const confirmed = window.confirm(`Permanently remove ${label}? This deletes the account, passkeys, active sessions, group memberships, OIDC consents, tokens, and custom claims. This action cannot be undone.`);
-    if (!confirmed) return;
-
-    setDeletingUserId(user.id);
-    setUserEditorError("");
-    try {
-      await api(`/api/admin/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
-      setUsers((current) => current.filter((item) => item.id !== user.id));
-      setGroupMemberSelection((current) => current.filter((id) => id !== user.id));
-      closeUserEditor();
-    } catch (removeError) {
-      setUserEditorError(errorMessage(removeError, "remove user"));
-    } finally {
-      setDeletingUserId("");
-    }
-  }
-
-  function updateUserClaim(index: number, key: keyof UserClaimDraft, value: string) {
-    setUserClaimDrafts((current) => current.map((claim, claimIndex) =>
-      claimIndex === index ? { ...claim, [key]: value } : claim));
-  }
-
-  async function saveUserClaims(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!editingUser) return;
-    setUserClaimsBusy(true);
-    setUserEditorError("");
-    setUserEditorMessage("");
-    try {
-      const claims = userClaimDrafts
-        .filter((claim) => claim.claim_name.trim() || claim.claim_value.trim())
-        .map((claim) => {
-          let claimValue: unknown;
-          try {
-            claimValue = JSON.parse(claim.claim_value);
-          } catch {
-            throw new Error(`Enter valid JSON for “${claim.claim_name || "new claim"}”.`);
-          }
-          return {
-            claim_name: claim.claim_name.trim(),
-            claim_value: claimValue,
-            required_scope: claim.required_scope || null,
-          };
-        });
-      await api(`/api/admin/users/${encodeURIComponent(editingUser.id)}/claims`, {
-        method: "PUT",
-        body: json({ claims }),
-      });
-      setUserEditorMessage("Custom claims saved.");
-    } catch (saveError) {
-      setUserEditorError(errorMessage(saveError, "save user claims"));
-    } finally {
-      setUserClaimsBusy(false);
-    }
-  }
-
-  function toggleGroupMember(value: string) {
-    setGroupMembersMessage("");
-    setGroupMemberSelection((current) => current.includes(value)
-      ? current.filter((item) => item !== value)
-      : [...current, value]);
-  }
-
-  async function saveGroupMembers(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!editingGroupId) return;
-    setGroupMembersBusy(true);
-    setGroupMembersError("");
-    setGroupMembersMessage("");
-    try {
-      await api(`/api/admin/groups/${encodeURIComponent(editingGroupId)}/members`, {
-        method: "PUT",
-        body: json({ users: groupMemberSelection }),
-      });
-      const [userList, groupList] = await Promise.all([
-        api<AdminUser[]>("/api/admin/users"),
-        api<Group[]>("/api/admin/groups"),
-      ]);
-      setUsers(userList);
-      setGroups(groupList);
-      setGroupMembersReady(true);
-      setGroupMembersMessage("Members saved.");
-    } catch (saveError) {
-      setGroupMembersError(errorMessage(saveError, "save group members"));
-    } finally {
-      setGroupMembersBusy(false);
-    }
-  }
-
-  async function saveClient(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError("");
-    const redirects = splitLines(redirectUris);
-    if (redirects.length === 0) {
-      logUiIssue("save OIDC client", new Error("At least one callback URL is required"));
-      setError("Add at least one exact callback URL.");
-      return;
-    }
-    const claimMappings = claims
-      .filter((claim) => claim.claim_name.trim() || claim.user_attribute_path.trim())
-      .map((claim) => ({
-        claim_name: claim.claim_name.trim(),
-        user_attribute_path: claim.user_attribute_path.trim(),
-        required_scope: claim.required_scope || null,
-      }));
-
-    setBusy(true);
-    try {
-      const payload = {
-        name: name.trim(),
-        token_endpoint_auth_method: tokenAuthMethod,
-        pkce_policy: pkcePolicy,
-        ...(clientFormMode === "create"
-          ? {
-              client_type: tokenAuthMethod === "none" ? "public" : "confidential",
-            }
-          : { enabled: clientEnabled }),
-        redirect_uris: redirects,
-        post_logout_redirect_uris: splitLines(logoutUris),
-        scopes: ["openid", ...scopes.filter((scope) => scope !== "openid")],
-        allowed_groups: allowedGroups,
-        claims: claimMappings,
-      };
-      const client = await api<CreatedClient>(clientFormMode === "edit"
-        ? `/api/admin/clients/${encodeURIComponent(editingClientId)}`
-        : "/api/admin/clients", {
-        method: clientFormMode === "edit" ? "PUT" : "POST",
-        body: json({
-          ...payload,
-        }),
-      });
-      if (clientFormMode === "create" || client.client_secret) {
-        setCreated(client);
-        setCredentialsUpdated(clientFormMode === "edit");
-      }
-      navigate(TAB_PATHS.clients);
-      await refreshClients();
-    } catch (saveError) {
-      setError(errorMessage(saveError, "save OIDC client"));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function removeClient(client: Client) {
-    const confirmed = window.confirm(`Remove ${client.name}? This permanently deletes its client settings, in-progress sign-in requests, authorization codes, refresh tokens, and linked-user records. Hanko user accounts remain, but this application will no longer be able to sign users in through Hanko.`);
-    if (!confirmed) return;
-    setDeletingClientId(client.client_id);
-    setError("");
-    try {
-      await api(`/api/admin/clients/${encodeURIComponent(client.client_id)}`, { method: "DELETE" });
-      if (editingClientId === client.client_id) closeClientForm();
-      await refreshClients();
-    } catch (removeError) {
-      setError(errorMessage(removeError, "remove OIDC client"));
-    } finally {
-      setDeletingClientId("");
-    }
-  }
-
-  async function createInvitation(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setAdminActionBusy(true);
-    setAdminActionMessage("");
-    setCreatedInvitation(null);
-    const label = invitationLabel.trim();
-    const email = invitationEmail.trim() || null;
-    try {
-      const invitation = await api<Omit<CreatedInvitation, "label" | "email">>("/api/admin/invitations", {
-        method: "POST",
-        body: json({
-          label,
-          email,
-          max_uses: email ? 1 : Number(invitationMaxUses),
-          expires_in: Number(invitationExpiry),
-          expires_unit: invitationExpiryUnit,
-          groups: userGroups,
-        }),
-      });
-      setCreatedInvitation({ ...invitation, label, email });
-      setInvitationLabel("");
-      setInvitationEmail("");
-      setInvitationMaxUses("1");
-      setInvitationExpiry("15");
-      setInvitationExpiryUnit("minutes");
-      setUserGroups([]);
-      setInvitations(await api<Invitation[]>("/api/admin/invitations"));
-    } catch (createError) {
-      setAdminActionMessage(errorMessage(createError, "create invitation"));
-    } finally {
-      setAdminActionBusy(false);
-    }
   }
 
   async function removeInvitation(invitation: Invitation) {
@@ -710,44 +316,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       setInvitations(await api<Invitation[]>("/api/admin/invitations"));
     } catch (removeError) {
       setAdminActionMessage(errorMessage(removeError, "remove invitation"));
-    } finally {
-      setAdminActionBusy(false);
-    }
-  }
-
-  async function createGroup(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setAdminActionMessage("");
-    let claimMappings: { claim_name: string; claim_value: unknown; required_scope: Scope }[];
-    try {
-      claimMappings = groupClaims
-        .filter((claim) => claim.claim_name.trim() || claim.claim_value.trim())
-        .map((claim) => ({
-          claim_name: claim.claim_name.trim(),
-          claim_value: JSON.parse(claim.claim_value),
-          required_scope: claim.required_scope,
-        }));
-    } catch {
-      logUiIssue("save group", new Error("Group claim value is not valid JSON"));
-      setAdminActionMessage("Each group claim value must be valid JSON, such as \"member\" or [\"read\"].");
-      return;
-    }
-
-    setAdminActionBusy(true);
-    try {
-      await api(editingGroupId ? `/api/admin/groups/${encodeURIComponent(editingGroupId)}` : "/api/admin/groups", {
-        method: editingGroupId ? "PUT" : "POST",
-        body: json(editingGroupId
-          ? { display_name: groupDisplayName.trim(), claims: claimMappings }
-          : { name: groupName.trim(), display_name: groupDisplayName.trim(), claims: claimMappings }),
-      });
-      setGroupName("");
-      setGroupDisplayName("");
-      setGroupClaims([]);
-      setGroups(await api<Group[]>("/api/admin/groups"));
-      navigate(TAB_PATHS.groups);
-    } catch (saveError) {
-      setAdminActionMessage(errorMessage(saveError, "save group"));
     } finally {
       setAdminActionBusy(false);
     }
@@ -768,7 +336,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
         ...user,
         groups: user.groups.filter((name) => name !== group.name),
       })));
-      setUserGroups((current) => current.filter((name) => name !== group.name));
     } catch (deleteError) {
       setAdminActionMessage(errorMessage(deleteError, "delete group"));
     } finally {
@@ -943,19 +510,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   function resetTabState() {
     setAdminActionMessage("");
     setLoadError("");
-    groupMemberLoadId.current += 1;
-    setEditingUser(null);
-    setUserClaimDrafts([]);
-    setUserClaimsLoading(false);
-    setUserClaimsReady(false);
-    setUserEditorError("");
-    setUserEditorMessage("");
     setError("");
-    initializedClientEdit.current = "";
-    initializedGroupEdit.current = "";
-    setGroupMembersReady(false);
-    setGroupMembersError("");
-    setGroupMembersMessage("");
   }
 
   function selectTab(tab: Tab) {
@@ -997,102 +552,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   };
   const [tabTitle, tabDescription] = tabTitles[activeTab];
   const clientBeingEdited = clients.find((client) => client.client_id === editingClientId) ?? null;
-  const normalizedGroupMemberSearch = groupMemberSearch.trim().toLocaleLowerCase();
-  const filteredGroupMembers = users.filter((user) => [user.display_name, user.username, user.email ?? "", user.invitation_label ?? ""]
-    .some((value) => value.toLocaleLowerCase().includes(normalizedGroupMemberSearch)));
 
-  useEffect(() => {
-    if (clientFormMode !== "edit" || !editingClientId) {
-      initializedClientEdit.current = "";
-      return;
-    }
-    if (initializedClientEdit.current === editingClientId || !clientBeingEdited) return;
-    setName(clientBeingEdited.name);
-    setTokenAuthMethod(clientBeingEdited.token_endpoint_auth_method);
-    setPkcePolicy(clientBeingEdited.pkce_policy);
-    setClientEnabled(clientBeingEdited.enabled);
-    setRedirectUris(clientBeingEdited.redirect_uris.join("\n"));
-    setLogoutUris(clientBeingEdited.post_logout_redirect_uris.join("\n"));
-    setScopes(clientBeingEdited.scopes);
-    setAllowedGroups(clientBeingEdited.allowed_groups);
-    setClaims(clientBeingEdited.claims.map((claim) => ({
-      claim_name: claim.claim_name,
-      user_attribute_path: claim.user_attribute_path,
-      required_scope: claim.required_scope ?? "",
-    })));
-    initializedClientEdit.current = editingClientId;
-  }, [clientBeingEdited, clientFormMode, editingClientId]);
-
-  useEffect(() => {
-    if (!editingGroupId) {
-      if (!userClaimsReturnGroup) initializedGroupEdit.current = "";
-      return;
-    }
-    if (initializedGroupEdit.current === editingGroupId) return;
-    const group = groups.find((candidate) => candidate.id === editingGroupId);
-    if (!group) return;
-    setGroupName(group.name);
-    setGroupDisplayName(group.display_name);
-    setGroupClaims((group.claims ?? []).map((claim) => ({
-      claim_name: claim.claim_name,
-      claim_value: JSON.stringify(claim.claim_value) ?? "null",
-      required_scope: claim.required_scope,
-    })));
-    initializedGroupEdit.current = editingGroupId;
-    const loadId = ++groupMemberLoadId.current;
-    setGroupMemberSelection([]);
-    setGroupMemberSearch("");
-    setGroupMembersReady(false);
-    setGroupMembersError("");
-    setGroupMembersMessage("");
-    setGroupMembersLoading(true);
-    void api<AdminUser[]>("/api/admin/users").then((userList) => {
-      if (groupMemberLoadId.current !== loadId) return;
-      setUsers(userList);
-      setGroupMemberSelection(userList.filter((user) => user.groups.includes(group.name)).map((user) => user.id));
-      setGroupMembersReady(true);
-    }).catch((loadError) => {
-      if (groupMemberLoadId.current === loadId) setGroupMembersError(errorMessage(loadError, "load group members"));
-    }).finally(() => {
-      if (groupMemberLoadId.current === loadId) setGroupMembersLoading(false);
-    });
-  }, [editingGroupId, groups]);
-
-  useEffect(() => {
-    if (!route.userId) {
-      setEditingUser(null);
-      setUserClaimDrafts([]);
-      setUserClaimsLoading(false);
-      setUserClaimsReady(false);
-      setUserEditorError("");
-      setUserEditorMessage("");
-      return;
-    }
-    const user = users.find((candidate) => candidate.id === route.userId);
-    if (!user) return;
-
-    setEditingUser(user);
-    setUserClaimDrafts([]);
-    setUserClaimsLoading(true);
-    setUserClaimsReady(false);
-    setUserEditorError("");
-    setUserEditorMessage("");
-    let active = true;
-    void api<UserClaim[]>(`/api/admin/users/${encodeURIComponent(user.id)}/claims`).then((claims) => {
-      if (!active) return;
-      setUserClaimDrafts(claims.map((claim) => ({
-        claim_name: claim.claim_name,
-        claim_value: JSON.stringify(claim.claim_value) ?? "null",
-        required_scope: claim.required_scope ?? "",
-      })));
-      setUserClaimsReady(true);
-    }).catch((loadError) => {
-      if (active) setUserEditorError(errorMessage(loadError, "load user claims"));
-    }).finally(() => {
-      if (active) setUserClaimsLoading(false);
-    });
-    return () => { active = false; };
-  }, [route.userId, users]);
   const title = activeTab === "clients" && clientFormMode !== null
     ? clientFormMode === "edit" ? "Edit OIDC client" : "Add an OIDC client"
     : activeTab === "users" && editingUser ? "Edit user"
@@ -1165,7 +625,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             <td>{client.user_count ?? 0}</td>
             <td><span className={client.enabled ? "client-status" : "client-status disabled"}>{client.enabled ? "Enabled" : "Disabled"}</span></td>
             <td><div className="table-actions">
-              <button className="client-list-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => openEditClient(client)}><Pencil aria-hidden="true" /><span>Edit</span></button>
+              <button className="client-list-action" type="button" onClick={() => openEditClient(client)}><Pencil aria-hidden="true" /><span>Edit</span></button>
             </div></td>
           </tr>)}</tbody>
         </table></div>}
@@ -1182,82 +642,15 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
 
           </>}
 
-          {activeTab === "clients" && isAdmin && clientFormMode !== null && <section className="client-editor-panel client-form-page" aria-labelledby="admin-page-title">
-      <form className="client-form" onSubmit={saveClient}>
-        {clientFormMode === "create" && <div className="client-logo-link">
-          <img src={appPath("hanko.png")} alt="" />
-          <div className="client-logo-link-content">
-            <div><strong>Hanko logo</strong><p>Use this public PNG URL when an application asks for a logo.</p></div>
-            <Credential label="Logo URL" value={hankoLogoUrl} copied={copied === "logo"} onCopy={() => copyValue("logo", hankoLogoUrl)} />
-          </div>
-        </div>}
-        <label className="admin-field"><span>Application name</span><input autoComplete="off" maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="Jellyfin" required /></label>
-        <label className="admin-field">
-          <span>Token endpoint authentication</span>
-          <select
-            value={tokenAuthMethod}
-            onChange={(event) => {
-              const method = event.target.value as TokenEndpointAuthMethod;
-              if (method === "none") setPkcePolicy("required");
-              else if (tokenAuthMethod === "none") setPkcePolicy("optional");
-              setTokenAuthMethod(method);
+          {activeTab === "clients" && isAdmin && clientFormMode !== null && (clientFormMode === "create" || clientBeingEdited) && <ClientEditor
+            key={editingClientId || "new"} clientBeingEdited={clientBeingEdited} groups={groups} closeClientForm={closeClientForm}
+            onSaved={async client => {
+              if (clientFormMode === "create" || client.client_secret) { setCreated(client); setCredentialsUpdated(clientFormMode === "edit"); }
+              await refreshClients();
+              closeClientForm();
             }}
-          >
-            <option value="none">None · public client</option>
-            <option value="client_secret_basic">Client secret Basic</option>
-            <option value="client_secret_post">Client secret POST</option>
-          </select>
-          <small>{tokenAuthMethod === "none"
-            ? "No secret is used; public clients always require PKCE S256."
-            : "Confidential credentials use HTTP Basic or the form body. Switching a public client here generates a new secret shown once after saving."}</small>
-        </label>
-        <label className="admin-field">
-          <span>PKCE policy</span>
-          <select
-            value={tokenAuthMethod === "none" ? "required" : pkcePolicy}
-            disabled={tokenAuthMethod === "none"}
-            onChange={(event) => setPkcePolicy(event.target.value as PkcePolicy)}
-          >
-            <option value="required">Required · S256</option>
-            <option value="optional">Optional · S256 when used</option>
-          </select>
-          <small>{tokenAuthMethod === "none"
-            ? "Public clients always require PKCE S256."
-            : pkcePolicy === "required"
-              ? "Every authorization must include a PKCE S256 challenge."
-              : "The client may omit PKCE; any supplied challenge must use S256."}</small>
-        </label>
-        {clientFormMode === "edit" && <label className="admin-check client-enabled-check"><input type="checkbox" checked={clientEnabled} onChange={(event) => setClientEnabled(event.target.checked)} /><span><strong>Client enabled</strong><small>Disabled clients can no longer sign users in.</small></span></label>}
-        <label className="admin-field"><span>Callback URLs</span><textarea value={redirectUris} onChange={(event) => setRedirectUris(event.target.value)} placeholder="https://app.example.com/oidc/callback" rows={2} required /><small>One exact URL per line. HTTPS is required except for localhost development.</small></label>
-        <label className="admin-field"><span>Post-logout URLs <em>Optional</em></span><textarea value={logoutUris} onChange={(event) => setLogoutUris(event.target.value)} placeholder="https://app.example.com/" rows={2} /><small>One exact URL per line.</small></label>
-        <fieldset className="admin-options">
-          <legend>Scopes</legend>
-          <label className="admin-check"><input type="checkbox" checked disabled /><span><strong>openid</strong><small>Required for sign-in</small></span></label>
-          {AVAILABLE_SCOPES.map((scope) => <label className="admin-check" key={scope}><input type="checkbox" checked={scopes.includes(scope)} onChange={() => toggleScope(scope)} /><span><strong>{scope}</strong><small>{scopeDescription(scope)}</small></span></label>)}
-        </fieldset>
-        <fieldset className="admin-options">
-          <legend>Allowed groups <em>Optional</em></legend>
-          {groups.length === 0 ? <p className="admin-hint">No groups exist yet. This client can be used by any user.</p> : <><p className="admin-hint">Leave all unchecked to allow any user.</p><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check admin-check-compact" key={group.id}><input type="checkbox" checked={allowedGroups.includes(group.name)} onChange={() => toggleGroup(group.name)} /><span><strong><PrivateValue>{group.display_name}</PrivateValue></strong><small><PrivateValue>{group.name} · {group.member_count} {group.member_count === 1 ? "member" : "members"}</PrivateValue></small></span></label>)}</div></>}
-        </fieldset>
-        <fieldset className="admin-options admin-claims">
-          <legend>Custom claims <em>Optional</em></legend><p className="admin-hint">Map a user attribute to an additional token claim.</p>
-          {claims.map((claim, index) => <div className="claim-editor" key={index}>
-            <label className="admin-field"><span>Claim name</span><input value={claim.claim_name} onChange={(event) => updateClaim(index, "claim_name", event.target.value)} placeholder="department" /></label>
-            <label className="admin-field"><span>User attribute path</span><input value={claim.user_attribute_path} onChange={(event) => updateClaim(index, "user_attribute_path", event.target.value)} placeholder="/organization/department" /></label>
-            <label className="admin-field"><span>Required scope</span><select value={claim.required_scope} onChange={(event) => updateClaim(index, "required_scope", event.target.value)}><option value="">Always include</option>{["openid", ...scopes.filter((scope) => scope !== "openid")].map((scope) => <option value={scope} key={scope}>{scope}</option>)}</select></label>
-            <button className="claim-remove" type="button" aria-label="Remove custom claim" onClick={() => setClaims((current) => current.filter((_, claimIndex) => claimIndex !== index))}><Trash2 aria-hidden="true" /></button>
-          </div>)}
-          <button className="add-claim" type="button" onClick={() => setClaims((current) => [...current, { claim_name: "", user_attribute_path: "", required_scope: "" }])}><Plus aria-hidden="true" /> Add claim</button>
-        </fieldset>
-        {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
-        <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={busy || !name.trim()}>{busy ? "Saving client…" : clientFormMode === "edit" ? "Save changes" : "Create OIDC client"}</button><button className="client-list-action" type="button" disabled={busy} onClick={closeClientForm}>Cancel</button></div>
-      </form>
-      {clientFormMode === "edit" && clientBeingEdited && <section className="client-danger-zone" aria-labelledby="client-remove-title">
-        <h2 id="client-remove-title">Remove client</h2>
-        <p>Permanently delete this client’s settings, pending sign-ins, authorization codes, refresh tokens, and linked-user records. Hanko user accounts will remain, but this application will no longer be able to sign users in through Hanko.</p>
-        <button className="client-list-action client-remove-action" type="button" disabled={busy || deletingClientId !== ""} onClick={() => void removeClient(clientBeingEdited)}><Trash2 aria-hidden="true" />{deletingClientId === clientBeingEdited.client_id ? "Removing…" : "Remove client"}</button>
-      </section>}
-    </section>}
+            onDeleted={async () => { await refreshClients(); closeClientForm(); }}
+          />}
 
           {activeTab === "users" && isAdmin && !userFormOpen && !editingUser && <>
             <div className="client-list-heading user-list-heading"><h2>Accounts <span>{users.length}</span></h2></div>
@@ -1269,7 +662,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
                   <tr key={user.id}>
                     <td><strong><PrivateValue>{user.display_name || user.username}</PrivateValue></strong></td><td><code className="table-id"><PrivateValue>{user.username}</PrivateValue></code></td><td>{user.groups.length ? <PrivateValue>{user.groups.join(", ")}</PrivateValue> : <span className="table-muted">—</span>}</td><td>{user.invitation_label ? <PrivateValue>{user.invitation_label}</PrivateValue> : <span className="table-muted">—</span>}</td>
                     <td><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></td>
-                    <td><button className="client-list-action membership-action" type="button" onClick={() => void openEditUser(user)} disabled={userClaimsLoading || userClaimsBusy}><Pencil aria-hidden="true" />Edit user</button></td>
+                    <td><button className="client-list-action membership-action" type="button" onClick={() => void openEditUser(user)}><Pencil aria-hidden="true" />Edit user</button></td>
                   </tr>
                 )}</tbody>
               </table></div>}
@@ -1293,98 +686,9 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             </section>
           </>}
 
-          {activeTab === "users" && isAdmin && editingUser && <section className="user-edit-page">
-            <dl className="user-detail-grid">
-              <div><dt>Display name</dt><dd><PrivateValue>{editingUser.display_name}</PrivateValue></dd></div>
-              <div><dt>Username</dt><dd><PrivateValue>{editingUser.username}</PrivateValue></dd></div>
-              <div><dt>Email</dt><dd>{editingUser.email ? <PrivateValue>{editingUser.email}</PrivateValue> : <span className="table-muted">No email</span>}</dd></div>
-              <div><dt>Status</dt><dd>{editingUser.disabled ? "Disabled" : editingUser.is_admin ? "Administrator" : "Active"}</dd></div>
-              <div><dt>Invite label</dt><dd>{editingUser.invitation_label ? <PrivateValue>{editingUser.invitation_label}</PrivateValue> : <span className="table-muted">—</span>}</dd></div>
-              <div><dt>Groups</dt><dd>{editingUser.groups.length ? <PrivateValue>{editingUser.groups.join(", ")}</PrivateValue> : <span className="table-muted">—</span>}</dd></div>
-              <div><dt>Created</dt><dd><PrivateValue>{new Date(editingUser.created_at * 1000).toLocaleDateString()}</PrivateValue></dd></div>
-            </dl>
-            <form className="client-form user-editor-form" onSubmit={saveUserClaims}>
-              <fieldset className="admin-options admin-claims" disabled={Boolean(deletingUserId)}>
-                <legend>Custom claims <em>Optional</em></legend>
-                <p className="admin-hint">Add JSON claims to this user’s ID and access tokens. A user claim takes precedence over a group claim with the same name; a client-specific claim mapping takes precedence over both.</p>
-                {userClaimsLoading ? <p className="admin-hint">Loading custom claims…</p> : userClaimDrafts.map((claim, index) => <div className="claim-editor user-claim-editor" key={index}>
-                  <label className="admin-field"><span>Claim name</span><input autoComplete="off" maxLength={100} value={claim.claim_name} onChange={(event) => updateUserClaim(index, "claim_name", event.target.value)} placeholder="department" required={Boolean(claim.claim_value.trim())} /></label>
-                  <label className="admin-field"><span>JSON value</span><textarea maxLength={4096} rows={2} value={claim.claim_value} onChange={(event) => updateUserClaim(index, "claim_value", event.target.value)} placeholder={'"design"'} required={Boolean(claim.claim_name.trim())} /></label>
-                  <label className="admin-field"><span>Required scope</span><select value={claim.required_scope} onChange={(event) => updateUserClaim(index, "required_scope", event.target.value)}><option value="">Always include</option>{["openid", ...AVAILABLE_SCOPES].map((scope) => <option value={scope} key={scope}>{scope}</option>)}</select></label>
-                  <button className="claim-remove" type="button" aria-label="Remove user claim" onClick={() => setUserClaimDrafts((current) => current.filter((_, claimIndex) => claimIndex !== index))}><Trash2 aria-hidden="true" /></button>
-                </div>)}
-                {!userClaimsLoading && <button className="add-claim" type="button" onClick={() => setUserClaimDrafts((current) => [...current, { claim_name: "", claim_value: "", required_scope: "" }])}><Plus aria-hidden="true" /> Add custom claim</button>}
-              </fieldset>
-              {userEditorError && <p className="admin-message admin-message-error" role="alert">{userEditorError}</p>}
-              {userEditorMessage && <p className="admin-message" role="status">{userEditorMessage}</p>}
-              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={userClaimsBusy || userClaimsLoading || !userClaimsReady || Boolean(deletingUserId)}>{userClaimsBusy ? "Saving…" : "Save custom claims"}</button><button className="client-list-action" type="button" disabled={userClaimsBusy || Boolean(deletingUserId)} onClick={closeUserEditor}>Cancel</button></div>
-            </form>
-            <section className="client-danger-zone user-danger-zone" aria-labelledby="user-remove-title">
-              <h2 id="user-remove-title">Remove user</h2>
-              <p>Permanently delete this account, including its passkeys, active sessions, group memberships, OIDC consents, tokens, and custom claims.</p>
-              <button className="client-list-action client-remove-action" type="button" disabled={userClaimsBusy || Boolean(deletingUserId)} onClick={() => void removeUser(editingUser)}><Trash2 aria-hidden="true" />{deletingUserId === editingUser.id ? "Removing…" : "Remove user"}</button>
-            </section>
-          </section>}
+          {activeTab === "users" && isAdmin && editingUser && <UserEditor key={editingUser.id} editingUser={editingUser} closeUserEditor={closeUserEditor} onDeleted={id => { setUsers(current => current.filter(user => user.id !== id)); setUsersRevision(value => value + 1); }} />}
 
-          {activeTab === "users" && isAdmin && userFormOpen && <>
-      {createdInvitation ? <section className="created-client" role="status"><div className="created-title"><span><Check aria-hidden="true" /></span><div><h2>Invite link ready</h2><p>Anyone with this link can join until it expires or reaches its user limit.</p></div></div><Credential label={<>Invite link · <PrivateValue>{createdInvitation.label}</PrivateValue></>} value={createdInvitation.enrollment_url} copied={copied === "invitation"} onCopy={() => copyValue("invitation", createdInvitation.enrollment_url)} />{createdInvitation.email && <a className="secondary-action invitation-email-action" href={invitationEmailHref(createdInvitation)}><Mail aria-hidden="true" />Email this invite</a>}<p className="created-footnote">Expires {new Date(createdInvitation.expires_at * 1000).toLocaleString()}. The link is shown only now, so copy it before leaving this page.</p><button className="client-list-action create-another-invite" type="button" onClick={openCreateUser}><Plus aria-hidden="true" /> Create another invite</button></section> : <form className="client-form admin-create-form user-create-page" onSubmit={createInvitation}>
-              <label className="admin-field"><span>Admin-only user label</span><input autoComplete="off" maxLength={80} value={invitationLabel} onChange={(event) => setInvitationLabel(event.target.value)} placeholder="Community event" required /><small>This label appears only in the administrator’s user list.</small></label>
-              <label className="admin-field"><span>Email recipient <em>Optional</em></span><input type="email" autoComplete="email" maxLength={320} value={invitationEmail} onChange={(event) => { setInvitationEmail(event.target.value); setInvitationMaxUses("1"); }} placeholder="person@example.com" /><small>Add an address to make this a one-use email invitation. You can open a prefilled email after creating it.</small></label>
-              <div className="invitation-settings">
-                <label className="admin-field"><span>User limit</span><input type="number" min={1} max={500} value={invitationMaxUses} onChange={(event) => setInvitationMaxUses(event.target.value)} disabled={Boolean(invitationEmail.trim())} required /><small>{invitationEmail.trim() ? "Email invitations are limited to one user." : "How many accounts can use this link?"}</small></label>
-                <div className="invitation-expiry-setting"><div className="invitation-expiry-fields"><label className="admin-field"><span>Link expires in</span><input type="number" min={1} max={Math.floor((10 * 365 * 24 * 60 * 60) / EXPIRY_UNIT_SECONDS[invitationExpiryUnit])} value={invitationExpiry} onChange={(event) => setInvitationExpiry(event.target.value)} required /></label><label className="admin-field"><span>Unit</span><select value={invitationExpiryUnit} onChange={(event) => setInvitationExpiryUnit(event.target.value as ExpiryUnit)}><option value="seconds">Seconds</option><option value="minutes">Minutes</option><option value="hours">Hours</option><option value="days">Days</option><option value="years">Years</option></select></label></div><small>Up to 10 years.</small></div>
-              </div>
-              {groups.length > 0 && <fieldset className="admin-options"><legend>Groups <em>Optional</em></legend><div className="admin-choice-grid">{groups.map((group) => <label className="admin-check" key={group.id}><input type="checkbox" checked={userGroups.includes(group.name)} onChange={() => setUserGroups((current) => current.includes(group.name) ? current.filter((name) => name !== group.name) : [...current, group.name])} /><span><strong><PrivateValue>{group.display_name}</PrivateValue></strong></span></label>)}</div></fieldset>}
-              {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
-              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !invitationLabel.trim() || (!invitationEmail.trim() && (!Number(invitationMaxUses) || Number(invitationMaxUses) > 500))}>{adminActionBusy ? "Creating link…" : "Create invite link"}</button><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={closeUserForm}>Cancel</button></div>
-            </form>}
-          </>}
-
-          {activeTab === "groups" && isAdmin && groupFormOpen && <section className="group-edit-page">
-            <form className="client-form admin-create-form user-create-page" onSubmit={createGroup}>
-              <label className="admin-field"><span>Group name</span><input autoComplete="off" maxLength={80} value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="media-users" required disabled={Boolean(editingGroupId)} /></label>
-              <label className="admin-field"><span>Display name</span><input maxLength={120} value={groupDisplayName} onChange={(event) => setGroupDisplayName(event.target.value)} placeholder="Media users" required /></label>
-              <fieldset className="admin-options admin-claims">
-                <legend>Claims added for members <em>Optional</em></legend>
-                <p className="admin-hint">These JSON values are added to matching members’ ID and access tokens when the required scope is requested. Quote string values, such as "media-user". If several groups provide the same claim, their values merge into a deduplicated array. Client-specific claim mappings take precedence.</p>
-                {groupClaims.map((claim, index) => <div className="claim-editor group-claim-editor" key={index}>
-                  <label className="admin-field"><span>Claim name</span><input value={claim.claim_name} onChange={(event) => updateGroupClaim(index, "claim_name", event.target.value)} placeholder="role" /></label>
-                  <label className="admin-field"><span>JSON value</span><textarea value={claim.claim_value} onChange={(event) => updateGroupClaim(index, "claim_value", event.target.value)} placeholder='"media-user"' rows={2} /></label>
-                  <label className="admin-field"><span>Required scope</span><select value={claim.required_scope} onChange={(event) => updateGroupClaim(index, "required_scope", event.target.value)}>{(["openid", ...AVAILABLE_SCOPES] as const).map((scope) => <option value={scope} key={scope}>{scope}</option>)}</select></label>
-                  <button className="claim-remove" type="button" aria-label="Remove group claim" onClick={() => setGroupClaims((current) => current.filter((_, claimIndex) => claimIndex !== index))}><Trash2 aria-hidden="true" /></button>
-                </div>)}
-                <button className="add-claim" type="button" onClick={() => setGroupClaims((current) => [...current, { claim_name: "", claim_value: "", required_scope: "groups" }])}><Plus aria-hidden="true" /> Add group claim</button>
-              </fieldset>
-              {adminActionMessage && <p className="admin-message admin-message-error" role="alert">{adminActionMessage}</p>}
-              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={adminActionBusy || !groupName.trim() || !groupDisplayName.trim()}>{adminActionBusy ? "Saving…" : editingGroupId ? "Save group" : "Create group"}</button><button className="client-list-action" type="button" disabled={adminActionBusy} onClick={closeGroupForm}>Cancel</button></div>
-            </form>
-            {editingGroupId && <section className="group-members-panel" aria-labelledby="group-members-heading">
-              <div className="group-members-toolbar">
-                <div>
-                  <h2 id="group-members-heading">Members <span>{groupMemberSelection.length}</span></h2>
-                  <p>Choose who belongs to this group. Changes take effect in newly issued tokens.</p>
-                </div>
-                <label className="admin-field group-member-search"><span>Search users</span><input type="search" value={groupMemberSearch} onChange={(event) => setGroupMemberSearch(event.target.value)} placeholder="Name, username, or email" disabled={groupMembersLoading || groupMembersBusy} /></label>
-              </div>
-              {groupMembersError && <p className="admin-message admin-message-error" role="alert">{groupMembersError}</p>}
-              {groupMembersMessage && <p className="admin-message" role="status">{groupMembersMessage}</p>}
-              {groupMembersLoading ? <p className="admin-hint">Loading users…</p> : users.length === 0 ? <p className="admin-hint">No user accounts are available.</p> : filteredGroupMembers.length === 0 ? <p className="admin-hint">No users match “{groupMemberSearch.trim()}”.</p> : <div className="admin-table-scroll group-member-table-scroll"><table className="admin-table group-member-table">
-                <thead><tr><th scope="col">Member</th><th scope="col">User</th><th scope="col">Username</th><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Claims</th></tr></thead>
-                <tbody>{filteredGroupMembers.map((user) => <tr key={user.id}>
-                  <td><label className="group-member-toggle"><input type="checkbox" aria-label={`Toggle ${user.display_name || user.username} in ${groupDisplayName}`} checked={groupMemberSelection.includes(user.id)} onChange={() => toggleGroupMember(user.id)} disabled={groupMembersBusy} /></label></td>
-                  <td><strong><PrivateValue>{user.display_name || user.username}</PrivateValue></strong>{user.invitation_label && <small><PrivateValue>{user.invitation_label}</PrivateValue></small>}</td>
-                  <td><code className="table-id"><PrivateValue>{user.username}</PrivateValue></code></td>
-                  <td>{user.email ? <PrivateValue>{user.email}</PrivateValue> : <span className="table-muted">—</span>}</td>
-                  <td><span className={`client-status${user.disabled ? " disabled" : ""}`}>{user.disabled ? "Disabled" : user.is_admin ? "Administrator" : "Active"}</span></td>
-                  <td><button className="client-list-action membership-action" type="button" onClick={() => void openEditUser(user, true)} disabled={userClaimsLoading || userClaimsBusy || groupMembersBusy}><Pencil aria-hidden="true" />Edit claims</button></td>
-                </tr>)}</tbody>
-              </table></div>}
-              <form className="group-members-actions" onSubmit={saveGroupMembers}>
-                <p className="admin-hint">{groupMemberSelection.length} {groupMemberSelection.length === 1 ? "user is" : "users are"} selected. Per-user claims can override claims set above.</p>
-                <button className="primary-action client-submit" type="submit" disabled={groupMembersBusy || groupMembersLoading || !groupMembersReady}>{groupMembersBusy ? "Saving members…" : "Save members"}</button>
-              </form>
-            </section>}
-          </section>}
+          {activeTab === "users" && isAdmin && userFormOpen && <InvitationEditor groups={groups} previewReady={previewScreen === "invite-ready"} closeUserForm={closeUserForm} onCreated={async () => setInvitations(await api<Invitation[]>("/api/admin/invitations"))} />}
 
           {activeTab === "groups" && isAdmin && !groupFormOpen && <>
             <div className="client-list-heading user-list-heading"><h2>Groups <span>{groups.length}</span></h2><button className="client-add-action" type="button" onClick={openCreateGroup}><Plus aria-hidden="true" /> Add a group</button></div>
@@ -1475,17 +779,14 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             </form>}
           </section>}
         </>}
+        {isAdmin && (groupFormOpen || userClaimsReturnGroup) && (!editingGroupId || groupBeingEdited) && <div hidden={activeTab !== "groups" || loading || tabLoading}>
+          <GroupEditor key={editingGroupId || "new"} group={groupBeingEdited} usersRevision={usersRevision} closeGroupForm={closeGroupForm}
+            onSaved={async () => { setGroups(await api<Group[]>("/api/admin/groups")); closeGroupForm(); }}
+            onMembersSaved={setGroups} openEditUser={openEditUser} />
+        </div>}
       </section>
     </div>
   </AdminScene>;
-}
-
-
-function Credential({ label, value, copied, onCopy }: { label: ReactNode; value: string; copied: boolean; onCopy: () => void }) {
-  return <div className="credential-row">
-    <label><span>{label}</span><input readOnly type="text" value={value} onFocus={(event) => event.currentTarget.select()} /></label>
-    <button type="button" className="credential-copy" onClick={onCopy} aria-label={`Copy ${label}`}>{copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}</button>
-  </div>;
 }
 
 function AdminScene({ children }: { children: ReactNode }) {
