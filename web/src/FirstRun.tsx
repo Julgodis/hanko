@@ -327,7 +327,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
         <label className="admin-field">
           <span>Bootstrap code</span>
           <input type="password" autoComplete="off" value={bootstrapToken} onChange={(event) => setBootstrapToken(event.target.value)} placeholder="From the server’s environment" />
-          <small>This one-time code creates the first administrator account.</small>
+          <small>This code creates the first administrator account or resumes setup before its first passkey is saved.</small>
         </label>
         {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
         <button className="primary-action setup-action" type="submit">

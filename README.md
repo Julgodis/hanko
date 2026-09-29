@@ -38,7 +38,7 @@ Keep `IDENTITY_MASTER_KEY` stable and back it up with the SQLite database; it en
 
 Hanko records the configured WebAuthn RP ID in the database and refuses to start if it changes later. On the first start after this migration, verify `WEBAUTHN_RP_ID` is the same value used when existing passkeys were created; the database cannot infer an earlier value. Back up the SQLite database and `IDENTITY_MASTER_KEY` together.
 
-Open `PUBLIC_ORIGIN` and use the bootstrap token to create the first administrator and register a passkey. For development, the defaults use `http://localhost:3000`; run the backend there, set `PUBLIC_ORIGIN=http://localhost:5173`, then run `npm run dev` in `web`.
+Open `PUBLIC_ORIGIN` and use the bootstrap token to create the first administrator and register a passkey. If setup is interrupted before the first passkey is saved, reopen that page and enter the bootstrap token again. This resumes the sole unfinished administrator account and invalidates its previous setup sessions. Bootstrap is unavailable after a passkey is registered or another account exists. For development, the defaults use `http://localhost:3000`; run the backend there, set `PUBLIC_ORIGIN=http://localhost:5173`, then run `npm run dev` in `web`.
 
 ## Features
 
