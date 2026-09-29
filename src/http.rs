@@ -1826,6 +1826,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_listing_keeps_batched_relationships_separate_and_sorted() {
+        let (app, database) = test_app_with_database(local_config()).await;
+        let cookies = admin_cookies(&database).await;
+        sqlx::query("INSERT INTO groups (id, name, display_name, created_at) VALUES ('g', 'staff', 'Staff', 0)").execute(&database.pool).await.unwrap();
+        let first = browser_request(&app, "POST", "/api/admin/clients", &cookies, serde_json::json!({
+            "name":"A", "client_type":"public", "redirect_uris":["https://a.test/z", "https://a.test/a"],
+            "post_logout_redirect_uris":["https://a.test/logout"], "scopes":["openid","profile"],
+            "allowed_groups":["staff"], "claims":[{"claim_name":"department", "user_attribute_path":"/department", "required_scope":"profile"}]
+        })).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = response_json(first).await;
+        let second = browser_request(&app, "POST", "/api/admin/clients", &cookies, serde_json::json!({
+            "name":"B", "client_type":"public", "redirect_uris":["https://b.test/callback"], "scopes":["openid"]
+        })).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        sqlx::query("INSERT INTO client_users (client_id, user_id) VALUES (?, 'admin')")
+            .bind(first["client_id"].as_str().unwrap())
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let list = browser_request(
+            &app,
+            "GET",
+            "/api/admin/clients",
+            &cookies,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let clients = response_json(list).await;
+        assert_eq!(clients.as_array().unwrap().len(), 2);
+        assert_eq!(clients[0]["name"], "A");
+        assert_eq!(
+            clients[0]["redirect_uris"],
+            serde_json::json!(["https://a.test/a", "https://a.test/z"])
+        );
+        assert_eq!(
+            clients[0]["post_logout_redirect_uris"],
+            serde_json::json!(["https://a.test/logout"])
+        );
+        assert_eq!(clients[0]["allowed_groups"], serde_json::json!(["staff"]));
+        assert_eq!(clients[0]["claims"][0]["claim_name"], "department");
+        assert_eq!(clients[0]["user_count"], 1);
+        assert_eq!(
+            clients[1]["redirect_uris"],
+            serde_json::json!(["https://b.test/callback"])
+        );
+        assert_eq!(clients[1]["scopes"], serde_json::json!(["openid"]));
+        assert_eq!(clients[1]["allowed_groups"], serde_json::json!([]));
+        assert_eq!(clients[1]["claims"], serde_json::json!([]));
+        assert_eq!(clients[1]["user_count"], 0);
+    }
+
+    #[tokio::test]
     async fn invalid_invitation_requests_preserve_existing_login_cookies() {
         let (app, database) = test_app_with_database(local_config()).await;
         let cookies = admin_cookies(&database).await;
