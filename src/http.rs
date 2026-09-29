@@ -1826,6 +1826,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_invitation_requests_preserve_existing_login_cookies() {
+        let (app, database) = test_app_with_database(local_config()).await;
+        let cookies = admin_cookies(&database).await;
+        for token in ["invalid".to_owned(), "x".repeat(43)] {
+            for endpoint in ["validate", "consume"] {
+                let response = browser_request(
+                    &app,
+                    "POST",
+                    &format!("/api/invitations/{endpoint}"),
+                    &cookies,
+                    serde_json::json!({"token":token}),
+                )
+                .await;
+                assert_eq!(
+                    response.status(),
+                    if endpoint == "validate" {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                );
+                assert!(!response.headers().contains_key(header::SET_COOKIE));
+            }
+        }
+        let session = response_json(
+            browser_request(&app, "GET", "/api/session", &cookies, serde_json::json!({})).await,
+        )
+        .await;
+        assert_eq!(session["authenticated"], true);
+        assert_eq!(session["is_admin"], true);
+    }
+
+    #[tokio::test]
     async fn deleting_an_invitation_invalidates_pending_setup_but_preserves_completed_users() {
         let (app, database) = test_app_with_database(local_config()).await;
         let admin = admin_cookies(&database).await;
