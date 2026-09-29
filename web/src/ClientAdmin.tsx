@@ -200,6 +200,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [signingKeys, setSigningKeys] = useState<SigningKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [sessionsRevoked, setSessionsRevoked] = useState(false);
   const [name, setName] = useState("");
   const [tokenAuthMethod, setTokenAuthMethod] = useState<TokenEndpointAuthMethod>("none");
   const [pkcePolicy, setPkcePolicy] = useState<PkcePolicy>("required");
@@ -1020,10 +1021,11 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
         if (canEditUserClaim(claim)) profileClaims[claim] = oidcProfileClaims[claim];
       }
       if (Object.keys(profileClaims).length > 0) body.profile_claims = profileClaims;
-      const profile = await api<{ username: string | null; display_name: string | null; picture: string | null; phone_number: string | null; address: Partial<OidcAddress> | null; profile_claims: OidcProfileClaims }>("/api/account/profile", {
+      const profile = await api<{ sessions_revoked: boolean; username: string | null; display_name: string | null; picture: string | null; phone_number: string | null; address: Partial<OidcAddress> | null; profile_claims: OidcProfileClaims }>("/api/account/profile", {
         method: "PUT",
         body: json(body),
       });
+      setSessionsRevoked(profile.sessions_revoked);
       setOidcUsername(profile.username ?? "");
       setOidcName(profile.display_name ?? "");
       setOidcPicture(profile.picture ?? "");
@@ -1219,6 +1221,14 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
         : "Review account details and manage this user’s custom claims."
       : activeTab === "users" && userFormOpen ? "Create an invitation for someone to set up an account."
       : activeTab === "groups" && groupFormOpen ? "Set group details, membership, and claims shared with its members." : tabDescription;
+
+  if (sessionsRevoked) {
+    return <AdminScene><section className="account-oidc-profile" role="status">
+      <h1>Your profile is saved</h1>
+      <p>Your account’s security policy signed you out of all Hanko sessions after this change.</p>
+      <a className="primary-action" href={appPath("account")}>Sign in again</a>
+    </section></AdminScene>;
+  }
 
   return <AdminScene>
     <div className="admin-layout">
