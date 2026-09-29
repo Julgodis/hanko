@@ -16,9 +16,9 @@ use uuid::Uuid;
 use crate::{
     http::AppState,
     security::{
-        BrowserSession, SESSION_SECONDS, clear_session_cookies, create_session,
-        csrf_header_matches, digest, load_session, origin_is_valid, random_secret,
-        set_session_cookies, source_ip, try_anonymous_state_slot, unix_now,
+        BrowserSession, SESSION_SECONDS, create_session, csrf_header_matches, digest, load_session,
+        origin_is_valid, random_secret, set_session_cookies, source_ip, try_anonymous_state_slot,
+        unix_now,
     },
 };
 
@@ -1596,11 +1596,7 @@ async fn validate_invitation(
             "invitation is invalid, expired, revoked, or unavailable"
         );
     }
-    let mut response = Json(InvitationValidation { valid, in_progress }).into_response();
-    if !valid && !in_progress {
-        clear_session_cookies(&mut response, &state.config);
-    }
-    Ok(response)
+    Ok(Json(InvitationValidation { valid, in_progress }).into_response())
 }
 
 async fn consume_invitation(
@@ -1625,9 +1621,7 @@ async fn consume_invitation(
         return Err(AdminError::rate_limited());
     }
     if input.token.len() < 32 || input.token.len() > 128 {
-        let mut response = AdminError::unauthorized().into_response();
-        clear_session_cookies(&mut response, &state.config);
-        return Ok(response);
+        return Err(AdminError::unauthorized());
     }
     let now = unix_now();
     let token_hash = digest(&input.token);
@@ -1734,9 +1728,7 @@ async fn consume_invitation(
             .await
             .map_err(|_| AdminError::internal())?;
         let Some(row) = row else {
-            let mut response = AdminError::unauthorized().into_response();
-            clear_session_cookies(&mut response, &state.config);
-            return Ok(response);
+            return Err(AdminError::unauthorized());
         };
         row.try_get("user_id").map_err(|_| AdminError::internal())?
     };
