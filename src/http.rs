@@ -773,6 +773,9 @@ async fn update_profile(
         || oidc_username.is_some() != current_exposes_username
         || raw_name.is_some() != current_exposes_name
         || attributes != original_attributes;
+    // Setup has no passkey yet; its session is the only way to finish enrollment.
+    let sessions_revoked =
+        identity_changed && state.config.revoke_sessions_on_identity_change && !session.setup_only;
     let serialized_attributes =
         serde_json::to_string(&attributes).map_err(|_| ApiError::internal())?;
     let mut transaction = state
@@ -828,7 +831,7 @@ async fn update_profile(
             .await
             .map_err(|_| ApiError::internal())?;
     }
-    if identity_changed && state.config.revoke_sessions_on_identity_change {
+    if sessions_revoked {
         sqlx::query("DELETE FROM sessions WHERE user_id = ?")
             .bind(&session.user_id)
             .execute(&mut *transaction)
@@ -841,6 +844,7 @@ async fn update_profile(
         .map_err(|_| ApiError::internal())?;
 
     let mut response = Json(serde_json::json!({
+        "sessions_revoked": sessions_revoked,
         "username": oidc_username,
         "display_name": raw_name,
         "picture": attributes.get("picture").and_then(serde_json::Value::as_str),
@@ -849,7 +853,7 @@ async fn update_profile(
         "profile_claims": crate::security::oidc_profile_claims(&attributes),
     }))
     .into_response();
-    if identity_changed && state.config.revoke_sessions_on_identity_change {
+    if sessions_revoked {
         clear_session_cookies(&mut response, &state.config);
     }
     Ok(response)
@@ -2082,6 +2086,65 @@ mod tests {
         assert_eq!(
             app.oneshot(request()).await.unwrap().status(),
             StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_revocation_preserves_setup_and_reports_normal_session_logout() {
+        let mut config = local_config();
+        config.revoke_sessions_on_identity_change = true;
+        config.bootstrap_token = Some("bootstrap-secret".into());
+        let (app, database) = test_app_with_database(config).await;
+        let bootstrap = browser_request(
+            &app,
+            "POST",
+            "/api/bootstrap",
+            "",
+            serde_json::json!({"token":"bootstrap-secret"}),
+        )
+        .await;
+        let cookies = response_cookies(&bootstrap);
+        let saved = browser_request(
+            &app,
+            "PUT",
+            "/api/account/profile",
+            &cookies,
+            serde_json::json!({"username":"alice"}),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert!(!saved.headers().contains_key(header::SET_COOKIE));
+        assert_eq!(response_json(saved).await["sessions_revoked"], false);
+        let options = browser_request(
+            &app,
+            "POST",
+            "/api/passkeys/register/options",
+            &cookies,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(options.status(), StatusCode::OK);
+        sqlx::query("UPDATE sessions SET setup_only = 0")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let saved = browser_request(
+            &app,
+            "PUT",
+            "/api/account/profile",
+            &cookies,
+            serde_json::json!({"username":"alice", "display_name":"Alice"}),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert!(response_cookies(&saved).contains("hanko_session="));
+        assert_eq!(response_json(saved).await["sessions_revoked"], true);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sessions")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap(),
+            0
         );
     }
 
