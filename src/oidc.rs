@@ -3194,6 +3194,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_consent_stays_visible_and_offline_access_can_be_revoked() {
+        let (state, user_id, client_id) = oidc_test_state().await;
+        let token = issue_test_refresh_token(&state, &user_id, &client_id).await;
+        sqlx::query("INSERT INTO oidc_consents (user_id, client_id, scopes, granted_at, expires_at) VALUES (?, ?, '[\"openid\",\"offline_access\"]', 1, 2)")
+            .bind(&user_id).bind(&client_id).execute(&state.database.pool).await.unwrap();
+        assert!(
+            !consent_covers(
+                &state.database.pool,
+                &user_id,
+                &client_id,
+                &["openid".into()],
+                unix_now()
+            )
+            .await
+            .unwrap()
+        );
+        let session = create_session(&state.database, &user_id, false, unix_now())
+            .await
+            .unwrap();
+        let cookie = format!(
+            "hanko_session={}; hanko_csrf={}",
+            session.raw_token, session.raw_csrf
+        );
+        let app = http_router(state.clone());
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/account/consents")
+                    .header(header::COOKIE, &cookie)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let grants: Value =
+            serde_json::from_slice(&axum::body::to_bytes(list.into_body(), 4096).await.unwrap())
+                .unwrap();
+        assert_eq!(grants.as_array().unwrap().len(), 1);
+        assert_eq!(grants[0]["client_id"], client_id);
+        assert_eq!(grants[0]["expires_at"], 2);
+        let successor = exchange_refresh_token(&state, &client_id, &token)
+            .await
+            .unwrap()
+            .refresh_token
+            .unwrap();
+        let revoked = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/account/consents/{client_id}"))
+                    .header(header::ORIGIN, "http://localhost:3000")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", &session.raw_csrf)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            exchange_refresh_token(&state, &client_id, &successor)
+                .await
+                .err()
+                .unwrap()
+                .error,
+            "invalid_grant"
+        );
+    }
+
+    #[tokio::test]
     async fn refresh_token_reuse_revokes_the_active_successor_and_family() {
         let (state, user_id, client_id) = oidc_test_state().await;
         let original = issue_test_refresh_token(&state, &user_id, &client_id).await;

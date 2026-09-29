@@ -1457,9 +1457,8 @@ async fn list_account_consents(
     if session.setup_only {
         return Err(ApiError::forbidden());
     }
-    let rows = sqlx::query("SELECT c.client_id, c.name AS client_name, g.scopes, g.granted_at, g.expires_at FROM oidc_consents g JOIN oidc_clients c ON c.client_id = g.client_id WHERE g.user_id = ? AND (g.expires_at IS NULL OR g.expires_at > ?) ORDER BY c.name COLLATE NOCASE, c.client_id")
+    let rows = sqlx::query("SELECT c.client_id, c.name AS client_name, g.scopes, g.granted_at, g.expires_at FROM oidc_consents g JOIN oidc_clients c ON c.client_id = g.client_id WHERE g.user_id = ? ORDER BY c.name COLLATE NOCASE, c.client_id")
         .bind(&session.user_id)
-        .bind(unix_now())
         .fetch_all(&state.database.pool)
         .await
         .map_err(|_| ApiError::internal())?;
