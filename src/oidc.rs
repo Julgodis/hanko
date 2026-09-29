@@ -285,6 +285,15 @@ impl IntoResponse for OAuthError {
     }
 }
 
+// These endpoints use protocol credentials, never browser-session cookies.
+// Public browser clients must be able to read discovery and exchange PKCE codes.
+pub(crate) fn cors_layer() -> tower_http::cors::CorsLayer {
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/authorize", get(authorize))
@@ -292,8 +301,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/authorize/request", get(authorize_request_info))
         .route("/api/authorize/continue", post(continue_authorize))
         .route("/api/authorize/deny", post(deny_authorize))
-        .route("/token", post(token))
-        .route("/userinfo", get(userinfo).post(userinfo))
+        .route("/token", post(token).layer(cors_layer()))
+        .route(
+            "/userinfo",
+            get(userinfo).post(userinfo).layer(cors_layer()),
+        )
         .route("/logout", get(end_session))
 }
 

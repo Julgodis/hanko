@@ -310,8 +310,8 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::oidc::router())
         .merge(crate::admin::router())
         .route("/healthz", get(health))
-        .route("/.well-known/openid-configuration", get(discovery))
-        .route("/jwks", get(jwks))
+        .route("/.well-known/openid-configuration", get(discovery).layer(crate::oidc::cors_layer()))
+        .route("/jwks", get(jwks).layer(crate::oidc::cors_layer()))
         .route("/api/users/{user_id}/picture.svg", get(generated_user_picture))
         .route("/api/session", get(session_info))
         .route("/api/account/profile", axum::routing::put(update_profile))
@@ -1756,6 +1756,90 @@ mod tests {
             anonymous_request_limiter: crate::security::AnonymousRequestLimiter::default(),
         });
         (app, database)
+    }
+
+    #[tokio::test]
+    async fn cors_is_available_only_on_public_oidc_endpoints() {
+        let app = test_app(local_config()).await;
+        for (path, method) in [
+            ("/.well-known/openid-configuration", "GET"),
+            ("/jwks", "GET"),
+            ("/token", "POST"),
+            ("/userinfo", "GET"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::ORIGIN, "https://client.example")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            );
+            let preflight = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("OPTIONS")
+                        .uri(path)
+                        .header(header::ORIGIN, "https://client.example")
+                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, method)
+                        .header(
+                            header::ACCESS_CONTROL_REQUEST_HEADERS,
+                            "authorization,content-type",
+                        )
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(preflight.status().is_success());
+            assert_eq!(
+                preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                "*"
+            );
+            assert!(
+                preflight.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                    .to_str()
+                    .unwrap()
+                    .contains("authorization")
+            );
+        }
+        for path in [
+            "/api/session",
+            "/api/admin/users",
+            "/api/authorize/continue",
+            "/logout",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("OPTIONS")
+                        .uri(path)
+                        .header(header::ORIGIN, "https://client.example")
+                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                "{path}"
+            );
+        }
     }
 
     fn local_config() -> Config {
