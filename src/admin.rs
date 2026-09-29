@@ -658,14 +658,32 @@ async fn delete_invitation(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AdminError> {
     let _admin = require_admin(&state, &headers, true).await?;
+    let mut transaction = state
+        .database
+        .pool
+        .begin()
+        .await
+        .map_err(|_| AdminError::internal())?;
+    // Remove incomplete accounts before the invitation FK is set to NULL.
+    // Otherwise they become indistinguishable from bootstrap accounts and can
+    // finish enrollment after their invitation has been deleted.
+    sqlx::query("DELETE FROM users WHERE invitation_link_id = ? AND NOT EXISTS (SELECT 1 FROM passkeys WHERE passkeys.user_id = users.id)")
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| AdminError::internal())?;
     let result = sqlx::query("DELETE FROM invitation_links WHERE id = ?")
         .bind(id)
-        .execute(&state.database.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|_| AdminError::internal())?;
     if result.rows_affected() == 0 {
         return Err(AdminError::invitation_not_found());
     }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| AdminError::internal())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
