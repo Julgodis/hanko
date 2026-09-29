@@ -1722,6 +1722,161 @@ mod tests {
         (app, database)
     }
 
+    fn local_config() -> Config {
+        Config::new(
+            "http://localhost:3000",
+            "sqlite::memory:".into(),
+            "127.0.0.1:0".into(),
+        )
+        .unwrap()
+    }
+
+    async fn browser_request(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        cookies: &str,
+        body: serde_json::Value,
+    ) -> Response {
+        let csrf = cookies
+            .split("; ")
+            .find_map(|cookie| cookie.strip_prefix("hanko_csrf="))
+            .unwrap_or("");
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::ORIGIN, "http://localhost:3000")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, cookies)
+                    .header("x-csrf-token", csrf)
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn response_cookies(response: &Response) -> String {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap().split(';').next().unwrap())
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    async fn admin_cookies(database: &Database) -> String {
+        sqlx::query("INSERT INTO users (id, username, display_name, is_admin, created_at, updated_at) VALUES ('admin', 'admin', 'Admin', 1, 0, 0)")
+            .execute(&database.pool).await.unwrap();
+        let session = create_session(database, "admin", false, unix_now())
+            .await
+            .unwrap();
+        format!(
+            "hanko_session={}; hanko_csrf={}",
+            session.raw_token, session.raw_csrf
+        )
+    }
+
+    #[tokio::test]
+    async fn deleting_an_invitation_invalidates_pending_setup_but_preserves_completed_users() {
+        let (app, database) = test_app_with_database(local_config()).await;
+        let admin = admin_cookies(&database).await;
+        let invite = browser_request(&app, "POST", "/api/admin/invitations", &admin,
+            serde_json::json!({"label":"Test", "max_uses":2, "expires_in":1, "expires_unit":"hours"})).await;
+        assert_eq!(invite.status(), StatusCode::OK);
+        let invite = response_json(invite).await;
+        let token = invite["enrollment_url"]
+            .as_str()
+            .unwrap()
+            .split("enroll=")
+            .nth(1)
+            .unwrap();
+        let pending = browser_request(
+            &app,
+            "POST",
+            "/api/invitations/consume",
+            "",
+            serde_json::json!({"token":token}),
+        )
+        .await;
+        assert_eq!(pending.status(), StatusCode::OK);
+        let pending_cookies = response_cookies(&pending);
+        let completed = browser_request(
+            &app,
+            "POST",
+            "/api/invitations/consume",
+            "",
+            serde_json::json!({"token":token}),
+        )
+        .await;
+        let completed_cookies = response_cookies(&completed);
+        let identity = response_json(
+            browser_request(
+                &app,
+                "GET",
+                "/api/session",
+                &completed_cookies,
+                serde_json::json!({}),
+            )
+            .await,
+        )
+        .await;
+        let completed_username = identity["username"].as_str().unwrap();
+        // Model successful enrollment, which releases the invitation association.
+        sqlx::query("UPDATE users SET invitation_link_id = NULL, invitation_reserved_until = NULL WHERE username = ?")
+            .bind(completed_username).execute(&database.pool).await.unwrap();
+        sqlx::query("UPDATE invitation_links SET revoked_at = ? WHERE id = ?")
+            .bind(unix_now())
+            .bind(invite["id"].as_str().unwrap())
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let deleted = browser_request(
+            &app,
+            "DELETE",
+            &format!("/api/admin/invitations/{}", invite["id"].as_str().unwrap()),
+            &admin,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        let registration = browser_request(
+            &app,
+            "POST",
+            "/api/passkeys/register/options",
+            &pending_cookies,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(registration.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sessions")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
     #[tokio::test]
     async fn discovery_uses_configured_issuer_and_advertises_pkce_s256() {
         let config = Config::new(
