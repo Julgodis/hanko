@@ -7,7 +7,9 @@ import { PrivateValue } from "./components/PrivacyMode";
 import { SealCustomizer } from "./components/SealCustomizer";
 import { ORIGINAL_HANKO_GRADIENT } from "./components/generateHankoPath";
 import { api, appPath, defaultPasskeyLabel, json, logUiIssue } from "./lib/utils";
-import { canEditConfiguredUserClaim, isRequiredUserClaim, missingRequiredUserClaims, type OidcProfileClaims } from "./lib/userClaims";
+import type { OidcProfileClaims } from "./lib/userClaims";
+import { ProfileFields } from "./components/ProfileFields";
+import { buildProfilePayload, createProfileDraft, missingProfileClaims, type OidcAddress, type SavedProfile } from "./lib/profile";
 
 const AVAILABLE_SCOPES = ["profile", "email", "address", "phone", "picture", "groups", "offline_access"] as const;
 const EXPIRY_UNIT_SECONDS = { seconds: 1, minutes: 60, hours: 60 * 60, days: 24 * 60 * 60, years: 365 * 24 * 60 * 60 } as const;
@@ -40,10 +42,6 @@ type CreatedInvitation = { id: string; label: string; email: string | null; enro
 type SigningKey = { kid: string; algorithm: string; status: string; created_at: number; retire_after: number | null };
 type AccountPasskey = { id: string; label: string; created_at: number; last_used_at: number | null };
 type ConsentGrant = { client_id: string; client_name: string; scopes: string[]; granted_at: number; expires_at: number | null };
-type OidcAddress = { street_address: string; locality: string; region: string; postal_code: string; country: string };
-const EMPTY_OIDC_ADDRESS: OidcAddress = { street_address: "", locality: "", region: "", postal_code: "", country: "" };
-type OidcProfileDraft = Required<Omit<OidcProfileClaims, "app_roles">>;
-const EMPTY_OIDC_PROFILE: OidcProfileDraft = { profile: "", given_name: "", family_name: "", nickname: "", website: "", locale: "", zoneinfo: "" };
 type Tab = "clients" | "users" | "groups" | "keys" | "hanko" | "passkeys" | "consents";
 type AdminRoute = {
   tab: Tab;
@@ -179,8 +177,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const routeState = location.state as { returnToGroup?: boolean; groupId?: string } | null;
   const userClaimsReturnGroup = Boolean(routeState?.returnToGroup);
   const userClaimsReturnGroupId = routeState?.groupId ?? "";
-  const canEditUserClaim = (claim: string) => canEditConfiguredUserClaim(claim, requiredUserClaims);
-  const fieldRequirement = (claim: string) => isRequiredUserClaim(claim, requiredUserClaims) ? "Required" : "Optional";
   const previewScreen = import.meta.env.DEV && new URLSearchParams(window.location.search).get("ui-preview") === "1"
     ? new URLSearchParams(window.location.search).get("screen")
     : null;
@@ -243,12 +239,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [hankoSeed, setHankoSeed] = useState("hanko");
   const [savingHanko, setSavingHanko] = useState(false);
   const [hankoMessage, setHankoMessage] = useState("");
-  const [oidcUsername, setOidcUsername] = useState("");
-  const [oidcName, setOidcName] = useState("");
-  const [oidcPicture, setOidcPicture] = useState("");
-  const [oidcPhone, setOidcPhone] = useState("");
-  const [oidcAddress, setOidcAddress] = useState<OidcAddress>(EMPTY_OIDC_ADDRESS);
-  const [oidcProfileClaims, setOidcProfileClaims] = useState<OidcProfileDraft>(EMPTY_OIDC_PROFILE);
+  const [profileDraft, setProfileDraft] = useState(() => createProfileDraft());
   const [savingOidcProfile, setSavingOidcProfile] = useState(false);
   const [oidcProfileMessage, setOidcProfileMessage] = useState("");
   const [invitations, setInvitations] = useState<Invitation[]>([]);
@@ -324,15 +315,11 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
           setGroups(groupList);
           if (session.hanko_color) setHankoColor(session.hanko_color === "#d64135" ? ORIGINAL_HANKO_GRADIENT : session.hanko_color);
           if (session.hanko_seed) setHankoSeed(session.hanko_seed);
-          setOidcUsername(session.oidc_username ?? "");
-          setOidcName(session.oidc_name ?? "");
-          setOidcPicture(session.oidc_picture ?? "");
-          setOidcPhone(session.oidc_phone ?? "");
-          setOidcAddress({ ...EMPTY_OIDC_ADDRESS, ...(session.oidc_address ?? {}) });
-          setOidcProfileClaims({
-            ...EMPTY_OIDC_PROFILE,
-            ...(session.oidc_profile_claims ?? {}),
-          });
+          setProfileDraft(createProfileDraft({
+            username: session.oidc_username ?? "", displayName: session.oidc_name ?? "",
+            pictureUrl: session.oidc_picture ?? "", phoneNumber: session.oidc_phone ?? "",
+            address: session.oidc_address ?? undefined, profileClaims: session.oidc_profile_claims ?? undefined,
+          }));
           setAllowMultiplePasskeysPerAuthenticator(session.allow_multiple_passkeys_per_authenticator ?? true);
         }
       } catch (loadError) {
@@ -989,15 +976,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
 
   async function saveOidcProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const missing = missingRequiredUserClaims(requiredUserClaims, {
-      preferred_username: oidcUsername,
-      name: oidcName,
-      picture: oidcPicture,
-      phone_number: oidcPhone,
-      address: oidcAddress,
-      ...oidcAddress,
-      ...oidcProfileClaims,
-    });
+    const missing = missingProfileClaims(profileDraft, requiredUserClaims);
     if (missing.length) {
       setOidcProfileMessage(`Complete the required fields: ${missing.join(", ")}.`);
       return;
@@ -1005,36 +984,16 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     setSavingOidcProfile(true);
     setOidcProfileMessage("");
     try {
-      const body: Record<string, unknown> = {
-        username: oidcUsername.trim() || null,
-        display_name: oidcName.trim() || null,
-      };
-      if (canEditUserClaim("picture")) body.picture = oidcPicture.trim();
-      if (canEditUserClaim("phone_number")) body.phone_number = oidcPhone.trim();
-      if (canEditUserClaim("address")) {
-        body.address = Object.fromEntries(
-          Object.entries(oidcAddress).filter(([claim]) => canEditUserClaim(claim)),
-        );
-      }
-      const profileClaims: OidcProfileClaims = {};
-      for (const claim of ["profile", "given_name", "family_name", "nickname", "website", "locale", "zoneinfo"] as const) {
-        if (canEditUserClaim(claim)) profileClaims[claim] = oidcProfileClaims[claim];
-      }
-      if (Object.keys(profileClaims).length > 0) body.profile_claims = profileClaims;
-      const profile = await api<{ sessions_revoked: boolean; username: string | null; display_name: string | null; picture: string | null; phone_number: string | null; address: Partial<OidcAddress> | null; profile_claims: OidcProfileClaims }>("/api/account/profile", {
+      const profile = await api<SavedProfile>("/api/account/profile", {
         method: "PUT",
-        body: json(body),
+        body: json(buildProfilePayload(profileDraft, requiredUserClaims)),
       });
       setSessionsRevoked(profile.sessions_revoked);
-      setOidcUsername(profile.username ?? "");
-      setOidcName(profile.display_name ?? "");
-      setOidcPicture(profile.picture ?? "");
-      setOidcPhone(profile.phone_number ?? "");
-      setOidcAddress({ ...EMPTY_OIDC_ADDRESS, ...(profile.address ?? {}) });
-      setOidcProfileClaims({
-        ...EMPTY_OIDC_PROFILE,
-        ...profile.profile_claims,
-      });
+      setProfileDraft(createProfileDraft({
+        username: profile.username ?? "", displayName: profile.display_name ?? "",
+        pictureUrl: profile.picture ?? "", phoneNumber: profile.phone_number ?? "",
+        address: profile.address ?? undefined, profileClaims: profile.profile_claims,
+      }));
       setOidcProfileMessage("Your OIDC profile is saved.");
     } catch (saveError) {
       setOidcProfileMessage(errorMessage(saveError, "save OIDC profile"));
@@ -1541,22 +1500,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             <div className="account-hanko-save"><button className="secondary-action" type="button" onClick={saveHanko} disabled={savingHanko}>{savingHanko ? "Saving…" : "Save your Hanko"}</button>{hankoMessage && <p role="status">{hankoMessage}</p>}</div>
             <form className="client-form account-oidc-profile" onSubmit={saveOidcProfile}>
               <div><h2>OIDC profile</h2><p className="admin-hint">Choose the details shared when apps request the matching scopes.</p></div>
-              {canEditUserClaim("preferred_username") && <label className="admin-field"><span>Username <em>{fieldRequirement("preferred_username")}</em></span><input autoComplete="username" autoCapitalize="none" maxLength={64} pattern={"[A-Za-z0-9._\\-]+"} value={oidcUsername} onChange={(event) => setOidcUsername(event.target.value.toLowerCase())} placeholder="Used as preferred_username" required={isRequiredUserClaim("preferred_username", requiredUserClaims)} /><small>Leave blank to keep your username private.</small></label>}
-              {canEditUserClaim("name") && <label className="admin-field"><span>Name <em>{fieldRequirement("name")}</em></span><input autoComplete="name" maxLength={120} value={oidcName} onChange={(event) => setOidcName(event.target.value)} placeholder="How apps should know you" required={isRequiredUserClaim("name", requiredUserClaims)} /><small>Leave blank to keep your name private.</small></label>}
-              {canEditUserClaim("picture") && <label className="admin-field"><span>Picture URL <em>{fieldRequirement("picture")}</em></span><input type="url" maxLength={2048} value={oidcPicture} onChange={(event) => setOidcPicture(event.target.value)} placeholder="Generated from your Hanko stamp" required={isRequiredUserClaim("picture", requiredUserClaims)} /><small>Leave blank to use a generated image matching your Hanko stamp. A custom HTTPS image URL overrides it.</small></label>}
-              {canEditUserClaim("phone_number") && <label className="admin-field"><span>Phone number <em>{fieldRequirement("phone_number")}</em></span><input type="tel" autoComplete="tel" maxLength={64} value={oidcPhone} onChange={(event) => setOidcPhone(event.target.value)} placeholder="+1 555 123 4567" required={isRequiredUserClaim("phone_number", requiredUserClaims)} /><small>Shared with apps that request the phone scope. Hanko does not verify phone ownership.</small></label>}
-              {canEditUserClaim("address") && canEditUserClaim("street_address") && <label className="admin-field"><span>Street address <em>{isRequiredUserClaim("address", requiredUserClaims) ? "Address required" : fieldRequirement("street_address")}</em></span><textarea autoComplete="street-address" maxLength={500} rows={2} value={oidcAddress.street_address} onChange={(event) => setOidcAddress((address) => ({ ...address, street_address: event.target.value }))} placeholder="Street, apartment or floor" required={isRequiredUserClaim("street_address", requiredUserClaims)} /><small>Apartment and floor details can be included here. Shared with apps that request the address scope.</small></label>}
-              {canEditUserClaim("address") && canEditUserClaim("locality") && <label className="admin-field"><span>City or locality <em>{fieldRequirement("locality")}</em></span><input autoComplete="address-level2" maxLength={500} value={oidcAddress.locality} onChange={(event) => setOidcAddress((address) => ({ ...address, locality: event.target.value }))} required={isRequiredUserClaim("locality", requiredUserClaims)} /></label>}
-              {canEditUserClaim("address") && canEditUserClaim("region") && <label className="admin-field"><span>Region or state <em>{fieldRequirement("region")}</em></span><input autoComplete="address-level1" maxLength={500} value={oidcAddress.region} onChange={(event) => setOidcAddress((address) => ({ ...address, region: event.target.value }))} required={isRequiredUserClaim("region", requiredUserClaims)} /></label>}
-              {canEditUserClaim("address") && canEditUserClaim("postal_code") && <label className="admin-field"><span>Postal code <em>{fieldRequirement("postal_code")}</em></span><input autoComplete="postal-code" maxLength={500} value={oidcAddress.postal_code} onChange={(event) => setOidcAddress((address) => ({ ...address, postal_code: event.target.value }))} required={isRequiredUserClaim("postal_code", requiredUserClaims)} /></label>}
-              {canEditUserClaim("address") && canEditUserClaim("country") && <label className="admin-field"><span>Country <em>{fieldRequirement("country")}</em></span><input autoComplete="country-name" maxLength={500} value={oidcAddress.country} onChange={(event) => setOidcAddress((address) => ({ ...address, country: event.target.value }))} required={isRequiredUserClaim("country", requiredUserClaims)} /></label>}
-              {canEditUserClaim("profile") && <label className="admin-field"><span>Profile URL <em>{fieldRequirement("profile")}</em></span><input type="url" maxLength={2048} value={oidcProfileClaims.profile} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, profile: event.target.value }))} placeholder="https://example.com/about" required={isRequiredUserClaim("profile", requiredUserClaims)} /></label>}
-              {canEditUserClaim("given_name") && <label className="admin-field"><span>Given name <em>{fieldRequirement("given_name")}</em></span><input autoComplete="given-name" maxLength={120} value={oidcProfileClaims.given_name} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, given_name: event.target.value }))} required={isRequiredUserClaim("given_name", requiredUserClaims)} /></label>}
-              {canEditUserClaim("family_name") && <label className="admin-field"><span>Family name <em>{fieldRequirement("family_name")}</em></span><input autoComplete="family-name" maxLength={120} value={oidcProfileClaims.family_name} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, family_name: event.target.value }))} required={isRequiredUserClaim("family_name", requiredUserClaims)} /></label>}
-              {canEditUserClaim("nickname") && <label className="admin-field"><span>Nickname <em>{fieldRequirement("nickname")}</em></span><input autoComplete="nickname" maxLength={120} value={oidcProfileClaims.nickname} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, nickname: event.target.value }))} required={isRequiredUserClaim("nickname", requiredUserClaims)} /></label>}
-              {canEditUserClaim("website") && <label className="admin-field"><span>Website <em>{fieldRequirement("website")}</em></span><input type="url" maxLength={2048} value={oidcProfileClaims.website} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, website: event.target.value }))} placeholder="https://example.com" required={isRequiredUserClaim("website", requiredUserClaims)} /></label>}
-              {canEditUserClaim("locale") && <label className="admin-field"><span>Locale <em>{fieldRequirement("locale")}</em></span><input maxLength={128} value={oidcProfileClaims.locale} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, locale: event.target.value }))} placeholder="en-US" required={isRequiredUserClaim("locale", requiredUserClaims)} /></label>}
-              {canEditUserClaim("zoneinfo") && <label className="admin-field"><span>Time zone <em>{fieldRequirement("zoneinfo")}</em></span><input maxLength={128} value={oidcProfileClaims.zoneinfo} onChange={(event) => setOidcProfileClaims((claims) => ({ ...claims, zoneinfo: event.target.value }))} placeholder="Europe/Stockholm" required={isRequiredUserClaim("zoneinfo", requiredUserClaims)} /></label>}
+              <ProfileFields value={profileDraft} onChange={setProfileDraft} requiredUserClaims={requiredUserClaims} />
               {oidcProfileMessage && <p className={`admin-message${oidcProfileMessage.includes("saved") ? "" : " admin-message-error"}`} role={oidcProfileMessage.includes("saved") ? "status" : "alert"}>{oidcProfileMessage}</p>}
               <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={savingOidcProfile}>{savingOidcProfile ? "Saving profile…" : "Save OIDC profile"}</button></div>
             </form>
