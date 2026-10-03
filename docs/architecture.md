@@ -32,6 +32,7 @@ All times are Unix seconds in UTC. IDs are random UUIDs unless they are protocol
 | `groups` | Unique stable name and display metadata. |
 | `group_claim_mappings` | JSON-valued custom claims attached to groups. A user receives claims from their current groups only when the configured OIDC scope is requested. |
 | `user_claim_mappings` | Admin-managed JSON-valued custom claims attached to one user, with an optional required OIDC scope. |
+| `user_claim_included_groups` | Optional group gate for a user claim; the user must belong to at least one selected group. Group deletion is blocked while a claim uses the group. |
 | `user_groups` | `(user_id, group_id)` membership with cascading FKs. |
 | `oidc_clients` | Public/confidential type, client ID, token endpoint authentication method (`none`, `client_secret_basic`, or `client_secret_post`), required/optional PKCE policy, optional hashed secret, name, enabled flag, JSON allowed scopes and claim mappings. |
 | `client_redirect_uris` | Exact URI strings, unique per client; never wildcard/prefix matched. |
@@ -86,7 +87,7 @@ Consent grants persist by default. `OIDC_CONSENT_LIFETIME_SECONDS=0` means no ex
 
 ### OIDC custom claims
 
-Client claim mappings read values from a user's JSON `attributes` with a JSON Pointer and can be gated by a client scope. Group claim mappings hold a JSON value directly and are included for users who belong to the group when the required scope is requested. User claim mappings hold a JSON value directly for one user and can be gated by an optional scope. The scope must also be enabled on the client, since authorization rejects scopes the client has not enabled. If one group contributes a claim, its JSON value is preserved. If multiple groups contribute the same claim, their top-level array values are flattened and deduplicated into an array. User claims override group claims with the same name, and client-specific mappings override both. These custom claims appear in ID and access tokens and in the consent preview; `/userinfo` returns custom claims carried by the access token.
+Client claim mappings read values from a user's JSON `attributes` with a JSON Pointer and can be gated by a client scope. Group claim mappings hold a JSON value directly and are included for users who belong to the group when the required scope is requested. User claim mappings hold a JSON value directly for one user and can be gated by an optional scope and by selected groups; when groups are selected, the user must belong to at least one of them. The scope must also be enabled on the client, since authorization rejects scopes the client has not enabled. If one group contributes a claim, its JSON value is preserved. If multiple groups contribute the same claim, their top-level array values are flattened and deduplicated into an array. User claims override group claims with the same name, and client-specific mappings override both. These custom claims appear in ID and access tokens and in the consent preview; `/userinfo` returns custom claims carried by the access token.
 
 ## Incremental implementation order
 

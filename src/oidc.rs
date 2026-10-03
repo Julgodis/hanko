@@ -2356,7 +2356,7 @@ async fn user_custom_claims(
     user_id: &str,
     scopes: &[String],
 ) -> Result<Map<String, Value>, OAuthError> {
-    let rows = sqlx::query("SELECT claim_name, claim_value, required_scope FROM user_claim_mappings WHERE user_id = ? ORDER BY claim_name")
+    let rows = sqlx::query("SELECT mappings.claim_name, mappings.claim_value, mappings.required_scope, EXISTS(SELECT 1 FROM user_claim_included_groups selected WHERE selected.user_id = mappings.user_id AND selected.claim_name = mappings.claim_name) AS has_included_groups, EXISTS(SELECT 1 FROM user_claim_included_groups selected JOIN user_groups membership ON membership.user_id = selected.user_id AND membership.group_id = selected.group_id WHERE selected.user_id = mappings.user_id AND selected.claim_name = mappings.claim_name) AS matches_included_group FROM user_claim_mappings mappings WHERE mappings.user_id = ? ORDER BY mappings.claim_name")
         .bind(user_id)
         .fetch_all(&state.database.pool)
         .await
@@ -2370,6 +2370,15 @@ async fn user_custom_claims(
             .as_ref()
             .is_some_and(|scope| !scopes.contains(scope))
         {
+            continue;
+        }
+        let has_included_groups: bool = row
+            .try_get("has_included_groups")
+            .map_err(|_| OAuthError::server_error())?;
+        let matches_included_group: bool = row
+            .try_get("matches_included_group")
+            .map_err(|_| OAuthError::server_error())?;
+        if has_included_groups && !matches_included_group {
             continue;
         }
         let claim_name: String = row

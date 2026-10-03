@@ -3,14 +3,15 @@ import { Plus, Trash2 } from "lucide-react";
 import { PrivateValue } from "../components/PrivacyMode";
 import { OPTIONAL_SCOPES as AVAILABLE_SCOPES } from "../lib/scopes";
 import { api, json, errorMessage } from "../lib/utils";
-import type { AdminUser, UserClaim } from "../lib/apiTypes";
-type UserClaimDraft = { claim_name: string; claim_value: string; required_scope: string };
+import type { AdminUser, Group, UserClaim } from "../lib/apiTypes";
+type UserClaimDraft = { claim_name: string; claim_value: string; required_scope: string; included_groups: string[] };
 
 export function UserEditor({ editingUser, closeUserEditor, onDeleted }: {
   editingUser: AdminUser; closeUserEditor: () => void; onDeleted: (id: string) => void;
 }) {
   const [deletingUserId, setDeletingUserId] = useState("");
   const [userClaimDrafts, setUserClaimDrafts] = useState<UserClaimDraft[]>([]);
+  const [userGroups, setUserGroups] = useState<Group[]>([]);
   const [userClaimsLoading, setUserClaimsLoading] = useState(true);
   const [userClaimsReady, setUserClaimsReady] = useState(false);
   const [userClaimsBusy, setUserClaimsBusy] = useState(false);
@@ -19,16 +20,21 @@ export function UserEditor({ editingUser, closeUserEditor, onDeleted }: {
   useEffect(() => {
     const user = editingUser;
     let active = true;
-    void api<UserClaim[]>(`/api/admin/users/${encodeURIComponent(user.id)}/claims`).then((claims) => {
+    void Promise.all([
+      api<UserClaim[]>(`/api/admin/users/${encodeURIComponent(user.id)}/claims`),
+      api<Group[]>("/api/admin/groups"),
+    ]).then(([claims, groups]) => {
       if (!active) return;
+      setUserGroups(groups);
       setUserClaimDrafts(claims.map((claim) => ({
         claim_name: claim.claim_name,
         claim_value: JSON.stringify(claim.claim_value) ?? "null",
         required_scope: claim.required_scope ?? "",
+        included_groups: claim.included_groups ?? [],
       })));
       setUserClaimsReady(true);
     }).catch((loadError) => {
-      if (active) setUserEditorError(errorMessage(loadError, "load user claims"));
+      if (active) setUserEditorError(errorMessage(loadError, "load user claim settings"));
     }).finally(() => {
       if (active) setUserClaimsLoading(false);
     });
@@ -51,9 +57,17 @@ export function UserEditor({ editingUser, closeUserEditor, onDeleted }: {
       setDeletingUserId("");
     }
   }
-  function updateUserClaim(index: number, key: keyof UserClaimDraft, value: string) {
+  function updateUserClaim(index: number, key: "claim_name" | "claim_value" | "required_scope", value: string) {
     setUserClaimDrafts((current) => current.map((claim, claimIndex) =>
       claimIndex === index ? { ...claim, [key]: value } : claim));
+  }
+  function toggleUserClaimGroup(index: number, groupId: string) {
+    setUserClaimDrafts((current) => current.map((claim, claimIndex) => claimIndex !== index ? claim : {
+      ...claim,
+      included_groups: claim.included_groups.includes(groupId)
+        ? claim.included_groups.filter((id) => id !== groupId)
+        : [...claim.included_groups, groupId],
+    }));
   }
   async function saveUserClaims(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -75,6 +89,7 @@ export function UserEditor({ editingUser, closeUserEditor, onDeleted }: {
             claim_name: claim.claim_name.trim(),
             claim_value: claimValue,
             required_scope: claim.required_scope || null,
+            included_groups: claim.included_groups,
           };
         });
       await api(`/api/admin/users/${encodeURIComponent(editingUser.id)}/claims`, {
@@ -107,8 +122,18 @@ export function UserEditor({ editingUser, closeUserEditor, onDeleted }: {
                   <label className="admin-field"><span>JSON value</span><textarea maxLength={4096} rows={2} value={claim.claim_value} onChange={(event) => updateUserClaim(index, "claim_value", event.target.value)} placeholder={'"design"'} required={Boolean(claim.claim_name.trim())} /></label>
                   <label className="admin-field"><span>Required scope</span><select value={claim.required_scope} onChange={(event) => updateUserClaim(index, "required_scope", event.target.value)}><option value="">Always include</option>{["openid", ...AVAILABLE_SCOPES].map((scope) => <option value={scope} key={scope}>{scope}</option>)}</select></label>
                   <button className="claim-remove" type="button" aria-label="Remove user claim" onClick={() => setUserClaimDrafts((current) => current.filter((_, claimIndex) => claimIndex !== index))}><Trash2 aria-hidden="true" /></button>
+                  <fieldset className="user-claim-groups">
+                    <legend>Include only for groups <em>Optional</em></legend>
+                    {userGroups.length === 0 ? <p className="admin-hint">No groups exist. This claim applies to all users.</p> : <>
+                      <p className="admin-hint">Select groups to restrict this claim. Leave all unchecked to include it for every user.</p>
+                      <div className="admin-choice-grid">{userGroups.map((group) => <label className="admin-check admin-check-compact" key={group.id}>
+                        <input type="checkbox" checked={claim.included_groups.includes(group.id)} onChange={() => toggleUserClaimGroup(index, group.id)} />
+                        <span><strong>{group.display_name}</strong><small>{group.name}</small></span>
+                      </label>)}</div>
+                    </>}
+                  </fieldset>
                 </div>)}
-                {!userClaimsLoading && <button className="add-claim" type="button" onClick={() => setUserClaimDrafts((current) => [...current, { claim_name: "", claim_value: "", required_scope: "" }])}><Plus aria-hidden="true" /> Add custom claim</button>}
+                {!userClaimsLoading && <button className="add-claim" type="button" onClick={() => setUserClaimDrafts((current) => [...current, { claim_name: "", claim_value: "", required_scope: "", included_groups: [] }])}><Plus aria-hidden="true" /> Add custom claim</button>}
               </fieldset>
               {userEditorError && <p className="admin-message admin-message-error" role="alert">{userEditorError}</p>}
               {userEditorMessage && <p className="admin-message" role="status">{userEditorMessage}</p>}

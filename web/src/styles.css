@@ -981,6 +981,11 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .user-editor-form { max-width: none; }
 .user-claim-editor { align-items: start; }
 .user-claim-editor .claim-remove { align-self: center; margin-bottom: 0; transform: translateY(4px); }
+.user-claim-groups { grid-column: 1 / -1; display: grid; gap: 9px; min-width: 0; margin: 0; padding: 10px 0 0; border: 0; border-top: 1px solid var(--rule); }
+.user-claim-groups legend { padding: 0 8px 0 0; color: var(--ink); font-size: 14px; font-weight: 570; }
+.user-claim-groups .admin-choice-grid { gap: 8px 14px; }
+.user-claim-groups .admin-check strong,
+.user-claim-groups .admin-check small { font-size: 13px; }
 .user-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 20px; margin: 0; }
 .user-detail-grid > div { min-width: 0; }
 .user-detail-grid dt { margin-bottom: 3px; color: var(--ink-muted); font-size: 12px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
