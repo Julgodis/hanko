@@ -78,7 +78,7 @@ cd web && npm ci && npm run build && cd ..
 cargo build --release --locked
 ```
 
-Build a local container from the repository root with `docker build -t hanko:local .`. The image listens on port `38013` and stores SQLite data under `/data`; mount persistent storage there. The default UI path is `/`. For a path prefix, pass `--build-arg VITE_BASE_PATH=/hanko/` to `docker build`.
+Build a local container from the repository root with `docker build --build-arg HANKO_GIT_COMMIT="$(git rev-parse HEAD)" --build-arg HANKO_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" -t hanko:local .`. The image listens on port `38013` and stores SQLite data under `/data`; mount persistent storage there. The default UI path is `/`. For a path prefix, pass `--build-arg VITE_BASE_PATH=/hanko/` to `docker build`.
 
 You can run an older application build against a database that a newer build has migrated when the newer migrations remain backward-compatible with that application. Startup ignores migration records newer than the build's bundled migrations; it still rejects missing migrations within the bundled version range and changed checksums. Migrations are not rolled back, so use a copy of the database when testing an older build and restore the newer build afterward.
 

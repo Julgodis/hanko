@@ -593,6 +593,14 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .account-oidc-profile { width: 100%; max-width: none; margin: 34px 0 0; padding-top: 24px; border-top: 1px solid var(--rule); }
 .account-oidc-profile h2 { margin: 0 0 5px; color: var(--ink); font-family: "Iowan Old Style", Georgia, serif; font-size: 21px; font-weight: 400; }
 .account-oidc-profile > div:first-child { display: grid; gap: 3px; }
+.account-server-version { display: grid; gap: 15px; margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--rule); }
+.account-server-version-heading { display: grid; gap: 3px; }
+.account-server-version h2 { margin: 0; color: var(--ink); font-family: "Iowan Old Style", Georgia, serif; font-size: 19px; font-weight: 400; }
+.account-server-version dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.account-server-version dl > div { min-width: 0; }
+.account-server-version dt { color: var(--ink-muted); font-size: 12px; }
+.account-server-version dd { overflow-wrap: anywhere; margin: 4px 0 0; color: var(--ink); font-size: 14px; }
+.account-server-version code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 
 .passkey-feedback { margin: 10px 0 0; font-size: 14px; line-height: 1.5; }
 .passkey-feedback-success { color: var(--success); }
@@ -1095,6 +1103,7 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
   .consent-actions .primary-action, .consent-actions .secondary-action { width: 100%; min-height: 54px; }
   .admin-scene { padding-inline: 20px; }
   .admin-heading { margin-bottom: 28px; }
+  .account-server-version dl { grid-template-columns: 1fr; gap: 9px; }
   .admin-choice-grid { grid-template-columns: 1fr; }
   .user-detail-grid { grid-template-columns: 1fr; }
   .invitation-settings { grid-template-columns: 1fr; }
