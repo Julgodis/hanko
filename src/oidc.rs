@@ -1110,7 +1110,7 @@ async fn exchange_authorization_code(
     code_verifier: Option<&str>,
 ) -> Result<TokenResponse, OAuthError> {
     let code_hash = digest(code_value);
-    let preview = sqlx::query("SELECT code_challenge, redirect_uri, scopes, user_id FROM authorization_codes WHERE code_hash = ? AND client_id = ? AND consumed_at IS NULL AND expires_at > ?")
+    let preview = sqlx::query("SELECT code_challenge, redirect_uri, scopes, user_id, nonce, auth_time FROM authorization_codes WHERE code_hash = ? AND client_id = ? AND consumed_at IS NULL AND expires_at > ?")
         .bind(&code_hash)
         .bind(client_id)
         .bind(unix_now())
@@ -1130,6 +1130,12 @@ async fn exchange_authorization_code(
     let preview_user_id: String = preview
         .try_get("user_id")
         .map_err(|_| OAuthError::server_error())?;
+    let preview_nonce: String = preview
+        .try_get("nonce")
+        .map_err(|_| OAuthError::server_error())?;
+    let auth_time: i64 = preview
+        .try_get("auth_time")
+        .map_err(|_| OAuthError::server_error())?;
     let pkce_valid = match (expected_challenge.as_deref(), code_verifier) {
         (Some(challenge), Some(verifier)) => {
             valid_pkce_verifier(verifier)
@@ -1148,50 +1154,15 @@ async fn exchange_authorization_code(
         return Err(OAuthError::invalid_grant());
     }
 
-    let now = unix_now();
-    let mut transaction = state
-        .database
-        .pool
-        .begin()
-        .await
-        .map_err(|_| OAuthError::server_error())?;
-    let code = sqlx::query("UPDATE authorization_codes SET consumed_at = ? WHERE code_hash = ? AND client_id = ? AND redirect_uri = ? AND consumed_at IS NULL AND expires_at > ? RETURNING user_id, nonce, scopes, auth_time")
-        .bind(now)
-        .bind(code_hash)
-        .bind(client_id)
-        .bind(requested_redirect_uri)
-        .bind(now)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(|_| OAuthError::server_error())?
-        .ok_or_else(OAuthError::invalid_grant)?;
-    let user_id: String = code
-        .try_get("user_id")
-        .map_err(|_| OAuthError::server_error())?;
-    let nonce: String = code
-        .try_get("nonce")
-        .map_err(|_| OAuthError::server_error())?;
-    let auth_time: i64 = code
-        .try_get("auth_time")
-        .map_err(|_| OAuthError::server_error())?;
-    let code_scopes: String = code
-        .try_get("scopes")
-        .map_err(|_| OAuthError::server_error())?;
-    let consumed_scopes: Vec<String> =
-        serde_json::from_str(&code_scopes).map_err(|_| OAuthError::server_error())?;
-    transaction
-        .commit()
-        .await
-        .map_err(|_| OAuthError::server_error())?;
-
-    issue_tokens(
+    issue_tokens_for_authorization_code(
         state,
         client_id,
-        &user_id,
-        &consumed_scopes,
+        &preview_user_id,
+        &scopes,
         auth_time,
-        (!nonce.is_empty()).then_some(nonce.as_str()),
-        None,
+        (!preview_nonce.is_empty()).then_some(preview_nonce.as_str()),
+        &code_hash,
+        requested_redirect_uri,
     )
     .await
 }
@@ -1301,6 +1272,52 @@ async fn issue_tokens(
     auth_time: i64,
     nonce: Option<&str>,
     rotate_refresh_hash: Option<Vec<u8>>,
+) -> Result<TokenResponse, OAuthError> {
+    issue_tokens_internal(
+        state,
+        client_id,
+        user_id,
+        scopes,
+        auth_time,
+        nonce,
+        rotate_refresh_hash,
+        None,
+    )
+    .await
+}
+
+async fn issue_tokens_for_authorization_code(
+    state: &AppState,
+    client_id: &str,
+    user_id: &str,
+    scopes: &[String],
+    auth_time: i64,
+    nonce: Option<&str>,
+    code_hash: &[u8],
+    redirect_uri: &str,
+) -> Result<TokenResponse, OAuthError> {
+    issue_tokens_internal(
+        state,
+        client_id,
+        user_id,
+        scopes,
+        auth_time,
+        nonce,
+        None,
+        Some((code_hash, redirect_uri)),
+    )
+    .await
+}
+
+async fn issue_tokens_internal(
+    state: &AppState,
+    client_id: &str,
+    user_id: &str,
+    scopes: &[String],
+    auth_time: i64,
+    nonce: Option<&str>,
+    rotate_refresh_hash: Option<Vec<u8>>,
+    authorization_code: Option<(&[u8], &str)>,
 ) -> Result<TokenResponse, OAuthError> {
     let now = unix_now();
 
@@ -1445,6 +1462,43 @@ async fn issue_tokens(
         .begin()
         .await
         .map_err(|_| OAuthError::server_error())?;
+    if let Some((code_hash, redirect_uri)) = authorization_code {
+        // Consume the code in the same SQLite write transaction that creates
+        // its initial refresh family. Consent revocation either deletes the
+        // code first, or waits for this transaction and then revokes the new
+        // family; it cannot commit in the gap between those operations.
+        let code = sqlx::query("UPDATE authorization_codes SET consumed_at = ? WHERE code_hash = ? AND client_id = ? AND redirect_uri = ? AND consumed_at IS NULL AND expires_at > ? RETURNING user_id, nonce, scopes, auth_time")
+            .bind(now)
+            .bind(code_hash)
+            .bind(client_id)
+            .bind(redirect_uri)
+            .bind(now)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| OAuthError::server_error())?
+            .ok_or_else(OAuthError::invalid_grant)?;
+        let code_user_id: String = code
+            .try_get("user_id")
+            .map_err(|_| OAuthError::server_error())?;
+        let code_nonce: String = code
+            .try_get("nonce")
+            .map_err(|_| OAuthError::server_error())?;
+        let code_auth_time: i64 = code
+            .try_get("auth_time")
+            .map_err(|_| OAuthError::server_error())?;
+        let code_scopes: String = code
+            .try_get("scopes")
+            .map_err(|_| OAuthError::server_error())?;
+        let code_scopes: Vec<String> =
+            serde_json::from_str(&code_scopes).map_err(|_| OAuthError::server_error())?;
+        if code_user_id != user_id
+            || code_scopes.as_slice() != scopes
+            || code_auth_time != auth_time
+            || code_nonce.as_str() != nonce.unwrap_or("")
+        {
+            return Err(OAuthError::invalid_grant());
+        }
+    }
     let refresh_family_id = if let Some(refresh_hash) = rotate_refresh_hash {
         // Make this the transaction's first statement: SQLite serializes writers
         // here, so replay checks cannot race a successor insertion.
@@ -2892,6 +2946,61 @@ mod tests {
             .to_string())
     }
 
+    async fn insert_offline_authorization_code(
+        state: &AppState,
+        user_id: &str,
+        client_id: &str,
+    ) -> (String, String) {
+        sqlx::query(
+            "INSERT OR IGNORE INTO client_scopes (client_id, scope) VALUES (?, 'offline_access')",
+        )
+        .bind(client_id)
+        .execute(&state.database.pool)
+        .await
+        .unwrap();
+        let code_value = crate::security::random_secret();
+        let verifier = "a".repeat(43);
+        let now = unix_now();
+        sqlx::query("INSERT INTO authorization_codes (code_hash, client_id, user_id, redirect_uri, scopes, nonce, code_challenge, created_at, expires_at, auth_time) VALUES (?, ?, ?, 'https://client.example/callback?from=provider', '[\"openid\",\"offline_access\"]', '', ?, ?, ?, ?)")
+            .bind(digest(&code_value))
+            .bind(client_id)
+            .bind(user_id)
+            .bind(s256_challenge(&verifier))
+            .bind(now)
+            .bind(now + CODE_SECONDS)
+            .bind(now)
+            .execute(&state.database.pool)
+            .await
+            .unwrap();
+        (code_value, verifier)
+    }
+
+    async fn revoke_test_consent(state: &AppState, user_id: &str, client_id: &str) {
+        let session = create_session(&state.database, user_id, false, unix_now())
+            .await
+            .unwrap();
+        let response = http_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/account/consents/{client_id}"))
+                    .header(header::ORIGIN, "http://localhost:3000")
+                    .header(
+                        header::COOKIE,
+                        format!(
+                            "hanko_session={}; hanko_csrf={}",
+                            session.raw_token, session.raw_csrf
+                        ),
+                    )
+                    .header("x-csrf-token", &session.raw_csrf)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
     fn test_token_request(
         client_id: &str,
         code: &str,
@@ -3355,6 +3464,78 @@ mod tests {
                 .error,
             "invalid_grant"
         );
+    }
+
+    #[tokio::test]
+    async fn authorization_code_exchange_and_consent_revocation_are_serialized() {
+        let (state, user_id, client_id) = oidc_test_state().await;
+        let redirect_uri = "https://client.example/callback?from=provider";
+        let (code, verifier) =
+            insert_offline_authorization_code(&state, &user_id, &client_id).await;
+
+        let issued = exchange_authorization_code(
+            &state,
+            &client_id,
+            "required",
+            &code,
+            redirect_uri,
+            Some(&verifier),
+        )
+        .await
+        .unwrap();
+        let refresh_token = issued.refresh_token.unwrap();
+
+        // If issuance commits first, revocation must include the family it
+        // created and make the returned refresh token unusable.
+        revoke_test_consent(&state, &user_id, &client_id).await;
+        assert_eq!(
+            exchange_refresh_token(&state, &client_id, &refresh_token)
+                .await
+                .err()
+                .unwrap()
+                .error,
+            "invalid_grant"
+        );
+        let active_families: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM refresh_token_families WHERE user_id = ? AND client_id = ? AND revoked_at IS NULL",
+        )
+        .bind(&user_id)
+        .bind(&client_id)
+        .fetch_one(&state.database.pool)
+        .await
+        .unwrap();
+        assert_eq!(active_families, 0);
+
+        let (state, user_id, client_id) = oidc_test_state().await;
+        let (code, verifier) =
+            insert_offline_authorization_code(&state, &user_id, &client_id).await;
+        // If revocation commits first, it deletes the unexchanged code, so
+        // issuance cannot create a family from that stale authorization.
+        revoke_test_consent(&state, &user_id, &client_id).await;
+        assert_eq!(
+            exchange_authorization_code(
+                &state,
+                &client_id,
+                "required",
+                &code,
+                redirect_uri,
+                Some(&verifier),
+            )
+            .await
+            .err()
+            .unwrap()
+            .error,
+            "invalid_grant"
+        );
+        let families: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM refresh_token_families WHERE user_id = ? AND client_id = ?",
+        )
+        .bind(&user_id)
+        .bind(&client_id)
+        .fetch_one(&state.database.pool)
+        .await
+        .unwrap();
+        assert_eq!(families, 0);
     }
 
     #[tokio::test]
