@@ -108,7 +108,7 @@ function invitationStatus(invitation: Invitation) {
   return "Active";
 }
 
-export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = "", requiredUserClaims = [] }: { isAdmin?: boolean; defaultTab?: Tab; accountName?: string; requiredUserClaims?: string[] }) {
+export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = "", requiredUserClaims = [], session }: { isAdmin?: boolean; defaultTab?: Tab; accountName?: string; requiredUserClaims?: string[]; session: Session }) {
   const location = useLocation();
   const navigate = useNavigate();
   const route = parseAdminRoute(location.pathname);
@@ -134,7 +134,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [users, setUsers] = useState<AdminUser[]>([]);
   const editingUser = users.find(user => user.id === route.userId) ?? null;
   const [signingKeys, setSigningKeys] = useState<SigningKey[]>([]);
-  const [loading, setLoading] = useState(true);
   const [tabLoading, setTabLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [sessionsRevoked, setSessionsRevoked] = useState(false);
@@ -155,7 +154,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [passkeyError, setPasskeyError] = useState("");
   const [passkeyMessage, setPasskeyMessage] = useState("");
   const [passkeys, setPasskeys] = useState<AccountPasskey[]>([]);
-  const [allowMultiplePasskeysPerAuthenticator, setAllowMultiplePasskeysPerAuthenticator] = useState(true);
+  const allowMultiplePasskeysPerAuthenticator = session.allow_multiple_passkeys_per_authenticator ?? true;
   const [consents, setConsents] = useState<ConsentGrant[]>([]);
   const [consentsLoading, setConsentsLoading] = useState(false);
   const [consentActionId, setConsentActionId] = useState("");
@@ -166,11 +165,16 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [passkeyActionId, setPasskeyActionId] = useState("");
   const [removeTarget, setRemoveTarget] = useState<AccountPasskey | null>(null);
   const [removalConfirmation, setRemovalConfirmation] = useState("");
-  const [hankoColor, setHankoColor] = useState(ORIGINAL_HANKO_GRADIENT);
-  const [hankoSeed, setHankoSeed] = useState("hanko");
+  const [hankoColor, setHankoColor] = useState(() => session.hanko_color ? (session.hanko_color === "#d64135" ? ORIGINAL_HANKO_GRADIENT : session.hanko_color) : ORIGINAL_HANKO_GRADIENT);
+  const [hankoSeed, setHankoSeed] = useState(() => session.hanko_seed ?? "hanko");
   const [savingHanko, setSavingHanko] = useState(false);
   const [hankoMessage, setHankoMessage] = useState("");
-  const [profileDraft, setProfileDraft] = useState(() => createProfileDraft());
+  const [profileDraft, setProfileDraft] = useState(() => createProfileDraft({
+    username: session.oidc_username ?? "", displayName: session.oidc_name ?? "",
+    pictureUrl: session.oidc_picture ?? "", phoneNumber: session.oidc_phone ?? "",
+    address: session.oidc_address ?? undefined, profileClaims: session.oidc_profile_claims ?? undefined,
+  }));
+  const profileHydrated = session.authenticated;
   const [savingOidcProfile, setSavingOidcProfile] = useState(false);
   const [oidcProfileMessage, setOidcProfileMessage] = useState("");
   const [invitations, setInvitations] = useState<Invitation[]>([]);
@@ -205,31 +209,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   async function refreshConsents() {
     setConsents(await api<ConsentGrant[]>("/api/account/consents"));
   }
-
-  useEffect(() => {
-    let active = true;
-    async function load() {
-      try {
-        const session = await api<Session>("/api/session");
-        if (active) {
-          if (session.hanko_color) setHankoColor(session.hanko_color === "#d64135" ? ORIGINAL_HANKO_GRADIENT : session.hanko_color);
-          if (session.hanko_seed) setHankoSeed(session.hanko_seed);
-          setProfileDraft(createProfileDraft({
-            username: session.oidc_username ?? "", displayName: session.oidc_name ?? "",
-            pictureUrl: session.oidc_picture ?? "", phoneNumber: session.oidc_phone ?? "",
-            address: session.oidc_address ?? undefined, profileClaims: session.oidc_profile_claims ?? undefined,
-          }));
-          setAllowMultiplePasskeysPerAuthenticator(session.allow_multiple_passkeys_per_authenticator ?? true);
-        }
-      } catch (loadError) {
-        if (active) setLoadError(errorMessage(loadError, "load admin dashboard"));
-      } finally {
-        if (active) setLoading(false);
-      }
-    }
-    void load();
-    return () => { active = false; };
-  }, [isAdmin]);
 
   useEffect(() => {
     let active = true;
@@ -471,6 +450,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
 
   async function saveOidcProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!profileHydrated || savingOidcProfile) return;
     const missing = missingProfileClaims(profileDraft, requiredUserClaims);
     if (missing.length) {
       setOidcProfileMessage(`Complete the required fields: ${missing.join(", ")}.`);
@@ -605,7 +585,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
           <p>{description}</p>
         </header>
         {loadError && <p className="admin-message admin-message-error" role="alert">{loadError}</p>}
-        {loading || tabLoading ? <div className="admin-loading"><HankoSeal size={42} /><p>Loading…</p></div> : <>
+        {tabLoading ? <div className="admin-loading"><HankoSeal size={42} /><p>Loading…</p></div> : <>
           {activeTab === "clients" && isAdmin && clientFormMode === null && <>
     <section className="registered-clients">
       <div className="client-list-heading">
@@ -728,9 +708,11 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             <div className="account-hanko-save"><button className="secondary-action" type="button" onClick={saveHanko} disabled={savingHanko}>{savingHanko ? "Saving…" : "Save your Hanko"}</button>{hankoMessage && <p role="status">{hankoMessage}</p>}</div>
             <form className="client-form account-oidc-profile" onSubmit={saveOidcProfile}>
               <div><h2>OIDC profile</h2><p className="admin-hint">Choose the details shared when apps request the matching scopes.</p></div>
-              <ProfileFields value={profileDraft} onChange={setProfileDraft} requiredUserClaims={requiredUserClaims} />
+              {profileHydrated
+                ? <ProfileFields value={profileDraft} onChange={setProfileDraft} requiredUserClaims={requiredUserClaims} />
+                : <p className="admin-message admin-message-error" role="alert">Your profile could not be loaded. Reload the page before editing it.</p>}
               {oidcProfileMessage && <p className={`admin-message${oidcProfileMessage.includes("saved") ? "" : " admin-message-error"}`} role={oidcProfileMessage.includes("saved") ? "status" : "alert"}>{oidcProfileMessage}</p>}
-              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={savingOidcProfile}>{savingOidcProfile ? "Saving profile…" : "Save OIDC profile"}</button></div>
+              <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={!profileHydrated || savingOidcProfile}>{savingOidcProfile ? "Saving profile…" : "Save OIDC profile"}</button></div>
             </form>
           </section>}
 
@@ -779,7 +761,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             </form>}
           </section>}
         </>}
-        {isAdmin && (groupFormOpen || userClaimsReturnGroup) && (!editingGroupId || groupBeingEdited) && <div hidden={activeTab !== "groups" || loading || tabLoading}>
+        {isAdmin && (groupFormOpen || userClaimsReturnGroup) && (!editingGroupId || groupBeingEdited) && <div hidden={activeTab !== "groups" || tabLoading}>
           <GroupEditor key={editingGroupId || "new"} group={groupBeingEdited} usersRevision={usersRevision} closeGroupForm={closeGroupForm}
             onSaved={async () => { setGroups(await api<Group[]>("/api/admin/groups")); closeGroupForm(); }}
             onMembersSaved={setGroups} openEditUser={openEditUser} />

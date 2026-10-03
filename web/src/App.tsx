@@ -212,7 +212,7 @@ function App() {
     if (clientsRoute && !session.is_admin) {
       return <Scene phase="error"><Seal phase="error" /><Copy title="Administrator access required" text="Sign in with an administrator account to manage OIDC clients." /></Scene>;
     }
-    return <ClientAdmin isAdmin={session.is_admin} defaultTab={clientsRoute ? "clients" : "hanko"} accountName={session.username ?? ""} requiredUserClaims={session.required_user_claims ?? []} />;
+    return <ClientAdmin isAdmin={session.is_admin} defaultTab={clientsRoute ? "clients" : "hanko"} accountName={session.username ?? ""} requiredUserClaims={session.required_user_claims ?? []} session={session} />;
   }
 
   if (requestId && request?.requires_fresh_authentication) {
