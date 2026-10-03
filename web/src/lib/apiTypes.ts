@@ -76,6 +76,7 @@ export type Session = {
   oidc_profile_claims?: OidcProfileClaims | null;
   required_user_claims?: string[];
   allow_multiple_passkeys_per_authenticator?: boolean;
+  server?: { version: string; commit: string; build_date: string } | null;
 };
 
 export type SetupStatus = { initialized: boolean; bootstrap_enabled: boolean };

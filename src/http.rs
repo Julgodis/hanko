@@ -158,6 +158,24 @@ struct SessionResponse {
     setup_only: bool,
     required_user_claims: Vec<String>,
     allow_multiple_passkeys_per_authenticator: bool,
+    server: Option<ServerBuildInfo>,
+}
+
+#[derive(Serialize)]
+struct ServerBuildInfo {
+    version: &'static str,
+    commit: &'static str,
+    build_date: &'static str,
+}
+
+impl ServerBuildInfo {
+    fn current() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            commit: env!("HANKO_GIT_COMMIT"),
+            build_date: env!("HANKO_BUILD_DATE"),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -623,6 +641,7 @@ async fn session_info(
             allow_multiple_passkeys_per_authenticator: state
                 .config
                 .allow_multiple_passkeys_per_authenticator,
+            server: Some(ServerBuildInfo::current()),
         }),
         None => Json(SessionResponse {
             authenticated: false,
@@ -642,6 +661,7 @@ async fn session_info(
             allow_multiple_passkeys_per_authenticator: state
                 .config
                 .allow_multiple_passkeys_per_authenticator,
+            server: None,
         }),
     }
     .into_response();
