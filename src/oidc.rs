@@ -1841,15 +1841,46 @@ async fn validate_authorize_request(
         // omitted method alongside a challenge cannot silently downgrade it.
         _ => false,
     };
-    if !matches!(pkce_policy, "required" | "optional")
-        || (client_type == "public" && pkce_policy != "required")
-        || (pkce_policy == "required" && !pkce_present)
-        || (input.code_challenge.is_some() && !pkce_present)
-        || (input.code_challenge.is_none() && input.code_challenge_method.is_some())
-    {
-        return Err(OAuthError::invalid_request(
-            "public clients require PKCE S256; confidential clients follow their configured PKCE policy",
-        ));
+    if !matches!(pkce_policy, "required" | "optional") {
+        return Err(OAuthError::invalid_request(format!(
+            "client has unsupported PKCE policy {pkce_policy:?}; configured policy must be `required` or `optional`"
+        )));
+    }
+    if client_type == "public" && pkce_policy != "required" {
+        return Err(OAuthError::invalid_request(format!(
+            "public client is configured with PKCE policy `{pkce_policy}`; public clients must use policy `required` and send a valid S256 code challenge"
+        )));
+    }
+    match (
+        input.code_challenge.as_deref(),
+        input.code_challenge_method.as_deref(),
+    ) {
+        (Some(_), None) => {
+            return Err(OAuthError::invalid_request(
+                "code_challenge_method must be `S256` when code_challenge is supplied",
+            ));
+        }
+        (None, Some(method)) => {
+            return Err(OAuthError::invalid_request(format!(
+                "code_challenge_method `{method}` was supplied without code_challenge"
+            )));
+        }
+        (Some(_), Some(method)) if method != "S256" => {
+            return Err(OAuthError::invalid_request(format!(
+                "unsupported code_challenge_method `{method}`; only `S256` is supported"
+            )));
+        }
+        (Some(challenge), Some("S256")) if !valid_s256_challenge(challenge) => {
+            return Err(OAuthError::invalid_request(
+                "code_challenge is not a valid S256 challenge; it must be 43 base64url characters without padding",
+            ));
+        }
+        _ => {}
+    }
+    if pkce_policy == "required" && !pkce_present {
+        return Err(OAuthError::invalid_request(format!(
+            "PKCE is required for this {client_type} client (configured policy `required`); provide code_challenge and code_challenge_method=`S256`"
+        )));
     }
     let scopes = parse_scopes(&input.scope)?;
     ensure_scopes_still_allowed(state, &input.client_id, &scopes).await?;
@@ -1882,6 +1913,9 @@ fn authorization_protocol_error(
         endpoint = "/authorize",
         client_id = %input.client_id,
         redirect_uri = %input.redirect_uri,
+        scope = %input.scope,
+        code_challenge_present = input.code_challenge.is_some(),
+        code_challenge_method = input.code_challenge_method.as_deref().unwrap_or("omitted"),
         error_code = error,
         reason = reason,
         "OIDC authorization could not continue"
@@ -1889,6 +1923,8 @@ fn authorization_protocol_error(
     let mut url = Url::parse(&input.redirect_uri)
         .map_err(|_| OAuthError::invalid_request("redirect_uri is invalid"))?;
     url.query_pairs_mut().append_pair("error", error);
+    url.query_pairs_mut()
+        .append_pair("error_description", reason);
     if input.state_parameter_present {
         url.query_pairs_mut().append_pair("state", &input.state);
     }
@@ -1954,13 +1990,18 @@ async fn ensure_scopes_still_allowed(
     requested: &[String],
 ) -> Result<(), OAuthError> {
     let allowed = parse_scopes_from_client(state, client_id).await?;
-    if requested
+    let disallowed: Vec<&str> = requested
         .iter()
-        .all(|scope| allowed.iter().any(|candidate| candidate == scope))
-    {
+        .filter(|scope| !allowed.iter().any(|candidate| candidate == *scope))
+        .map(String::as_str)
+        .collect();
+    if disallowed.is_empty() {
         Ok(())
     } else {
-        Err(OAuthError::invalid_scope("requested scope is not allowed"))
+        Err(OAuthError::invalid_scope(format!(
+            "requested scope values are not allowed for this client: {}",
+            quoted_values(&disallowed)
+        )))
     }
 }
 
@@ -1996,26 +2037,46 @@ fn parse_scopes(scope: &str) -> Result<Vec<String>, OAuthError> {
         .filter(|scope| !crate::scopes::supported(scope))
         .map(String::as_str)
         .collect();
-    if scopes.is_empty() || missing_openid || !unsupported.is_empty() {
+    let mut seen = std::collections::HashSet::new();
+    let mut duplicates = Vec::new();
+    for scope in &scopes {
+        if !seen.insert(scope.as_str()) && !duplicates.contains(&scope.as_str()) {
+            duplicates.push(scope.as_str());
+        }
+    }
+    if scopes.is_empty() || missing_openid || !unsupported.is_empty() || !duplicates.is_empty() {
         let mut reasons = Vec::new();
-        if missing_openid {
+        if scopes.is_empty() {
+            reasons.push("scope parameter must contain at least one value".to_owned());
+        } else if missing_openid {
             reasons.push("missing required scope \"openid\"".to_owned());
         }
-        if unsupported.is_empty() {
-            reasons.push("unsupported scopes: none".to_owned());
-        } else {
-            reasons.push(format!("unsupported scopes: {}", unsupported.join(", ")));
+        if !unsupported.is_empty() {
+            reasons.push(format!(
+                "unsupported scopes: {}",
+                quoted_values(&unsupported)
+            ));
+        }
+        if !duplicates.is_empty() {
+            reasons.push(format!(
+                "duplicate scope values: {}",
+                quoted_values(&duplicates)
+            ));
         }
         return Err(OAuthError::invalid_scope(format!(
             "requested scope \"{scope}\" is invalid: {}",
             reasons.join("; ")
         )));
     }
-    let unique: std::collections::HashSet<_> = scopes.iter().collect();
-    if unique.len() != scopes.len() {
-        return Err(OAuthError::invalid_scope("scope values must be unique"));
-    }
     Ok(scopes)
+}
+
+fn quoted_values(values: &[&str]) -> String {
+    values
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 async fn user_allowed_for_client(
