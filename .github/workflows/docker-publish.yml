@@ -8,6 +8,7 @@ on:
     tags:
       - "v*"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
       - master
@@ -22,7 +23,7 @@ concurrency:
 jobs:
   quick-rust-checks:
     name: Quick Rust checks
-    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -42,7 +43,7 @@ jobs:
 
   quick-web-checks:
     name: Quick web checks
-    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -69,6 +70,7 @@ jobs:
 
   browser-checks:
     name: User flow and API regressions
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
