@@ -114,7 +114,25 @@ function App() {
           api<Session>("/api/session"),
           api<SetupStatus>("/api/setup-status"),
         ]);
-        const setupStage = !setup.initialized || identity.setup_only || Boolean(enrollmentToken);
+        let activeEnrollment = Boolean(enrollmentToken);
+        if (enrollmentToken && identity.authenticated && !identity.setup_only) {
+          try {
+            const invitation = await api<{ valid: boolean; in_progress: boolean }>("/api/invitations/validate", {
+              method: "POST",
+              body: json({ token: enrollmentToken }),
+            });
+            if (!invitation.valid && !invitation.in_progress) {
+              activeEnrollment = false;
+              const cleanUrl = new URL(window.location.href);
+              cleanUrl.searchParams.delete("enroll");
+              window.history.replaceState(null, "", cleanUrl);
+              if (active) setEnrollmentToken(null);
+            }
+          } catch (cause) {
+            logUiIssue("recover completed invitation", cause);
+          }
+        }
+        const setupStage = !setup.initialized || identity.setup_only || activeEnrollment;
         if (active) {
           setSession(identity);
           setSetupStatus(setup);
@@ -150,6 +168,13 @@ function App() {
     if (requestId) setRequest(authorizationRequest);
   }
 
+  function retireEnrollmentUrl() {
+    const cleanUrl = new URL(window.location.href);
+    if (!cleanUrl.searchParams.has("enroll")) return;
+    cleanUrl.searchParams.delete("enroll");
+    window.history.replaceState(null, "", cleanUrl);
+  }
+
   async function completeSetup() {
     const [identity, setup, authorizationRequest] = await Promise.all([
       api<Session>("/api/session"),
@@ -160,10 +185,8 @@ function App() {
     ]);
     setSession(identity);
     setSetupStatus(setup);
-    // Keep the invitation recoverable across reloads until enrollment succeeds.
-    const cleanUrl = new URL(window.location.href);
-    cleanUrl.searchParams.delete("enroll");
-    window.history.replaceState(null, "", cleanUrl);
+    // Clear any enrollment token from the URL and app state after loading the account.
+    retireEnrollmentUrl();
     setEnrollmentToken(null);
     if (requestId) setRequest(authorizationRequest);
   }
@@ -201,6 +224,7 @@ function App() {
       initialSeed={session?.hanko_seed ?? undefined}
       initialProfile={{ username: session?.oidc_username ?? "", displayName: session?.oidc_name ?? "", pictureUrl: session?.oidc_picture ?? "", phoneNumber: session?.oidc_phone ?? "", address: session?.oidc_address ?? undefined, profileClaims: session?.oidc_profile_claims ?? undefined }}
       requiredUserClaims={session?.required_user_claims ?? []}
+      onRegistrationComplete={retireEnrollmentUrl}
       onComplete={completeSetup}
     />;
   }

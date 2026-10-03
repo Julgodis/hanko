@@ -18,6 +18,7 @@ type Props = {
   initialSeed?: string;
   initialProfile?: InitialProfile;
   requiredUserClaims: string[];
+  onRegistrationComplete: () => void;
   onComplete: () => Promise<void>;
 };
 type Phase = "idle" | "preparing" | "authenticating" | "success" | "error";
@@ -46,7 +47,7 @@ const INK_WASH = <svg className="ink-wash" viewBox="0 0 1440 190" preserveAspect
   <path d="M0 153 C74 143 112 127 167 138 C218 148 242 164 307 150 C361 139 394 121 451 140 C510 160 535 167 594 145 C646 125 683 91 733 111 C784 132 819 151 876 144 C933 137 967 111 1025 128 C1083 145 1127 168 1181 154 C1246 136 1284 121 1338 140 C1382 156 1406 164 1440 151 L1440 190 L0 190 Z" />
 </svg>;
 
-export default function FirstRun({ hasSetupSession, invitationToken, loginAttemptDuringSetup = false, initialColor, initialSeed, initialProfile, requiredUserClaims, onComplete }: Props) {
+export default function FirstRun({ hasSetupSession, invitationToken, loginAttemptDuringSetup = false, initialColor, initialSeed, initialProfile, requiredUserClaims, onRegistrationComplete, onComplete }: Props) {
   const isAdminSetup = !hasSetupSession && !invitationToken;
   const [setupSession, setSetupSession] = useState(hasSetupSession);
   const [pendingInvitation, setPendingInvitation] = useState(invitationToken ?? null);
@@ -62,12 +63,13 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
   const [hankoSeed, setHankoSeed] = useState(initialMark.seed);
   const [phase, setPhase] = useState<Phase>("idle");
   const [busy, setBusy] = useState(false);
+  const [registrationComplete, setRegistrationComplete] = useState(false);
   const [error, setError] = useState("");
   const [invitationStatus, setInvitationStatus] = useState<InvitationStatus>(invitationToken ? "checking" : "none");
   const [invitationCheckAttempt, setInvitationCheckAttempt] = useState(0);
 
   useEffect(() => {
-    if (!invitationToken) return;
+    if (!invitationToken || registrationComplete) return;
     let active = true;
     setInvitationStatus("checking");
     api<{ valid: boolean; in_progress: boolean }>("/api/invitations/validate", {
@@ -87,7 +89,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
       }
     });
     return () => { active = false; };
-  }, [invitationToken, invitationCheckAttempt]);
+  }, [invitationToken, invitationCheckAttempt, registrationComplete]);
 
   const steps: { id: Step; label: string }[] = isAdminSetup
     ? [{ id: "bootstrap", label: "Bootstrap code" }, { id: "profile", label: "OIDC information" }, { id: "hanko", label: "Hanko" }, { id: "passkey", label: "Passkey" }]
@@ -135,10 +137,28 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
   }
 
   async function registerPasskey() {
+    if (busy) return;
+    if (registrationComplete) {
+      setBusy(true);
+      setError("");
+      setPhase("preparing");
+      try {
+        await onComplete();
+      } catch (completionError) {
+        logUiIssue("finish account setup", completionError);
+        setError(`Your passkey is registered, but your account could not be loaded yet. Try again to continue. ${getError(completionError)}`);
+        setPhase("error");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     setError("");
     setBusy(true);
     setPhase("preparing");
     let inviteReserved = Boolean(invitationToken && setupSession);
+    let passkeyRegistered = false;
     try {
       let ready = setupSession;
       if (!ready && pendingInvitation) {
@@ -188,6 +208,9 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
         method: "POST",
         body: json({ ceremony_id: start.ceremony_id, credential, label: defaultPasskeyLabel(new Date()) }),
       });
+      passkeyRegistered = true;
+      setRegistrationComplete(true);
+      onRegistrationComplete();
       setPhase("success");
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       await new Promise((resolve) => window.setTimeout(resolve, reducedMotion ? 120 : 620));
@@ -197,6 +220,10 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
         setStep("profile");
         setError("");
         setPhase("idle");
+      } else if (passkeyRegistered) {
+        logUiIssue("finish account setup", registrationError);
+        setError(`Your passkey is registered, but your account could not be loaded yet. Try again to continue. ${getError(registrationError)}`);
+        setPhase("error");
       } else {
         logUiIssue("complete account setup", registrationError);
         const invitationMayHaveExpired = registrationError instanceof ApiError && (
@@ -240,18 +267,18 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
     title = "Add a passkey";
   }
   if (phase === "preparing") {
-    title = "Preparing your device…";
+    title = registrationComplete ? "Finishing setup…" : "Preparing your device…";
   } else if (phase === "authenticating") {
     title = "Confirm it’s you";
   } else if (phase === "success") {
     title = "Your passkey is ready";
   } else if (phase === "error" && step === "passkey") {
-    title = "Setup couldn’t be completed";
+    title = registrationComplete ? "Your account is ready" : "Setup couldn’t be completed";
   }
 
   const sealState: HankoState = phase === "success" ? "stamping" : phase;
 
-  if (invitationToken && invitationStatus === "invalid") {
+  if (invitationToken && invitationStatus === "invalid" && !registrationComplete) {
     return <main className="auth-scene setup-scene phase-error">
       <div className="paper-grain" aria-hidden="true" />
       {INK_WASH}
@@ -320,10 +347,10 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
 
       {interactive && step === "passkey" && <div className="setup-form">
         {error && <p className="admin-message admin-message-error" role="alert">{error}</p>}
-        <StepActions onBack={() => { setError(""); setStep("hanko"); }} busy={busy} label={phase === "error" ? "Try again" : "Register passkey"} onContinue={registerPasskey} />
+        <StepActions onBack={registrationComplete ? undefined : () => { setError(""); setStep("hanko"); }} busy={busy} label={registrationComplete ? "Continue to account" : phase === "error" ? "Try again" : "Register passkey"} onContinue={registerPasskey} />
       </div>}
 
-      {(phase === "preparing" || phase === "authenticating") && <p className="setup-status">{phase === "preparing" ? "Preparing passkey registration" : "Follow your device prompt"}</p>}
+      {(phase === "preparing" || phase === "authenticating") && <p className="setup-status">{phase === "preparing" ? registrationComplete ? "Loading your account" : "Preparing passkey registration" : "Follow your device prompt"}</p>}
       {phase === "success" && <span className="success-check" aria-label="Passkey registered"><Check aria-hidden="true" /></span>}
     </section>
   </main>;
