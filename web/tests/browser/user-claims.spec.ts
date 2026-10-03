@@ -23,5 +23,5 @@ test("cancelling a slow user load cannot overwrite another user's claims", async
   await completed;
   const saved = page.waitForRequest(request => request.method() === "PUT" && request.url().endsWith("/bob/claims"));
   await page.getByRole("button", { name: "Save custom claims" }).click();
-  expect((await saved).postDataJSON()).toEqual({ claims: [{ claim_name: "department", claim_value: "bob-team", required_scope: null }] });
+  expect((await saved).postDataJSON()).toEqual({ claims: [{ claim_name: "department", claim_value: "bob-team", required_scope: null, included_groups: [] }] });
 });

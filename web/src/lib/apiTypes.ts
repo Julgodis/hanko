@@ -27,7 +27,7 @@ export type Group = { id: string; name: string; display_name: string; member_cou
 
 export type AdminUser = { id: string; username: string; display_name: string; email: string | null; invitation_label: string | null; is_admin: boolean; disabled: boolean; created_at: number; groups: string[] };
 
-export type UserClaim = { claim_name: string; claim_value: unknown; required_scope: string | null };
+export type UserClaim = { claim_name: string; claim_value: unknown; required_scope: string | null; included_groups: string[] };
 
 export type Invitation = { id: string; label: string; email: string | null; max_uses: number; use_count: number; created_at: number; expires_at: number; revoked: boolean };
 
