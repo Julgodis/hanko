@@ -65,8 +65,10 @@ pub enum WebauthnError {
     User,
     #[error("passkey authentication failed")]
     Authentication,
-    #[error("the authenticator did not create a discoverable passkey")]
-    NonDiscoverable,
+    #[error("the authenticator reported a non-discoverable passkey")]
+    NonDiscoverable { cred_props_present: bool },
+    #[error("the authenticator did not report whether the passkey is discoverable")]
+    DiscoverabilityUnreported { cred_props_present: bool },
     #[error("WebAuthn protocol validation failed")]
     Protocol,
     #[error("invalid WebAuthn configuration")]
@@ -240,14 +242,20 @@ impl WebauthnService {
             .map_err(|_| WebauthnError::Protocol)?;
         // credProps is a browser-supplied usability signal, not authentication
         // evidence. Fail closed when the browser cannot confirm discoverability.
-        if credential
+        let cred_props_present = credential.extensions.cred_props.is_some();
+        let cred_props_rk = credential
             .extensions
             .cred_props
             .as_ref()
-            .and_then(|props| props.rk)
-            != Some(true)
-        {
-            return Err(WebauthnError::NonDiscoverable);
+            .and_then(|props| props.rk);
+        match cred_props_rk {
+            Some(true) => {}
+            Some(false) => {
+                return Err(WebauthnError::NonDiscoverable { cred_props_present });
+            }
+            None => {
+                return Err(WebauthnError::DiscoverabilityUnreported { cred_props_present });
+            }
         }
         let credential_id = passkey.cred_id().as_ref().to_vec();
         let now = unix_now();
