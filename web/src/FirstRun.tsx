@@ -115,6 +115,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
   const [phase, setPhase] = useState<Phase>("idle");
   const [busy, setBusy] = useState(false);
   const [registrationComplete, setRegistrationComplete] = useState(false);
+  const [passkeyDiscoverable, setPasskeyDiscoverable] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [diagnosticReport, setDiagnosticReport] = useState<PasskeyDiagnosticReport | null>(null);
   const [diagnosticCopyMessage, setDiagnosticCopyMessage] = useState("");
@@ -220,6 +221,7 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
     setError("");
     setDiagnosticReport(null);
     setDiagnosticCopyMessage("");
+    setPasskeyDiscoverable(null);
     setBusy(true);
     setPhase("preparing");
     let inviteReserved = Boolean(invitationToken && setupSession);
@@ -290,14 +292,16 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
       const credential = await credentialPromise;
       browserCredentialResult = credentialDiscoverabilityResult(credential);
       diagnosticStage = "verify_registration";
-      await api("/api/passkeys/register/verify", {
+      const verification = await api<{ discoverable?: boolean | null }>("/api/passkeys/register/verify", {
         method: "POST",
         body: json({ ceremony_id: start.ceremony_id, credential, label: defaultPasskeyLabel(new Date()) }),
       });
       passkeyRegistered = true;
+      setPasskeyDiscoverable(verification.discoverable ?? null);
       setRegistrationComplete(true);
       onRegistrationComplete();
       setPhase("success");
+      if (verification.discoverable === false) return;
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       await new Promise((resolve) => window.setTimeout(resolve, reducedMotion ? 120 : 620));
       diagnosticStage = "finish_account_setup";
@@ -467,6 +471,11 @@ export default function FirstRun({ hasSetupSession, invitationToken, loginAttemp
           </details>
         </section>}
         <StepActions onBack={registrationComplete ? undefined : () => { setError(""); setStep("hanko"); }} busy={busy} label={registrationComplete ? "Continue to account" : phase === "error" ? "Try again" : "Register passkey"} onContinue={registerPasskey} />
+      </div>}
+
+      {registrationComplete && passkeyDiscoverable === false && <div className="setup-form">
+        <p className="admin-message setup-passkey-warning" role="status">This passkey isn’t discoverable. At sign-in, choose “Passkey not listed? Use account name” and enter your account username or email.</p>
+        {phase === "success" && <StepActions busy={busy} label="Continue to account" onContinue={registerPasskey} />}
       </div>}
 
       {(phase === "preparing" || phase === "authenticating") && <p className="setup-status">{phase === "preparing" ? registrationComplete ? "Loading your account" : "Preparing passkey registration" : "Follow your device prompt"}</p>}

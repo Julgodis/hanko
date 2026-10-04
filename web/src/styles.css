@@ -522,6 +522,7 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .phase-authenticating .first-run-seal-stage .hanko-authenticating { animation: setup-seal-pulse 2.4s ease-in-out infinite; }
 .phase-error .first-run-seal-stage .hanko-error { opacity: .58; transform: translateY(-3px) rotate(-2deg); }
 .setup-form { display: grid; gap: 18px; margin: 22px auto 0; text-align: left; }
+.setup-passkey-warning { border-color: color-mix(in srgb, var(--vermilion), transparent 65%); background: color-mix(in srgb, var(--vermilion), transparent 96%); }
 .setup-progress { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px 12px; margin: 24px auto 0; text-align: left; }
 .setup-progress-caption { color: var(--ink-muted); font-size: 13px; font-weight: 550; letter-spacing: .09em; text-transform: uppercase; }
 .setup-progress-count { color: var(--ink-faint); font-size: 14px; font-variant-numeric: tabular-nums; }
@@ -612,6 +613,7 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 
 .passkey-feedback { margin: 10px 0 0; font-size: 14px; line-height: 1.5; }
 .passkey-feedback-success { color: var(--success); }
+.passkey-feedback-warning { color: var(--vermilion-text); }
 .passkey-feedback-error { color: var(--error); }
 .passkey-policy-warning { margin: 12px 0; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--error), transparent 55%); border-radius: 8px; color: var(--ink); background: color-mix(in srgb, var(--error), transparent 96%); font-size: 14px; line-height: 1.5; }
 .passkey-list { margin-top: 0; }

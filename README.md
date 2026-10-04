@@ -52,9 +52,9 @@ Public clients must use PKCE S256. Authorization requests require `openid`, a no
 
 ## Passkey sign-in and access recovery
 
-New passkeys must be discoverable. Hanko requests a resident key and confirms the browser reports `credProps.rk=true` before storing it. If your provider cannot confirm this, registration stops with an error; remove any passkey it saved during the failed attempt before trying again.
+Hanko prefers discoverable passkeys. If an account has an assigned username or email, registration can also save a non-discoverable passkey; at sign-in, choose **Passkey not listed? Use account name** and enter that username or email. If an account has neither, Hanko requires a discoverable passkey and rejects an explicit `credProps.rk=false` result. The browser may omit `credProps.rk`; because that signal is optional, its absence alone does not stop registration.
 
-For a passkey registered by an older Hanko version that does not appear in the normal chooser, select **Passkey not listed? Use account name** on the sign-in page. Enter the account name saved with that passkey, or the account's email if one was assigned. This sends a credential allow-list for that account so a non-discoverable key can be used. Once signed in, add a new discoverable passkey and verify that it works in a separate browser session before removing the old one. An internal account name may begin with `user-`; an administrator with access to the database can find it in the `users.username` column. Do not share a passkey export or private key to troubleshoot this.
+For any non-discoverable passkey, including one registered by an older Hanko version, select **Passkey not listed? Use account name** on the sign-in page. Enter the account's assigned username or email. This sends a credential allow-list for that account so the key can be used. Do not share a passkey export or private key to troubleshoot this.
 
 There are currently no independent recovery codes or administrator reset flow. Keep at least two independently stored passkeys and a tested backup of the database and master key. If every passkey becomes unusable and no session remains, restoring a backup alone will not make those passkeys usable.
 

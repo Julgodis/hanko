@@ -1407,7 +1407,7 @@ async fn register_verify(
             "complete required profile fields before registering a passkey",
         ));
     }
-    if let Err(error) = state
+    let discoverable = match state
         .webauthn
         .finish_registration(
             &input.ceremony_id,
@@ -1418,49 +1418,46 @@ async fn register_verify(
         )
         .await
     {
-        let diagnostic_id = Uuid::new_v4().to_string();
-        let (failure_kind, cred_props_present, cred_props_rk) = match &error {
-            crate::webauthn::WebauthnError::NonDiscoverable { cred_props_present } => (
-                "credential_not_discoverable",
-                Some(*cred_props_present),
-                Some(false),
-            ),
-            crate::webauthn::WebauthnError::DiscoverabilityUnreported { cred_props_present } => (
-                "discoverability_unreported",
-                Some(*cred_props_present),
-                None,
-            ),
-            _ => ("registration_failed", None, None),
-        };
-        tracing::warn!(
-            %diagnostic_id,
-            %error,
-            user_id = %session.user_id,
-            failure_kind,
-            cred_props_present = ?cred_props_present,
-            cred_props_rk = ?cred_props_rk,
-            "passkey registration failed"
-        );
-        let message = match error {
-            crate::webauthn::WebauthnError::NonDiscoverable { .. } => {
-                "passkey was not saved as discoverable; choose another passkey provider"
-            }
-            crate::webauthn::WebauthnError::DiscoverabilityUnreported { .. } => {
-                "passkey provider did not report discoverability; choose another passkey provider"
-            }
-            _ => "passkey registration failed",
-        };
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(DiagnosticErrorBody {
-                error: message,
-                diagnostic_id,
-            }),
-        )
-            .into_response());
-    }
+        Ok(discoverable) => discoverable,
+        Err(error) => {
+            let diagnostic_id = Uuid::new_v4().to_string();
+            let (failure_kind, cred_props_present, cred_props_rk) = match &error {
+                crate::webauthn::WebauthnError::AccountIdentifierRequired {
+                    cred_props_present,
+                } => (
+                    "account_identifier_required",
+                    Some(*cred_props_present),
+                    Some(false),
+                ),
+                _ => ("registration_failed", None, None),
+            };
+            tracing::warn!(
+                %diagnostic_id,
+                %error,
+                user_id = %session.user_id,
+                failure_kind,
+                cred_props_present = ?cred_props_present,
+                cred_props_rk = ?cred_props_rk,
+                "passkey registration failed"
+            );
+            let message = match error {
+                crate::webauthn::WebauthnError::AccountIdentifierRequired { .. } => {
+                    "your device created a non-discoverable passkey, which needs an assigned username or email for sign-in; go back, assign a username, then try again"
+                }
+                _ => "passkey registration failed",
+            };
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(DiagnosticErrorBody {
+                    error: message,
+                    diagnostic_id,
+                }),
+            )
+                .into_response());
+        }
+    };
     // Setup and invitation sessions leave setup mode only after the first passkey commits.
-    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+    Ok(Json(serde_json::json!({ "ok": true, "discoverable": discoverable })).into_response())
 }
 
 async fn required_profile_is_complete(state: &AppState, user_id: &str) -> Result<bool, ApiError> {

@@ -29,6 +29,20 @@ fn credential_options(value: Value) -> Result<Value, WebauthnError> {
         .ok_or(WebauthnError::Protocol)
 }
 
+fn has_user_assigned_account_identifier(username: &str, email: Option<&str>) -> bool {
+    email.is_some_and(|email| !email.trim().is_empty()) || !is_generated_username(username)
+}
+
+fn is_generated_username(username: &str) -> bool {
+    let Some(suffix) = username.strip_prefix("user-") else {
+        return false;
+    };
+    suffix.len() == 32
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(Clone)]
 pub struct WebauthnService {
     webauthn: Webauthn,
@@ -43,6 +57,8 @@ enum CeremonyState {
         state: PasskeyRegistration,
         approval_hash: Option<Vec<u8>>,
         bootstrap_session: bool,
+        #[serde(default)]
+        allow_non_discoverable: bool,
     },
     Authentication(DiscoverableAuthentication),
     AccountAuthentication(PasskeyAuthentication),
@@ -65,10 +81,8 @@ pub enum WebauthnError {
     User,
     #[error("passkey authentication failed")]
     Authentication,
-    #[error("the authenticator reported a non-discoverable passkey")]
-    NonDiscoverable { cred_props_present: bool },
-    #[error("the authenticator did not report whether the passkey is discoverable")]
-    DiscoverabilityUnreported { cred_props_present: bool },
+    #[error("non-discoverable passkey requires an assigned username or email")]
+    AccountIdentifierRequired { cred_props_present: bool },
     #[error("WebAuthn protocol validation failed")]
     Protocol,
     #[error("invalid WebAuthn configuration")]
@@ -105,6 +119,14 @@ impl WebauthnService {
         approval_token: Option<&str>,
     ) -> Result<(String, Value), WebauthnError> {
         let passkeys = self.load_passkeys(user_id).await?;
+        let user = sqlx::query("SELECT email FROM users WHERE id = ? AND disabled_at IS NULL")
+            .bind(user_id)
+            .fetch_optional(&self.database.pool)
+            .await?
+            .ok_or(WebauthnError::User)?;
+        let email: Option<String> = user.try_get("email")?;
+        let allow_non_discoverable =
+            has_user_assigned_account_identifier(username, email.as_deref());
         let now = unix_now();
         let session_setup_only: Option<bool> = sqlx::query_scalar(
             "SELECT setup_only FROM sessions WHERE session_hash = ? AND user_id = ? AND expires_at > ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL)",
@@ -160,19 +182,27 @@ impl WebauthnService {
             state,
             approval_hash,
             bootstrap_session,
+            allow_non_discoverable,
         };
         let mut options = credential_options(serde_json::to_value(options)?)?;
-        // The high-level passkey registration API discourages resident keys, while
-        // our default sign-in requires one. Require a discoverable credential here.
+        // Prefer discoverable credentials. When the user has a sign-in identifier,
+        // allow providers to create a non-discoverable credential as a fallback.
         let selection = options
             .get_mut("authenticatorSelection")
             .and_then(Value::as_object_mut)
             .ok_or(WebauthnError::Protocol)?;
         selection.insert(
             "residentKey".to_owned(),
-            Value::String("required".to_owned()),
+            Value::String(if allow_non_discoverable {
+                "preferred".to_owned()
+            } else {
+                "required".to_owned()
+            }),
         );
-        selection.insert("requireResidentKey".to_owned(), Value::Bool(true));
+        selection.insert(
+            "requireResidentKey".to_owned(),
+            Value::Bool(!allow_non_discoverable),
+        );
         let ceremony_id = self
             .store_ceremony("registration", Some(user_id), Some(session_hash), &state)
             .await?;
@@ -224,7 +254,7 @@ impl WebauthnService {
         session_hash: &[u8],
         credential: RegisterPublicKeyCredential,
         label: &str,
-    ) -> Result<(), WebauthnError> {
+    ) -> Result<Option<bool>, WebauthnError> {
         let state = self
             .consume_ceremony(ceremony_id, "registration", Some(user_id), session_hash)
             .await?;
@@ -232,6 +262,7 @@ impl WebauthnService {
             state,
             approval_hash,
             bootstrap_session,
+            allow_non_discoverable,
         } = state
         else {
             return Err(WebauthnError::Ceremony);
@@ -240,26 +271,33 @@ impl WebauthnService {
             .webauthn
             .finish_passkey_registration(&credential, &state)
             .map_err(|_| WebauthnError::Protocol)?;
-        // credProps is a browser-supplied usability signal, not authentication
-        // evidence. Fail closed when the browser cannot confirm discoverability.
+        // credProps is optional. Missing rk means unknown; only an explicit false
+        // needs the account-identifier fallback path.
         let cred_props_present = credential.extensions.cred_props.is_some();
         let cred_props_rk = credential
             .extensions
             .cred_props
             .as_ref()
             .and_then(|props| props.rk);
-        match cred_props_rk {
-            Some(true) => {}
-            Some(false) => {
-                return Err(WebauthnError::NonDiscoverable { cred_props_present });
-            }
-            None => {
-                return Err(WebauthnError::DiscoverabilityUnreported { cred_props_present });
-            }
-        }
         let credential_id = passkey.cred_id().as_ref().to_vec();
         let now = unix_now();
         let mut transaction = self.database.pool.begin().await?;
+        if cred_props_rk == Some(false) {
+            let user = sqlx::query(
+                "SELECT username, email FROM users WHERE id = ? AND disabled_at IS NULL",
+            )
+            .bind(user_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(WebauthnError::User)?;
+            let username: String = user.try_get("username")?;
+            let email: Option<String> = user.try_get("email")?;
+            if !allow_non_discoverable
+                || !has_user_assigned_account_identifier(&username, email.as_deref())
+            {
+                return Err(WebauthnError::AccountIdentifierRequired { cred_props_present });
+            }
+        }
         let mut invitation_link_id: Option<String> = None;
         if let Some(approval_hash) = approval_hash {
             let consumed = sqlx::query("UPDATE credential_change_approvals SET consumed_at = ? WHERE approval_hash = ? AND user_id = ? AND session_hash = ? AND action = 'add' AND target_passkey_id IS NULL AND consumed_at IS NULL AND expires_at > ? AND EXISTS (SELECT 1 FROM sessions WHERE session_hash = ? AND user_id = ? AND setup_only = 0 AND expires_at > ?) AND EXISTS (SELECT 1 FROM users WHERE id = ? AND disabled_at IS NULL) RETURNING approval_hash")
@@ -340,7 +378,7 @@ impl WebauthnService {
             }
         }
         transaction.commit().await?;
-        Ok(())
+        Ok(cred_props_rk)
     }
 
     pub async fn start_credential_change(
@@ -951,10 +989,13 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                assert_eq!(options["authenticatorSelection"]["residentKey"], "required");
+                assert_eq!(
+                    options["authenticatorSelection"]["residentKey"],
+                    "preferred"
+                );
                 assert_eq!(
                     options["authenticatorSelection"]["requireResidentKey"],
-                    true
+                    false
                 );
                 assert_eq!(options["extensions"]["credProps"], true);
             }

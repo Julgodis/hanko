@@ -161,6 +161,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
   const [passkeyAddStage, setPasskeyAddStage] = useState<"confirming" | "creating">("confirming");
   const [passkeyError, setPasskeyError] = useState("");
   const [passkeyMessage, setPasskeyMessage] = useState("");
+  const [passkeyMessageWarning, setPasskeyMessageWarning] = useState(false);
   const [passkeys, setPasskeys] = useState<AccountPasskey[]>([]);
   const allowMultiplePasskeysPerAuthenticator = session.allow_multiple_passkeys_per_authenticator ?? true;
   const [consents, setConsents] = useState<ConsentGrant[]>([]);
@@ -350,6 +351,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
     setPasskeyAddStage("confirming");
     setPasskeyError("");
     setPasskeyMessage("");
+    setPasskeyMessageWarning(false);
     try {
       const confirmation = await api<AuthenticationStart>("/api/passkeys/change/options", {
         method: "POST",
@@ -367,12 +369,15 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
       });
       const credentialPromise = startRegistration({ optionsJSON: start.publicKey });
       const credential = await credentialPromise;
-      await api("/api/passkeys/register/verify", {
+      const verification = await api<{ discoverable?: boolean | null }>("/api/passkeys/register/verify", {
         method: "POST",
         body: json({ ceremony_id: start.ceremony_id, credential, label: defaultPasskeyLabel(new Date()) }),
       });
       await refreshPasskeys();
-      setPasskeyMessage("Passkey added to this account.");
+      setPasskeyMessageWarning(verification.discoverable === false);
+      setPasskeyMessage(verification.discoverable === false
+        ? "Passkey added. At sign-in, choose ‘Passkey not listed? Use account name’ and enter your username or email."
+        : "Passkey added to this account.");
     } catch (cause) {
       setPasskeyError(errorMessage(cause, "add passkey"));
     } finally {
@@ -759,7 +764,7 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
               {!allowMultiplePasskeysPerAuthenticator && <p className="passkey-policy-warning" role="status">This Hanko server prevents registering another passkey with an authenticator that already has one for this account. Use a different authenticator, or enable WEBAUTHN_ALLOW_MULTIPLE_PASSKEYS_PER_AUTHENTICATOR and restart Hanko.</p>}
               {accountName && <p className="admin-hint">Sign-in account name: <PrivateValue>{accountName}</PrivateValue>. Save this name in case an older passkey needs account-specific sign-in.</p>}
               {passkeys.length < 2 && !passkeysLoading && <p className="admin-hint">Add a second passkey stored independently, then test signing in with it in a separate browser session.</p>}
-              {passkeyMessage && <p className="passkey-feedback passkey-feedback-success" role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
+              {passkeyMessage && <p className={`passkey-feedback ${passkeyMessageWarning ? "passkey-feedback-warning" : "passkey-feedback-success"}`} role="status">{passkeyMessage}</p>}{passkeyError && <p className="passkey-feedback passkey-feedback-error" role="alert">{passkeyError}</p>}
               {passkeysLoading ? <p className="admin-hint">Loading passkeys…</p> : passkeys.length === 0 ? <p className="admin-hint">No passkeys are registered.</p> : <div className="admin-table-scroll"><table className="admin-table passkey-table">
                 <thead><tr><th scope="col">Device</th><th scope="col">Added</th><th scope="col">Last used</th><th scope="col">Actions</th></tr></thead>
                 <tbody>{passkeys.map((passkey) => <tr key={passkey.id}>
