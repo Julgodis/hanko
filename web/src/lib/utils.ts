@@ -22,7 +22,13 @@ export function csrfToken() {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly code: string, readonly status: number, readonly retryAfterSeconds: number | null = null) {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly status: number,
+    readonly retryAfterSeconds: number | null = null,
+    readonly diagnosticId: string | null = null,
+  ) {
     super(message);
     this.name = "ApiError";
   }
@@ -35,6 +41,7 @@ export function logUiIssue(context: string, cause: unknown) {
         error_code: cause.code || undefined,
         status: cause.status,
         retry_after_seconds: cause.retryAfterSeconds ?? undefined,
+        diagnostic_id: cause.diagnosticId ?? undefined,
       }
     : cause instanceof Error
       ? { error: cause.message, error_type: cause.name }
@@ -61,6 +68,7 @@ export async function api<T = unknown>(path: string, init: RequestInit = {}): Pr
       retryAfterHeader && Number.isFinite(Number(retryAfterHeader))
         ? Math.max(0, Number(retryAfterHeader))
         : null,
+      typeof body.diagnostic_id === "string" ? body.diagnostic_id : null,
     );
   }
   return body as T;
@@ -87,5 +95,8 @@ export function defaultPasskeyLabel(addedAt = new Date()) {
 
 export function errorMessage(error: unknown, context: string) {
   logUiIssue(context, error);
+  if (error instanceof ApiError && error.diagnosticId) {
+    return `${error.message} (Support reference: ${error.diagnosticId})`;
+  }
   return error instanceof Error ? error.message : "The request could not be completed.";
 }

@@ -532,6 +532,14 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .setup-step-actions.has-back { justify-content: space-between; }
 .setup-step-actions .setup-action { width: 100%; margin: 0; }
 .setup-step-actions.has-back .setup-action { flex: 1; width: auto; }
+.setup-diagnostics { display: grid; gap: 9px; padding-top: 14px; border-top: 1px solid var(--rule); }
+.setup-diagnostics > p { margin: 0; color: var(--ink-muted); font-size: 13px; line-height: 1.5; }
+.setup-diagnostics-copy { min-height: 44px; padding: 8px 13px; border: 1px solid var(--rule); border-radius: 7px; color: var(--ink); background: var(--paper-raised); font: inherit; font-size: 14px; cursor: pointer; }
+.setup-diagnostics-copy:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 2px; }
+.setup-diagnostics-status { color: var(--success) !important; }
+.setup-diagnostics details { color: var(--ink-muted); font-size: 13px; }
+.setup-diagnostics summary { min-height: 40px; padding: 10px 0; cursor: pointer; }
+.setup-diagnostics pre { max-height: 240px; overflow: auto; padding: 10px; border: 1px solid var(--rule); border-radius: 6px; color: var(--ink); background: var(--paper-raised); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; white-space: pre-wrap; -webkit-user-select: text; user-select: text; }
 .setup-back { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 7px; min-height: 50px; padding: 0 5px; border: 0; color: var(--ink-muted); background: transparent; font-size: 14px; cursor: pointer; }
 .setup-back svg { width: 16px; height: 16px; }
 .setup-back:hover:not(:disabled) { color: var(--ink); }
