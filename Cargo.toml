@@ -20,7 +20,7 @@ sha2 = "0.11"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite", "migrate", "macros", "uuid", "chrono", "json"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
-tower-http = { version = "0.6", features = ["limit", "trace", "set-header", "fs", "cors"] }
+tower-http = { version = "0.7", features = ["limit", "trace", "set-header", "fs", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = { version = "2", features = ["serde"] }
