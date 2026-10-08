@@ -46,8 +46,8 @@ fn main() {
     let commit = configured_value("HANKO_GIT_COMMIT")
         .or_else(|| command_output("git", &["rev-parse", "--verify", "HEAD"]))
         .unwrap_or_else(|| "unknown".to_owned());
-    let version = configured_value("HANKO_VERSION")
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+    let version =
+        configured_value("HANKO_VERSION").unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
     let build_date = configured_value("HANKO_BUILD_DATE")
         .or_else(|| command_output("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"]))
         .unwrap_or_else(|| "unknown".to_owned());
