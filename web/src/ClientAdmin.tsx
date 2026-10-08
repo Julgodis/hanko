@@ -722,7 +722,9 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
             <form className="client-form account-oidc-profile" onSubmit={saveOidcProfile}>
               <div><h2>OIDC profile</h2><p className="admin-hint">Choose the details shared when apps request the matching scopes.</p></div>
               {profileHydrated
-                ? <ProfileFields value={profileDraft} onChange={setProfileDraft} requiredUserClaims={requiredUserClaims} />
+                ? <fieldset className="account-profile-fieldset" disabled={savingOidcProfile}>
+                    <ProfileFields value={profileDraft} onChange={setProfileDraft} requiredUserClaims={requiredUserClaims} />
+                  </fieldset>
                 : <p className="admin-message admin-message-error" role="alert">Your profile could not be loaded. Reload the page before editing it.</p>}
               {oidcProfileMessage && <p className={`admin-message${oidcProfileMessage.includes("saved") ? "" : " admin-message-error"}`} role={oidcProfileMessage.includes("saved") ? "status" : "alert"}>{oidcProfileMessage}</p>}
               <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={!profileHydrated || savingOidcProfile}>{savingOidcProfile ? "Saving profile…" : "Save OIDC profile"}</button></div>

@@ -602,6 +602,7 @@ html[data-private-info="visible"] .private-value:not([data-private-hidden="true"
 .account-oidc-profile { width: 100%; max-width: none; margin: 34px 0 0; padding-top: 24px; border-top: 1px solid var(--rule); }
 .account-oidc-profile h2 { margin: 0 0 5px; color: var(--ink); font-family: "Iowan Old Style", Georgia, serif; font-size: 21px; font-weight: 400; }
 .account-oidc-profile > div:first-child { display: grid; gap: 3px; }
+.account-profile-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .account-server-version { display: grid; gap: 15px; margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--rule); }
 .account-server-version-heading { display: grid; gap: 3px; }
 .account-server-version h2 { margin: 0; color: var(--ink); font-family: "Iowan Old Style", Georgia, serif; font-size: 19px; font-weight: 400; }
