@@ -587,6 +587,14 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
           </button>
           {logoutError && <p className="admin-message admin-message-error" role="alert">{logoutError}</p>}
         </div>
+        <aside className="admin-nav-build-info" aria-labelledby="server-version-title">
+          <h2 id="server-version-title">Hanko server</h2>
+          <dl>
+            <div><dt>Version</dt><dd>{session.server?.version ?? "Unknown"}</dd></div>
+            <div><dt>Commit</dt><dd><code>{session.server?.commit && session.server.commit !== "unknown" ? session.server.commit.slice(0, 12) : "Unknown"}</code></dd></div>
+            <div><dt>Build date</dt><dd>{formatBuildDate(session.server?.build_date)}</dd></div>
+          </dl>
+        </aside>
       </nav>
 
       <section className="admin-content" aria-labelledby="admin-page-title">
@@ -729,17 +737,6 @@ export default function ClientAdmin({ isAdmin = true, defaultTab, accountName = 
               {oidcProfileMessage && <p className={`admin-message${oidcProfileMessage.includes("saved") ? "" : " admin-message-error"}`} role={oidcProfileMessage.includes("saved") ? "status" : "alert"}>{oidcProfileMessage}</p>}
               <div className="client-form-actions"><button className="primary-action client-submit" type="submit" disabled={!profileHydrated || savingOidcProfile}>{savingOidcProfile ? "Saving profile…" : "Save OIDC profile"}</button></div>
             </form>
-            <section className="account-server-version" aria-labelledby="server-version-title">
-              <div className="account-server-version-heading">
-                <h2 id="server-version-title">Hanko server</h2>
-                <p className="admin-hint">Build currently running on this server.</p>
-              </div>
-              <dl>
-                <div><dt>Version</dt><dd>{session.server?.version ?? "Unknown"}</dd></div>
-                <div><dt>Commit</dt><dd><code>{session.server?.commit && session.server.commit !== "unknown" ? session.server.commit.slice(0, 12) : "Unknown"}</code></dd></div>
-                <div><dt>Build date</dt><dd>{formatBuildDate(session.server?.build_date)}</dd></div>
-              </dl>
-            </section>
           </section>}
 
           {activeTab === "consents" && <section className="account-consents" aria-labelledby="consent-list-title">

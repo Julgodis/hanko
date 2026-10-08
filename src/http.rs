@@ -171,7 +171,7 @@ struct ServerBuildInfo {
 impl ServerBuildInfo {
     fn current() -> Self {
         Self {
-            version: env!("CARGO_PKG_VERSION"),
+            version: env!("HANKO_VERSION"),
             commit: env!("HANKO_GIT_COMMIT"),
             build_date: env!("HANKO_BUILD_DATE"),
         }

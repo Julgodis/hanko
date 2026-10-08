@@ -30,6 +30,7 @@ fn configured_value(name: &str) -> Option<String> {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=HANKO_VERSION");
     println!("cargo:rerun-if-env-changed=HANKO_GIT_COMMIT");
     println!("cargo:rerun-if-env-changed=HANKO_BUILD_DATE");
     for path in ["src", "migrations", "shared"] {
@@ -45,10 +46,13 @@ fn main() {
     let commit = configured_value("HANKO_GIT_COMMIT")
         .or_else(|| command_output("git", &["rev-parse", "--verify", "HEAD"]))
         .unwrap_or_else(|| "unknown".to_owned());
+    let version = configured_value("HANKO_VERSION")
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
     let build_date = configured_value("HANKO_BUILD_DATE")
         .or_else(|| command_output("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"]))
         .unwrap_or_else(|| "unknown".to_owned());
 
+    println!("cargo:rustc-env=HANKO_VERSION={version}");
     println!("cargo:rustc-env=HANKO_GIT_COMMIT={commit}");
     println!("cargo:rustc-env=HANKO_BUILD_DATE={build_date}");
 }
