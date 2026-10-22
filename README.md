@@ -15,7 +15,7 @@ Hanko is a self-hosted identity provider written in Rust, with a React admin and
 
 ## Requirements
 
-- Rust 1.88+ (the release builder uses Rust 1.98.1)
+- Rust 1.88+
 - Node.js 22 and npm
 - HTTPS for deployment; HTTP is allowed on localhost
 
@@ -69,7 +69,7 @@ cargo test --locked
 (cd web && npm ci && npm test && npm run typecheck && npm run build)
 ```
 
-Browser regressions run with `cd web && npx playwright install chromium && npm run test:browser`. The suite starts an isolated in-memory Rust server and Vite on ports 38127 and 5179. It covers editor cancellation, invitation reloads, setup, concurrent sign-in tabs, and cross-origin discovery, PKCE token exchange, and userinfo using a virtual passkey. CI runs these browser checks and the Rust regressions for pull requests and releases.
+Browser regressions run with `cd web && npx playwright install chromium && npm run test:browser`. The suite starts an isolated in-memory Rust server and Vite on ports 38127 and 5179. It covers editor cancellation, invitation reloads, setup, concurrent sign-in tabs, and cross-origin discovery, PKCE token exchange, and userinfo using a virtual passkey. CI runs these browser checks, Rust regressions on stable and the minimum supported version, and the release web artifact upload/download for non-draft pull requests and releases.
 
 For a local release build, build the UI first, then the server:
 
