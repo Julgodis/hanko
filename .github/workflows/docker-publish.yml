@@ -107,7 +107,7 @@ jobs:
 
   release-rust-checks:
     name: Release Rust tests
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     needs: release-web-checks
     runs-on: ubuntu-latest
     steps:
@@ -130,7 +130,7 @@ jobs:
 
   release-web-checks:
     name: Release web checks
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
