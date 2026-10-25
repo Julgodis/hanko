@@ -15,7 +15,7 @@ RUN npm run build
 
 # This stage follows the requested target platform. The publishing workflow
 # builds for the native architecture of its GitHub-hosted runner.
-FROM rust:1.99.0-bookworm AS rust-build
+FROM rust:1.99.1-bookworm AS rust-build
 ARG HANKO_VERSION=
 ARG HANKO_GIT_COMMIT=
 ARG HANKO_BUILD_DATE=
